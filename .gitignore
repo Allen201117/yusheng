@@ -1,0 +1,26 @@
+# 依赖与构建产物
+node_modules/
+.next/
+out/
+dist/
+tsconfig.tsbuildinfo
+
+# 运行时数据（声音样本、SQLite 等不进 git）
+data/
+*.sqlite
+*.sqlite-journal
+
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# 日志
+*.log
+npm-debug.log*
+data/logs/
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
