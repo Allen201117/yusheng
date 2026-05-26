@@ -116,10 +116,9 @@ export function sessionCookieOptions() {
   };
 }
 
-// ---- 判断是否配置了任意登录方式 ----
+// ---- 判断是否需要鉴权 ----
 export function isAuthConfigured(): boolean {
-  // 密码模式或邮箱验证码模式，任一配置即可
-  if (ACCESS_PASSWORD.length > 0) return true;
-  if (process.env.RESEND_API_KEY) return true;
-  return false;
+  // 仅当显式配置了 ACCESS_PASSWORD 时才要求登录
+  // 不设密码 = 免登开放模式（部署默认状态）
+  return ACCESS_PASSWORD.length > 0;
 }
