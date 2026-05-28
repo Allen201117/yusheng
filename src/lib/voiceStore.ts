@@ -85,8 +85,12 @@ export async function listVoices(): Promise<VoiceMeta[]> {
   const metas: VoiceMeta[] = [];
   for (const f of files) {
     if (f.endsWith(".meta.json")) {
-      const raw = await fs.readFile(path.join(VOICES_DIR, f), "utf-8");
-      metas.push(JSON.parse(raw));
+      try {
+        const raw = await fs.readFile(path.join(VOICES_DIR, f), "utf-8");
+        metas.push(JSON.parse(raw));
+      } catch {
+        // 跳过损坏的 meta 文件
+      }
     }
   }
   return metas.sort((a, b) => b.createdAt.localeCompare(a.createdAt));

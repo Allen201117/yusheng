@@ -10,10 +10,10 @@ export const runtime = "nodejs";
  * 跟 upload 路由走完全相同的代码路径：FormData → transcribeAudio。
  */
 export async function POST(req: NextRequest) {
-  const auth = await requireAuth(req);
-  if ("error" in auth) return auth.error;
-
   try {
+    const auth = await requireAuth(req);
+    if ("error" in auth) return auth.error;
+
     const form = await req.formData();
     const file = form.get("audio");
 

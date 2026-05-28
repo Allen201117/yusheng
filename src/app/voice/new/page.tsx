@@ -96,7 +96,8 @@ export default function VoiceNewPage() {
   async function refreshVoices() {
     try {
       const r = await fetch("/api/voice/upload");
-      const j = await r.json();
+      if (!r.ok) return;
+      const j = await r.json().catch(() => ({}));
       setVoices(j.voices || []);
       setSelectedVoiceId((prev) => prev || j.voices?.[0]?.voiceId || "");
     } catch {}
@@ -111,9 +112,9 @@ export default function VoiceNewPage() {
     try {
       const fd = new FormData(); fd.append("audio", audioFile);
       const r = await fetch("/api/voice/transcribe", { method: "POST", body: fd });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.error || "识别失败");
-      setPromptText(j.text || "");
+      const j = await r.json().catch(() => null);
+      if (!r.ok) throw new Error(j?.error || "识别失败");
+      setPromptText(j?.text || "");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally { setTranscribing(false); }
@@ -128,8 +129,8 @@ export default function VoiceNewPage() {
       fd.append("audio", audioFile);
       fd.append("promptText", promptText.trim());
       const r = await fetch("/api/voice/upload", { method: "POST", body: fd });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.error || "上传失败");
+      const j = await r.json().catch(() => null);
+      if (!r.ok) throw new Error(j?.error || "上传失败");
       setAudioFile(null); setPromptText("");
       await refreshVoices();
       setSelectedVoiceId(j.voice.voiceId);
