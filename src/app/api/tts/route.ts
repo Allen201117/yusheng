@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { loadVoice, readAudioBase64 } from "@/lib/voiceStore";
+import { loadVoiceForUser, readAudioBase64ForUser } from "@/lib/voiceStore";
 import { synthesizeWithClonedVoice } from "@/lib/cosyvoice";
-import { getPersona } from "@/lib/db";
+import { getPersonaForUser } from "@/lib/db";
 import { requireAuth } from "@/lib/guard";
 import { checkTtsRateLimit } from "@/lib/rateLimit";
 
@@ -38,18 +38,18 @@ export async function POST(req: NextRequest) {
 
   let voiceId = (body.voiceId || "").trim();
   if (!voiceId && body.personaId) {
-    const p = getPersona(body.personaId.trim());
-    if (!p) return NextResponse.json({ error: "personaId 不存在" }, { status: 404 });
+    const p = getPersonaForUser(body.personaId.trim(), auth.userId);
+    if (!p) return NextResponse.json({ error: "personaId 不存在或不属于你" }, { status: 403 });
     voiceId = p.voiceId;
   }
   if (!voiceId) {
     return NextResponse.json({ error: "缺少 voiceId 或 personaId" }, { status: 400 });
   }
 
-  const meta = await loadVoice(voiceId);
-  if (!meta) return NextResponse.json({ error: "voiceId 不存在" }, { status: 404 });
+  const meta = await loadVoiceForUser(voiceId, auth.userId);
+  if (!meta) return NextResponse.json({ error: "voiceId 不存在或不属于你" }, { status: 404 });
 
-  const refB64 = await readAudioBase64(voiceId);
+  const refB64 = await readAudioBase64ForUser(voiceId, auth.userId);
   if (!refB64) return NextResponse.json({ error: "参考音频读取失败" }, { status: 500 });
 
   const refMime = meta.mimeType || "audio/wav";

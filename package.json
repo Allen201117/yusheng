@@ -7,7 +7,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
+    "lint": "tsc --noEmit --pretty false",
+    "typecheck": "tsc --noEmit --pretty false",
     "test": "node --import tsx --test tests/*.test.ts",
     "test:coverage": "node --import tsx --experimental-test-coverage --test tests/*.test.ts"
   },

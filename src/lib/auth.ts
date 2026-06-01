@@ -1,24 +1,22 @@
 /**
- * 简单认证模块（Slice 3）
+ * 认证模块
  *
- * MVP 阶段用共享密码 + cookie session，不做飞书 OAuth。
- * 原因：飞书 OAuth 需要创建企业自建应用、审批、配置回调 URL，
- * 这些前置步骤会拖慢闭环验收。
+ * MVP 阶段用邮箱密码 + cookie session，不做飞书 OAuth。
  *
  * 架构上留好了替换口：
  *   - session 里存的 userId 在换飞书 OAuth 后变成 open_id，其余代码零改动
  *   - AUTH_MODE 环境变量预留了 "feishu" 值，未来切换
  *
  * 使用方式：
- *   1. 在 .env.local 里设 ACCESS_PASSWORD=你想设的密码
- *   2. 用户首次访问 → 跳登录页 → 输密码 → 设 cookie → 放行
+ *   1. 默认启用认证，用户首次访问 → 跳登录页
+ *   2. 首次输入邮箱和密码会自动注册
  *   3. cookie 里存 { userId, expiresAt }，签名防篡改
+ *   4. 本地演示若确实要免登，显式设置 AUTH_MODE=disabled
  */
 
 import { cookies } from "next/headers";
 
-const AUTH_MODE = process.env.AUTH_MODE || "password";
-const ACCESS_PASSWORD = process.env.ACCESS_PASSWORD || "";
+const AUTH_MODE = process.env.AUTH_MODE || "email";
 const COOKIE_NAME = "yusheng_session";
 const SESSION_SECRET = process.env.SESSION_SECRET || "yusheng-v2-change-me-in-prod";
 const SESSION_MAX_AGE = 7 * 24 * 3600; // 7 days
@@ -61,7 +59,7 @@ async function verify(payload: string, signature: string): Promise<boolean> {
 
 // ---- Session 对象 ----
 export type Session = {
-  userId: string; // 密码模式下是 "user"，飞书模式下是 open_id
+  userId: string; // 邮箱密码模式下是 users.id，飞书模式下是 open_id
   expiresAt: number; // unix 秒
 };
 
@@ -98,12 +96,6 @@ export async function getSession(): Promise<Session | null> {
   return parseSession(token);
 }
 
-// ---- 验证密码 ----
-export function verifyPassword(input: string): boolean {
-  if (!ACCESS_PASSWORD) return false; // 未设密码则拒绝一切
-  return input === ACCESS_PASSWORD;
-}
-
 // ---- cookie 设置参数 ----
 export function sessionCookieOptions() {
   return {
@@ -118,7 +110,6 @@ export function sessionCookieOptions() {
 
 // ---- 判断是否需要鉴权 ----
 export function isAuthConfigured(): boolean {
-  // 仅当显式配置了 ACCESS_PASSWORD 时才要求登录
-  // 不设密码 = 免登开放模式（部署默认状态）
-  return ACCESS_PASSWORD.length > 0;
+  // 只有显式设置 AUTH_MODE=disabled 才免登；默认启用邮箱密码认证。
+  return AUTH_MODE !== "disabled";
 }

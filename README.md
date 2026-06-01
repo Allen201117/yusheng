@@ -1,100 +1,114 @@
 # 余声 v2
 
-> 从 0 重做。第一性原则：先证明它能让人哭，再证明它好看。
+余声是一个 AI 声音记忆陪伴 MVP。用户上传或录制一段参考声音，创建人物，录入记忆片段，然后用文字对话，并听到克隆声音朗读回复。
 
-## 当前阶段：Slice 1 — 听到那个声音
+当前版本的目标不是做完整社交产品，而是把最小但真实的闭环做稳：
 
-**目标**：上传一段参考音频 → 输入想说的文字 → 听到克隆声朗读出来。
+```text
+录参考声音 -> 创建人物 -> 录入记忆 -> RAG 对话 -> 克隆声音朗读
+```
 
-其它一律不做：
-- 没有登录、没有数据库、没有对话、没有记忆
-- UI 黑底白字，原生组件，禁止美化
-- 验收标准：你上传你自己的 30 秒声音，输入"今天天气真好"，浏览器播放出来你能听出是你
+## 当前能力
 
-跑通这一步，Slice 1 就算结束。
-
----
-
-## 路线图
-
-| 切片 | 周次 | 目标 |
-|---|---|---|
-| Slice 1 | W1 | 声音克隆端到端跑通（CosyVoice API） |
-| Slice 2 | W2 | SQLite + 向量检索的记忆系统 + 对话 |
-| Slice 3 | W3 | 飞书 OAuth + 用户隔离 + 上传白名单 + 限流 |
-| Slice 4 | W4 | 备份、监控、自伤词检测；**此时才允许动 UI** |
-
----
+- 邮箱 + 密码登录，首次登录自动注册
+- 用户级数据隔离：人物、记忆、消息、参考声音均按 `userId` 访问
+- 浏览器录音或上传音频，支持 wav/mp3/m4a/webm
+- 参考音频自动 ASR，文字稿也可手动修正
+- SQLite 存储人物、记忆、消息；参考声音保存在本地 `data/voices`
+- bge-m3 向量化记忆，对话时按相似度召回
+- DeepSeek-V3 流式回复
+- CosyVoice2 零样本声音克隆朗读
+- TTS 每用户每日限流
+- 自伤关键词兜底回复
+- 暖光旧信风格 UI
 
 ## 快速开始
 
-### 1. 拿一个 SiliconFlow API Key
+### 1. 安装依赖
 
-打开 https://cloud.siliconflow.cn/account/ak 申请，复制 Key。
+```bash
+npm install
+```
 
 ### 2. 配置环境变量
 
 ```bash
 cp .env.example .env.local
-# 编辑 .env.local，把 SILICONFLOW_API_KEY 填上
 ```
 
-### 3. 安装依赖并启动
+至少填写：
 
 ```bash
-npm install
+SILICONFLOW_API_KEY=sk-xxx
+SESSION_SECRET=请换成足够长的随机字符串
+AUTH_MODE=email
+```
+
+开发时如果需要跳过登录，可以显式设置：
+
+```bash
+AUTH_MODE=disabled
+```
+
+生产环境不要使用 `AUTH_MODE=disabled`，也不要使用 `.env.example` 里的默认 `SESSION_SECRET`。
+
+### 3. 启动
+
+```bash
 npm run dev
 ```
 
 打开 http://localhost:3000
 
-### 4. 验收 Slice 1
+## 验收流程
 
-1. 录一段你自己的声音 30 秒（手机录音 → 转 wav 或 mp3）
-2. 在页面上传，并准确填写"音频里说了什么"（这一步不能糊弄，CosyVoice 要靠这个文字稿对齐音色）
-3. 在第 3 段输入"今天天气真好"，点"生成并播放"
-4. 听到的声音如果能被你识别为"是这个人"，✅ Slice 1 通过
+1. 注册或登录一个邮箱账号。
+2. 进入「录声音」，录制或上传 10 秒到 5 分钟的清晰人声音频。
+3. 自动识别文字稿，必要时手动修正。
+4. 创建人物，填写姓名、关系、性格和说话方式。
+5. 每行录入一条具体记忆。
+6. 进入对话页发送消息，检查是否流式回复，并能用参考声音朗读。
 
----
+## 技术结构
 
-## 目录结构
+```text
+src/app
+  api/auth/*              登录、登出、验证码、重置密码
+  api/voice/*             参考声音上传、ASR
+  api/persona             人物 CRUD
+  api/memory              记忆 CRUD
+  api/chat                RAG + LLM 流式对话
+  api/tts                 CosyVoice 语音合成
+  persona/*               创建、记忆、聊天页面
+  voice/new               录音/上传页面
 
+src/lib
+  auth.ts                 session 签名与认证模式
+  db.ts                   SQLite 数据层
+  voiceStore.ts           用户级声音文件存储
+  asr.ts                  SiliconFlow ASR
+  embedding.ts            SiliconFlow embedding
+  llm.ts                  SiliconFlow chat completion
+  cosyvoice.ts            SiliconFlow CosyVoice
+  rateLimit.ts            TTS 限流
 ```
-yusheng-v2/
-├── docs/                          # 产品方案 PDF（保留）
-├── src/
-│   ├── app/
-│   │   ├── layout.tsx
-│   │   ├── page.tsx               # Slice 1 唯一页面
-│   │   └── api/
-│   │       ├── voice/upload/route.ts   # 上传参考音频
-│   │       └── tts/route.ts            # 调 CosyVoice 合成
-│   └── lib/
-│       ├── voiceStore.ts          # 文件系统存储（Slice 1 不用 DB）
-│       └── cosyvoice.ts           # SiliconFlow CosyVoice 客户端
-├── data/                          # 运行时数据（git 忽略）
-│   └── voices/
-│       ├── {uuid}.wav
-│       └── {uuid}.meta.json
-├── .env.example
-└── package.json
+
+运行时数据默认写入 `data/`，该目录已被 git 忽略。
+
+## 常用命令
+
+```bash
+npm run dev
+npm run build
+npm run lint
+npm test
 ```
 
----
+`npm run lint` 当前是非交互式 TypeScript 检查，避免 Next.js 在无 ESLint 配置时进入初始化向导。
 
-## 为什么这次不一样
+## 仍需注意
 
-回看 v1 失败原因：12 套 UI 主题（3,438 行）+ 假的声音克隆（降级到浏览器朗读）+ JSON 文件当 DB + `String.includes` 当向量检索。**精力都花在皮肤上，核心能力是空壳。**
-
-v2 规则：
-1. **垂直切片，不分层**。每个切片必须端到端真的能用
-2. **核心差异化能力优先**：声音克隆 > 记忆 > 鉴权 > 美化
-3. **UI 冻结到 Slice 4**。在那之前任何改 UI 的冲动写到 `docs/style-backlog.md`，不允许提交
-
----
-
-## 文档
-
-- `docs/「余声」— AI 声音记忆陪伴机器人产品方案.pdf` — 原始产品方案 v0.1
-- `docs/余声_prd_v0_2.pdf` — PRD v0.2
-- `docs/cosyvoice-notes.md` — SiliconFlow CosyVoice 接入笔记
+- 参考声音仍在本地磁盘，部署迁移和多实例需要对象存储或备份方案。
+- 自伤检测只是关键词兜底，不等于完整安全系统。
+- Resend 未配置时，验证码会打印到服务端终端，仅适合本地调试。
+- SiliconFlow 是唯一外部 AI 依赖，所有 ASR/Embedding/LLM/TTS 都依赖同一个 API Key。

@@ -7,7 +7,14 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-import { saveVoice, loadVoice, deleteVoice } from "../src/lib/voiceStore";
+import {
+  saveVoice,
+  loadVoice,
+  deleteVoice,
+  saveVoiceForUser,
+  loadVoiceForUser,
+  listVoicesForUser,
+} from "../src/lib/voiceStore";
 
 describe("voiceStore", () => {
   const testDir = path.join(os.tmpdir(), `yusheng-test-voices-${Date.now()}`);
@@ -60,5 +67,35 @@ describe("voiceStore", () => {
 
   it("delete 不存在的 id 不报错", async () => {
     await assert.doesNotReject(() => deleteVoice("nonexistent-id"));
+  });
+
+  it("按 userId 隔离声音列表", async () => {
+    await saveVoiceForUser(Buffer.from("alice audio"), "alice prompt", "audio/wav", "user-alice");
+    await saveVoiceForUser(Buffer.from("bob audio"), "bob prompt", "audio/wav", "user-bob");
+
+    const aliceVoices = await listVoicesForUser("user-alice");
+    const bobVoices = await listVoicesForUser("user-bob");
+
+    assert.equal(aliceVoices.length, 1);
+    assert.equal(aliceVoices[0].promptText, "alice prompt");
+    assert.equal(aliceVoices[0].userId, "user-alice");
+    assert.equal(bobVoices.length, 1);
+    assert.equal(bobVoices[0].promptText, "bob prompt");
+    assert.equal(bobVoices[0].userId, "user-bob");
+  });
+
+  it("不同 userId 不能读取对方声音", async () => {
+    const meta = await saveVoiceForUser(Buffer.from("private audio"), "private prompt", "audio/wav", "owner");
+
+    assert.ok(await loadVoiceForUser(meta.voiceId, "owner"));
+    assert.equal(await loadVoiceForUser(meta.voiceId, "intruder"), null);
+  });
+
+  it("旧版无 userId 的声音只归 legacy/dev 用户", async () => {
+    const legacy = await saveVoice(Buffer.from("legacy audio"), "legacy prompt", "audio/wav");
+
+    assert.ok(await loadVoiceForUser(legacy.voiceId, "__legacy__"));
+    assert.ok(await loadVoiceForUser(legacy.voiceId, "__dev__"));
+    assert.equal(await loadVoiceForUser(legacy.voiceId, "new-user"), null);
   });
 });

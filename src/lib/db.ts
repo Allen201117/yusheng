@@ -1,7 +1,7 @@
 /**
  * SQLite 数据层（better-sqlite3，同步 API，跑在 Node.js runtime）
  *
- * Slice 3 变更：所有表新增 user_id 列，查询全部按 user_id 隔离。
+ * 所有人物数据按 user_id 隔离，记忆和消息通过 persona 归属间接隔离。
  * 如果数据库里已有 Slice 2 的数据（没有 user_id 列），
  * 自动做 ALTER TABLE 迁移，旧数据归属到 "__legacy__" 用户。
  */
@@ -199,6 +199,14 @@ export function getPersonaForUser(id: string, userId: string): Persona | null {
     .prepare(`SELECT * FROM personas WHERE id = ? AND user_id = ?`)
     .get(id, userId) as any;
   return row ? rowToPersona(row) : null;
+}
+
+export function countPersonasUsingVoice(voiceId: string, userId: string): number {
+  const db = getDb();
+  const row = db
+    .prepare(`SELECT COUNT(*) AS count FROM personas WHERE voice_id = ? AND user_id = ?`)
+    .get(voiceId, userId) as { count: number };
+  return row.count;
 }
 
 function rowToPersona(r: any): Persona {

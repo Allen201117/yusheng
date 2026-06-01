@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { saveVoice, listVoices } from "@/lib/voiceStore";
+import { saveVoiceForUser, listVoicesForUser } from "@/lib/voiceStore";
 import { probeAudioDuration } from "@/lib/audioProbe";
 import { transcribeAudio } from "@/lib/asr";
 import { requireAuth } from "@/lib/guard";
@@ -12,7 +12,7 @@ export async function GET(req: NextRequest) {
   try {
     const auth = await requireAuth(req);
     if ("error" in auth) return auth.error;
-    const voices = await listVoices();
+    const voices = await listVoicesForUser(auth.userId);
     return NextResponse.json({ voices });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -85,7 +85,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const meta = await saveVoice(buffer, finalPromptText, mimeType);
+    const meta = await saveVoiceForUser(buffer, finalPromptText, mimeType, auth.userId);
     return NextResponse.json({ ok: true, voice: { ...meta, durationSec: duration, autoTranscribed: !promptText } });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

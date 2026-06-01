@@ -1,18 +1,17 @@
 /**
- * 测试 transcribe route — JSON base64 接口
+ * 测试 transcribe route — FormData 音频上传接口
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-describe("transcribe route (JSON base64)", () => {
-  it("缺少 data 字段返回错误", async () => {
+describe("transcribe route (FormData)", () => {
+  it("缺少 audio 字段返回错误", async () => {
     const { POST } = await import("../src/app/api/voice/transcribe/route");
     const { NextRequest } = await import("next/server");
 
     const req = new NextRequest("http://localhost/api/voice/transcribe", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mime: "audio/wav", name: "t.wav" }), // 没 data
+      body: new FormData(),
     });
 
     const res = await POST(req);
@@ -21,18 +20,18 @@ describe("transcribe route (JSON base64)", () => {
     assert.notEqual(res.status, 200);
   });
 
-  it("正常 base64 音频返回 200 或 502（取决于 API key）", async () => {
+  it("正常音频表单返回 200 或 500/502（取决于 API key）", async () => {
     const { POST } = await import("../src/app/api/voice/transcribe/route");
     const { NextRequest } = await import("next/server");
 
     // 构造一个最小的 WAV 文件
     const wav = makeMiniWav();
-    const base64 = Buffer.from(wav).toString("base64");
+    const form = new FormData();
+    form.append("audio", new File([new Uint8Array(wav)], "t.wav", { type: "audio/wav" }));
 
     const req = new NextRequest("http://localhost/api/voice/transcribe", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ data: base64, mime: "audio/wav", name: "t.wav" }),
+      body: form,
     });
 
     const res = await POST(req);
