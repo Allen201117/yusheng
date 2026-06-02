@@ -75,6 +75,12 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("audio longer than 30s") || msg.includes('"code":20015')) {
+      return NextResponse.json(
+        { error: "当前绑定的参考声音超过 CosyVoice 单段 30 秒上限。请把长音频切成多段素材上传，并在人物里绑定其中一段 10 到 30 秒的清晰人声。" },
+        { status: 400 },
+      );
+    }
     return NextResponse.json({ error: msg }, { status: 502 });
   }
 }

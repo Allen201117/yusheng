@@ -13,17 +13,9 @@ type Persona = {
   createdAt: string;
 };
 
-const relationEmoji: Record<string, string> = {
-  "父亲": "👨", "爸爸": "👨", "母亲": "👩", "妈妈": "👩",
-  "外婆": "👵", "奶奶": "👵", "外公": "👴", "爷爷": "👴",
-  "朋友": "💫", "爱人": "💕", "伴侣": "💕",
-  "兄弟": "🤝", "姐妹": "🌸", "孩子": "👶",
-};
-function pickEmoji(name: string, relation: string): string {
-  for (const [k, v] of Object.entries(relationEmoji)) {
-    if (relation.includes(k) || name.includes(k)) return v;
-  }
-  return "💌";
+function pickInitial(name: string, relation: string): string {
+  const source = name.trim() || relation.trim() || "余声";
+  return source.slice(0, 1);
 }
 
 export default function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -69,18 +61,18 @@ export default function Sidebar({ open, onClose }: { open: boolean; onClose: () 
         <div style={{ padding: "20px 16px 12px" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <Link href="/" onClick={onClose} style={{
-              fontFamily: "var(--font-serif)", fontSize: 20,
-              fontWeight: 600, color: "var(--text)",
-              letterSpacing: "0.06em", textDecoration: "none",
+              fontSize: 24,
+              fontWeight: 750, color: "var(--text)",
+              letterSpacing: "-0.07em", textDecoration: "none",
             }}>
-              🕯️ 余声
+              余声
             </Link>
             <button onClick={onClose} style={{
               background: "none", border: "none", color: "var(--text-hint)",
               cursor: "pointer", fontSize: 18, padding: "4px 6px",
               display: "none",
             }} className="y-sidebar-close">
-              ✕
+              关闭
             </button>
           </div>
         </div>
@@ -100,7 +92,6 @@ export default function Sidebar({ open, onClose }: { open: boolean; onClose: () 
               transition: "border-color 0.15s, color 0.15s",
             }}
           >
-            <span>＋</span>
             <span>新建人物</span>
           </Link>
         </div>
@@ -119,7 +110,7 @@ export default function Sidebar({ open, onClose }: { open: boolean; onClose: () 
           ) : (
             personas.map((p) => {
               const active = isActive(p.id);
-              const emoji = pickEmoji(p.name, p.relation);
+              const initial = pickInitial(p.name, p.relation);
               return (
                 <Link
                   key={p.id}
@@ -137,7 +128,7 @@ export default function Sidebar({ open, onClose }: { open: boolean; onClose: () 
                     marginBottom: 2,
                   }}
                 >
-                  <span style={{ fontSize: 18, flexShrink: 0 }}>{emoji}</span>
+                  <span className="y-persona-avatar" style={{ width: 30, height: 30, fontSize: 13 }}>{initial}</span>
                   <span style={{
                     flex: 1, overflow: "hidden", textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
@@ -169,7 +160,7 @@ export default function Sidebar({ open, onClose }: { open: boolean; onClose: () 
               transition: "background 0.15s",
             }}
           >
-            🎙️ 录声音
+            录声音
           </Link>
           <button
             onClick={async () => {

@@ -120,7 +120,6 @@ export default function LoginPage() {
       <div className="y-login-glow" />
       <div className="y-login-card">
         <div style={{ marginBottom: 24 }}>
-          <span style={{ fontSize: 36, display: "block", marginBottom: 8 }}>🕯️</span>
           <h1 className="y-login-brand" style={{ marginBottom: 12 }}>余声</h1>
           <p className="y-login-tagline" style={{ marginBottom: 4 }}>有些声音，不该只留在记忆里</p>
           <p className="y-login-sub">
@@ -194,7 +193,7 @@ export default function LoginPage() {
                 style={{ letterSpacing: "0.04em", textAlign: "left", paddingLeft: 16 }}
               />
               <button type="submit" disabled={loading} className="y-login-btn">
-                {loading ? "…" : "🕯️ 进入余声"}
+                {loading ? "处理中" : "进入余声"}
               </button>
             </form>
 

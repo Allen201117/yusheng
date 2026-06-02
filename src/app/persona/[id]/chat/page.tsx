@@ -120,18 +120,17 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
 
   return (
     <AppShell>
-    <main className="y-page" style={{ paddingBottom: 120 }}>
+    <main className="y-page y-chat-page" style={{ paddingBottom: 120 }}>
       <div className="y-nav">
         <Link href="/" className="y-nav-back">← 首页</Link>
         <div className="y-nav-actions">
-          <Link href={`/persona/${personaId}/memories`} className="y-btn-ghost y-btn-sm">📝 记忆</Link>
+          <Link href={`/persona/${personaId}/memories`} className="y-btn-ghost y-btn-sm">记忆</Link>
         </div>
       </div>
 
-      <div className="y-chat-area" style={{ background: "transparent", border: "none", boxShadow: "none", padding: 0 }}>
+      <div className="y-chat-area y-chat-canvas">
         {messages.length === 0 ? (
           <div className="y-empty-warm">
-            <span className="y-empty-emoji">💬</span>
             <h2 className="y-empty-title">开始第一句话吧</h2>
             <p className="y-empty-desc">
               像他还在的时候那样说话就好。
@@ -160,7 +159,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                     <span className="y-bubble-actions">
                       <button onClick={() => speak(m.content)} disabled={speaking}
                         className="y-btn-ghost y-btn-sm">
-                        {speaking && isSpeakingAi ? "🔊" : "🔁"}
+                        {speaking && isSpeakingAi ? "播放中" : "重放"}
                       </button>
                     </span>
                   )}
@@ -173,8 +172,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       </div>
 
       {/* 底部输入 */}
-      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "var(--bg)", borderTop: "1px solid var(--border-light)", padding: "12px 20px", zIndex: 10 }}>
-        <form onSubmit={handleSend} className="y-chat-bar" style={{ maxWidth: "var(--page-max)", margin: "0 auto" }}>
+      <div className="y-chat-dock">
+        <form onSubmit={handleSend} className="y-chat-bar">
           <input
             value={streaming ? "" : text}
             onChange={(e) => setText(e.target.value)}
@@ -193,7 +192,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
 
       {lastRetrieved.length > 0 && (
         <details className="y-retrieval" style={{ marginTop: 12 }}>
-          <summary>🧠 记忆召回（{lastRetrieved.length} 条）</summary>
+          <summary>记忆召回（{lastRetrieved.length} 条）</summary>
           <ul>{lastRetrieved.map((m, i) => <li key={i}><span className="score">[{m.score.toFixed(2)}]</span> {m.content}</li>)}</ul>
         </details>
       )}

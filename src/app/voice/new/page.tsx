@@ -3,16 +3,49 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import AppShell from "@/components/AppShell";
+import {
+  MAX_REFERENCE_AUDIO_DURATION_SEC,
+  MAX_VOICE_MATERIAL_TOTAL_DURATION_SEC,
+} from "@/lib/voiceLimits";
 
 type VoiceMeta = {
   voiceId: string;
   promptText: string;
   createdAt: string;
+  durationSec?: number | null;
 };
+
+type SelectedAudio = {
+  file: File;
+  durationSec?: number;
+};
+
+function readAudioDuration(file: File): Promise<number | undefined> {
+  if (typeof window === "undefined") return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    const audio = document.createElement("audio");
+    const url = URL.createObjectURL(file);
+    const cleanup = () => {
+      URL.revokeObjectURL(url);
+      audio.removeAttribute("src");
+    };
+    audio.preload = "metadata";
+    audio.onloadedmetadata = () => {
+      const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : undefined;
+      cleanup();
+      resolve(duration);
+    };
+    audio.onerror = () => {
+      cleanup();
+      resolve(undefined);
+    };
+    audio.src = url;
+  });
+}
 
 export default function VoiceNewPage() {
   const [voices, setVoices] = useState<VoiceMeta[]>([]);
-  const [audioFile, setAudioFile] = useState<File | null>(null);
+  const [audioFiles, setAudioFiles] = useState<SelectedAudio[]>([]);
   const [promptText, setPromptText] = useState("");
   const [uploading, setUploading] = useState(false);
 
@@ -28,6 +61,7 @@ export default function VoiceNewPage() {
   // 录音
   const [recording, setRecording] = useState(false);
   const [recordTime, setRecordTime] = useState(0);
+  const recordTimeRef = useRef(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -58,16 +92,23 @@ export default function VoiceNewPage() {
       mr.onstop = () => {
         const blob = new Blob(chunks, { type: mr.mimeType });
         const file = new File([blob], `recording-${Date.now()}.webm`, { type: mr.mimeType });
-        setAudioFile(file);
+        setAudioFiles([{ file, durationSec: recordTimeRef.current || MAX_REFERENCE_AUDIO_DURATION_SEC }]);
         setPromptText("");
       };
       mr.start();
       setRecording(true);
       setRecordTime(0);
+      recordTimeRef.current = 0;
       timerRef.current = setInterval(() => {
         setRecordTime((prev) => {
-          if (prev >= 299) { stopRecording(); return 300; }
-          return prev + 1;
+          if (prev >= MAX_REFERENCE_AUDIO_DURATION_SEC - 1) {
+            recordTimeRef.current = MAX_REFERENCE_AUDIO_DURATION_SEC;
+            stopRecording();
+            return MAX_REFERENCE_AUDIO_DURATION_SEC;
+          }
+          const next = prev + 1;
+          recordTimeRef.current = next;
+          return next;
         });
       }, 1000);
       // 波形动画
@@ -105,7 +146,8 @@ export default function VoiceNewPage() {
   useEffect(() => { refreshVoices(); }, []);
 
   async function handleTranscribe() {
-    if (!audioFile) return setError("请先选择音频文件");
+    if (audioFiles.length !== 1) return setError("自动识别请先选择单个音频文件。多段素材上传时可留空，系统会逐段识别。");
+    const audioFile = audioFiles[0].file;
     const isWebm = audioFile.type.includes("webm");
     if (isWebm) return setError("浏览器录音为 webm 格式，暂不支持自动识别。请手动在上方输入音频对应的文字。");
     setTranscribing(true); setError("");
@@ -122,18 +164,21 @@ export default function VoiceNewPage() {
 
   async function handleUpload(e: React.FormEvent) {
     e.preventDefault(); setError("");
-    if (!audioFile) return setError("请选择参考音频文件");
+    if (audioFiles.length === 0) return setError("请选择参考音频文件");
     setUploading(true);
     try {
       const fd = new FormData();
-      fd.append("audio", audioFile);
-      fd.append("promptText", promptText.trim());
+      audioFiles.forEach(({ file, durationSec }) => {
+        fd.append("audio", file);
+        fd.append("durationSec", durationSec ? String(durationSec) : "");
+      });
+      if (promptText.trim()) fd.append("promptText", promptText.trim());
       const r = await fetch("/api/voice/upload", { method: "POST", body: fd });
       const j = await r.json().catch(() => null);
       if (!r.ok) throw new Error(j?.error || "上传失败");
-      setAudioFile(null); setPromptText("");
+      setAudioFiles([]); setPromptText("");
       await refreshVoices();
-      setSelectedVoiceId(j.voice.voiceId);
+      setSelectedVoiceId(j.voice?.voiceId || j.voices?.[0]?.voiceId || "");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally { setUploading(false); }
@@ -177,7 +222,7 @@ export default function VoiceNewPage() {
       </div>
 
       <h1 className="y-title">录一段参考声音</h1>
-      <p className="y-subtitle">5 分钟以内的清晰人声。越长，克隆出的音色和语调越像。</p>
+      <p className="y-subtitle">可以上传多段声音素材，素材库最多 5 分钟；单段请控制在 10 到 30 秒。</p>
 
       {/* Step 1: 录音/上传 */}
       <div className="y-card" style={{ marginTop: 24 }}>
@@ -189,7 +234,7 @@ export default function VoiceNewPage() {
         {recording ? (
           <div className="y-record-area recording">
             <span style={{ fontSize: 14, color: "var(--danger)", fontWeight: 500 }}>
-              🔴 正在录音
+              正在录音
             </span>
             <div className="y-record-timer">{formatTime(recordTime)}</div>
             <div className="y-record-wave">
@@ -198,26 +243,42 @@ export default function VoiceNewPage() {
               ))}
             </div>
             <button type="button" onClick={stopRecording} className="y-btn y-btn-sm" style={{ background: "var(--danger)" }}>
-              ⏹ 停止录音
+              停止录音
             </button>
           </div>
-        ) : audioFile ? (
-          <div className="y-file-card" style={{ marginBottom: 16 }}>
-            <span className="y-file-emoji">🎵</span>
-            <div className="y-file-info">
-              <div className="y-file-name">{audioFile.name}</div>
-              <div className="y-file-meta">{(audioFile.size / 1024).toFixed(0)} KB · 已就绪</div>
+        ) : audioFiles.length > 0 ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+            {audioFiles.map(({ file, durationSec }, index) => (
+              <div key={`${file.name}-${index}`} className="y-file-card">
+                <span className="y-file-type">音频</span>
+                <div className="y-file-info">
+                  <div className="y-file-name">{file.name}</div>
+                  <div className="y-file-meta">
+                    {(file.size / 1024).toFixed(0)} KB
+                    {durationSec ? ` · ${formatTime(Math.round(durationSec))}` : ""}
+                    {" · 已就绪"}
+                  </div>
+                </div>
+                <button
+                  onClick={() => setAudioFiles((prev) => prev.filter((_, i) => i !== index))}
+                  className="y-btn-ghost y-btn-sm"
+                >
+                  移除
+                </button>
+              </div>
+            ))}
+            <div style={{ color: "var(--text-hint)", fontSize: 12, lineHeight: 1.7 }}>
+              已选择 {audioFiles.length} 段素材。单段最长 {MAX_REFERENCE_AUDIO_DURATION_SEC} 秒，素材库最多 {Math.floor(MAX_VOICE_MATERIAL_TOTAL_DURATION_SEC / 60)} 分钟。
             </div>
-            <button onClick={() => setAudioFile(null)} className="y-btn-ghost y-btn-sm">移除</button>
           </div>
         ) : (
           <div className="y-record-area" onClick={startRecording} style={{ marginBottom: 16 }}>
-            <span style={{ fontSize: 40, display: "block", marginBottom: 8 }}>🎙️</span>
+            <span style={{ fontSize: 12, display: "block", marginBottom: 10, color: "var(--text-accent)", letterSpacing: "0.18em", textTransform: "uppercase" }}>record</span>
             <p style={{ color: "var(--text-secondary)", fontSize: 14, margin: 0 }}>
               点击此处开始录音
             </p>
             <p style={{ color: "var(--text-hint)", fontSize: 12, marginTop: 4 }}>
-              或从下方选择文件
+              每段最长 {MAX_REFERENCE_AUDIO_DURATION_SEC} 秒，也可从下方选择多个文件
             </p>
           </div>
         )}
@@ -230,28 +291,39 @@ export default function VoiceNewPage() {
               borderRadius: "var(--radius-md)", cursor: "pointer", fontSize: 13,
               color: "var(--text-secondary)", marginBottom: 16,
             }}>
-              <input type="file" accept="audio/*" onChange={(e) => setAudioFile(e.target.files?.[0] || null)}
+              <input
+                type="file"
+                accept="audio/*"
+                multiple
+                onChange={async (e) => {
+                  const selected = Array.from(e.target.files || []);
+                  const withDuration = await Promise.all(
+                    selected.map(async (file) => ({ file, durationSec: await readAudioDuration(file) })),
+                  );
+                  setAudioFiles(withDuration);
+                  setPromptText("");
+                }}
                 style={{ display: "none" }} />
-              📁 选择音频文件
+              选择音频文件
             </label>
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
               <span className="y-label" style={{ marginBottom: 0 }}>音频里说了什么</span>
-              <button type="button" onClick={handleTranscribe} disabled={!audioFile || transcribing}
+              <button type="button" onClick={handleTranscribe} disabled={audioFiles.length !== 1 || transcribing}
                 className="y-btn-text" style={{ fontSize: 12 }}>
-                {transcribing ? "识别中…" : "🤖 自动识别"}
+                {transcribing ? "识别中…" : "自动识别"}
               </button>
             </div>
             <textarea value={promptText} onChange={(e) => setPromptText(e.target.value)} rows={3}
               placeholder="点击右上角「自动识别」，或手动输入音频对应的文字"
               className="y-textarea" />
             <p style={{ color: "var(--text-hint)", fontSize: 11, marginTop: 4 }}>
-              mp3/wav/m4a 可自动识别，录音（webm）请手动输入。识别后建议核对错别字。
+              多段素材最多累计 {Math.floor(MAX_VOICE_MATERIAL_TOTAL_DURATION_SEC / 60)} 分钟。mp3/wav/m4a 可自动识别；录音（webm）请手动输入文字稿。
             </p>
 
-            <button type="button" onClick={handleUpload} disabled={uploading || !audioFile}
+            <button type="button" onClick={handleUpload} disabled={uploading || audioFiles.length === 0}
               className="y-btn" style={{ marginTop: 12, width: "100%" }}>
-              {uploading ? "上传中…" : "⬆️ 上传保存"}
+              {uploading ? "上传中…" : "上传保存"}
             </button>
           </>
         )}
@@ -265,7 +337,6 @@ export default function VoiceNewPage() {
         </div>
         {voices.length === 0 ? (
           <div className="y-empty-warm" style={{ padding: "var(--sp-lg) 0" }}>
-            <span className="y-empty-emoji" style={{ fontSize: 32 }}>🎧</span>
             <p style={{ color: "var(--text-hint)", fontSize: 13, margin: 0 }}>上传音频后在这里试听</p>
           </div>
         ) : (
@@ -287,7 +358,7 @@ export default function VoiceNewPage() {
                 className="y-textarea" style={{ marginTop: 6 }} />
             </label>
             <button type="submit" disabled={generating} className="y-btn" style={{ marginTop: 12 }}>
-              {generating ? "生成中…" : "▶️ 试听"}
+              {generating ? "生成中…" : "试听"}
             </button>
             {audioUrl && (
               <audio ref={audioRef} src={audioUrl} controls style={{ marginTop: 12, width: "100%" }} />

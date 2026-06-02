@@ -22,6 +22,7 @@ export type VoiceMeta = {
   audioFile: string; // 相对项目根的路径
   mimeType: string; // 原始音频 MIME 类型（TTS 调用需要）
   userId?: string; // 新版声音所有者；旧 meta 缺失时视为 "__legacy__"
+  durationSec?: number | null; // 单段参考音频时长；旧 meta 可能缺失
 };
 
 /** 根据 MIME 类型推断文件扩展名 */
@@ -40,8 +41,9 @@ export async function saveVoiceForUser(
   promptText: string,
   mimeType: string,
   userId: string,
+  durationSec?: number | null,
 ): Promise<VoiceMeta> {
-  return saveVoiceInternal(audioBuffer, promptText, mimeType, userId);
+  return saveVoiceInternal(audioBuffer, promptText, mimeType, userId, durationSec);
 }
 
 async function saveVoiceInternal(
@@ -49,6 +51,7 @@ async function saveVoiceInternal(
   promptText: string,
   mimeType: string = "audio/wav",
   userId?: string,
+  durationSec?: number | null,
 ): Promise<VoiceMeta> {
   await ensureDirs();
   const voiceId = randomUUID();
@@ -64,6 +67,7 @@ async function saveVoiceInternal(
     mimeType,
   };
   if (userId) meta.userId = userId;
+  if (durationSec !== undefined) meta.durationSec = durationSec;
   await fs.writeFile(audioFile, audioBuffer);
   await fs.writeFile(metaFile, JSON.stringify(meta, null, 2));
   return meta;

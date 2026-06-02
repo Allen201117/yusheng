@@ -25,10 +25,11 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
         alignItems: "center", justifyContent: "center",
         gap: 16,
       }}>
-        <span style={{ fontSize: 36 }}>🕯️</span>
         <span style={{
-          fontFamily: "var(--font-serif)", fontSize: 24,
-          color: "var(--text)", letterSpacing: "0.08em",
+          fontSize: 28,
+          color: "var(--text)",
+          letterSpacing: "-0.06em",
+          fontWeight: 700,
         }}>
           余声
         </span>

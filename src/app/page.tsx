@@ -13,18 +13,9 @@ type Persona = {
   createdAt: string;
 };
 
-const relationEmoji: Record<string, string> = {
-  "父亲": "👨", "爸爸": "👨", "母亲": "👩", "妈妈": "👩",
-  "外婆": "👵", "奶奶": "👵", "外公": "👴", "爷爷": "👴",
-  "朋友": "💫", "爱人": "💕", "伴侣": "💕",
-  "兄弟": "🤝", "姐妹": "🌸", "孩子": "👶",
-};
-
-function pickEmoji(name: string, relation: string): string {
-  for (const [k, v] of Object.entries(relationEmoji)) {
-    if (relation.includes(k) || name.includes(k)) return v;
-  }
-  return "💌";
+function pickInitial(name: string, relation: string): string {
+  const source = name.trim() || relation.trim() || "余声";
+  return source.slice(0, 1);
 }
 
 export default function HomePage() {
@@ -60,7 +51,7 @@ export default function HomePage() {
           <div>
             <h1 className="y-title">余声</h1>
             <p style={{ color: "var(--text-hint)", fontSize: 12, marginTop: 2 }}>
-              ✦ 重新听到那个人的声音
+              重新听到那个人的声音
             </p>
           </div>
         </header>
@@ -74,7 +65,6 @@ export default function HomePage() {
       ) : personas.length === 0 ? (
         /* 空状态 */
         <div className="y-empty-warm">
-          <span className="y-empty-emoji">🕯️</span>
           <h2 className="y-empty-title">这里还很安静</h2>
           <p className="y-empty-desc">
             录一段那个人的声音，创建一个人物，
@@ -82,7 +72,7 @@ export default function HomePage() {
           </p>
           <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
             <Link href="/voice/new" className="y-btn" style={{ fontSize: 13 }}>
-              🎙️ 录一段声音
+              录一段声音
             </Link>
             <Link href="/persona/new" className="y-btn-ghost" style={{ fontSize: 13 }}>
               创建人物
@@ -100,14 +90,14 @@ export default function HomePage() {
           </p>
 
           {personas.map((p, idx) => {
-            const emoji = pickEmoji(p.name, p.relation);
+            const initial = pickInitial(p.name, p.relation);
             const date = new Date(p.createdAt).toLocaleDateString("zh-CN", {
               year: "numeric", month: "long", day: "numeric",
             });
             return (
               <div key={p.id} className="y-persona-card" style={{ animation: `fadeUp 0.4s var(--ease-out) ${idx * 0.06}s both` }}>
                 <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
-                  <div className="y-persona-avatar">{emoji}</div>
+                  <div className="y-persona-avatar">{initial}</div>
                   <div style={{ flex: 1 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <span className="y-persona-name">{p.name}</span>
@@ -123,10 +113,10 @@ export default function HomePage() {
 
                 <div className="y-persona-actions">
                   <Link href={`/persona/${p.id}/chat`} className="y-btn y-btn-sm">
-                    💬 对话
+                    对话
                   </Link>
                   <Link href={`/persona/${p.id}/memories`} className="y-btn-ghost y-btn-sm">
-                    📝 记忆
+                    记忆
                   </Link>
                   <div style={{ flex: 1 }} />
                   <button
@@ -134,7 +124,7 @@ export default function HomePage() {
                     onBlur={() => setConfirmDelete(null)}
                     className={`y-btn-ghost y-btn-sm ${confirmDelete === p.id ? "y-btn-danger" : ""}`}
                   >
-                    {confirmDelete === p.id ? "确认删除?" : "🗑️"}
+                    {confirmDelete === p.id ? "确认删除?" : "删除"}
                   </button>
                 </div>
               </div>
@@ -148,10 +138,10 @@ export default function HomePage() {
 
       <div style={{ display: "flex", gap: 8 }}>
         <Link href="/voice/new" className="y-btn-ghost" style={{ flex: 1, textAlign: "center", fontSize: 13 }}>
-          🎙️ 录声音
+          录声音
         </Link>
         <Link href="/persona/new" className="y-btn-ghost" style={{ flex: 1, textAlign: "center", fontSize: 13 }}>
-          ✨ 建人物
+          建人物
         </Link>
       </div>
     </main>

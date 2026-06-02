@@ -43,7 +43,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             boxShadow: "var(--shadow-sm)",
           }}
         >
-          ☰
+          菜单
         </button>
 
         {children}

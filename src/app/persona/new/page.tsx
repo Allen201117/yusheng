@@ -60,7 +60,6 @@ export default function PersonaNewPage() {
 
       {step === 0 ? (
         <div className="y-empty-warm" style={{ marginTop: 32 }}>
-          <span className="y-empty-emoji">🎙️</span>
           <h2 className="y-empty-title">还没有参考声音</h2>
           <p className="y-empty-desc">创建人物前需要先录一段那个人的声音。</p>
           <Link href="/voice/new" className="y-btn">去录声音</Link>
@@ -69,19 +68,19 @@ export default function PersonaNewPage() {
         <div className="y-card" style={{ marginTop: 24 }}>
           <form onSubmit={handleSubmit}>
             <label className="y-label">
-              💬 姓名 / 称呼
+              姓名 / 称呼
               <input value={name} onChange={(e) => setName(e.target.value)}
                 placeholder="例：爸爸 / 小明" className="y-input" style={{ marginTop: 6 }} />
             </label>
 
             <label className="y-label" style={{ marginTop: 16 }}>
-              💫 关系
+              关系
               <input value={relation} onChange={(e) => setRelation(e.target.value)}
                 placeholder="例：父亲 / 朋友 / 外婆" className="y-input" style={{ marginTop: 6 }} />
             </label>
 
             <label className="y-label" style={{ marginTop: 16 }}>
-              🎵 参考声音
+              参考声音
               <select value={voiceId} onChange={(e) => setVoiceId(e.target.value)}
                 className="y-select" style={{ marginTop: 6 }}>
                 {voices.map((v) => (
@@ -93,7 +92,7 @@ export default function PersonaNewPage() {
             </label>
 
             <label className="y-label" style={{ marginTop: 16 }}>
-              ✍️ 性格 / 说话方式（强烈建议填写）
+              性格 / 说话方式（强烈建议填写）
               <textarea value={personaDesc} onChange={(e) => setPersonaDesc(e.target.value)} rows={4}
                 placeholder={"例：性格内敛但温和，说话简短，不爱表达情绪，\n喜欢用「嗯」「好」开头。常用口头禅：「慢慢来」。"}
                 className="y-textarea" style={{ marginTop: 6 }} />
@@ -103,7 +102,7 @@ export default function PersonaNewPage() {
             </label>
 
             <button type="submit" disabled={submitting} className="y-btn" style={{ marginTop: 16, width: "100%" }}>
-              {submitting ? "创建中…" : "✨ 创建并去录入记忆"}
+              {submitting ? "创建中…" : "创建并去录入记忆"}
             </button>
           </form>
         </div>

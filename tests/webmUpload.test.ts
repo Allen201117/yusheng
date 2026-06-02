@@ -1,16 +1,16 @@
 /**
- * 测试 webm 格式录音上传 bypass 逻辑
+ * 测试 webm 格式录音上传的时长处理路径
  *
- * voice/upload/route.ts 对 webm 跳过 probeAudioDuration，
- * 因为浏览器录音的计时器已保证 ≤ 300 秒。
+ * voice/upload/route.ts 会识别 webm，并要求浏览器提交测得的录音时长，
+ * 因为纯 JS 解析器不支持直接从 webm 头里计算 duration。
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-describe("webm upload bypass", () => {
+describe("webm upload duration handling", () => {
   const isWebm = (mime: string) => mime.includes("webm");
 
-  it("audio/webm 跳过时长解析", () => {
+  it("识别 audio/webm 为客户端时长路径", () => {
     assert.equal(isWebm("audio/webm"), true);
     assert.equal(isWebm("audio/webm;codecs=opus"), true);
   });
