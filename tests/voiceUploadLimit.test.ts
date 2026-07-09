@@ -9,9 +9,11 @@ function runUploadProbe(durationSecs: number | number[]) {
   const dataDir = mkdtempSync(path.join(tmpdir(), "yusheng-voice-limit-"));
   const durations = Array.isArray(durationSecs) ? durationSecs : [durationSecs];
   const code = `
-    import { POST } from "./src/app/api/voice/upload/route.ts";
-    import { listVoicesForUser } from "./src/lib/voiceStore.ts";
     import { NextRequest } from "next/server";
+    const routeModule = await import("./src/app/api/voice/upload/route.ts");
+    const voiceStoreModule = await import("./src/lib/voiceStore.ts");
+    const { POST } = routeModule.default ?? routeModule;
+    const { listVoicesForUser } = voiceStoreModule.default ?? voiceStoreModule;
 
     function makeWav(durationSec) {
       const sampleRate = 16000;
@@ -64,9 +66,11 @@ function runUploadProbe(durationSecs: number | number[]) {
 function runWebmProbe(includeDuration: boolean) {
   const dataDir = mkdtempSync(path.join(tmpdir(), "yusheng-voice-webm-limit-"));
   const code = `
-    import { POST } from "./src/app/api/voice/upload/route.ts";
-    import { listVoicesForUser } from "./src/lib/voiceStore.ts";
     import { NextRequest } from "next/server";
+    const routeModule = await import("./src/app/api/voice/upload/route.ts");
+    const voiceStoreModule = await import("./src/lib/voiceStore.ts");
+    const { POST } = routeModule.default ?? routeModule;
+    const { listVoicesForUser } = voiceStoreModule.default ?? voiceStoreModule;
 
     const form = new FormData();
     form.append("audio", new File([new Uint8Array([1, 2, 3, 4])], "reference.webm", { type: "audio/webm" }));

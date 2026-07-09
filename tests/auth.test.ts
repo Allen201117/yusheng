@@ -4,7 +4,8 @@ import { spawnSync } from "node:child_process";
 
 function probeAuthConfigured(env: Record<string, string | undefined>) {
   const code = `
-    import { isAuthConfigured } from "./src/lib/auth.ts";
+    const authModule = await import("./src/lib/auth.ts");
+    const { isAuthConfigured } = authModule.default ?? authModule;
     console.log(JSON.stringify({ configured: isAuthConfigured() }));
   `;
   const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], {
@@ -23,7 +24,8 @@ function probeAuthConfigured(env: Record<string, string | undefined>) {
 
 function probeCreateSession(env: Record<string, string | undefined>) {
   const code = `
-    import { createSession } from "./src/lib/auth.ts";
+    const authModule = await import("./src/lib/auth.ts");
+    const { createSession } = authModule.default ?? authModule;
     try {
       await createSession("user-1");
       console.log(JSON.stringify({ ok: true }));
