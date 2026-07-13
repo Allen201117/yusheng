@@ -7,6 +7,10 @@ import { logger } from "@/lib/logger";
 import { normalizeSpeechControls } from "@/lib/speechPlanning";
 import { resolveVoiceSynthesisSource } from "@/lib/voiceSynthesisSource";
 import { synthesizeResolvedVoice } from "@/lib/voiceSynthesisService";
+import {
+  canSynthesizeVoice,
+  isVoiceAuthorizationEnforced,
+} from "@/lib/voiceAuthorizationPolicy";
 
 export const runtime = "nodejs";
 
@@ -14,6 +18,7 @@ export async function POST(req: NextRequest) {
   const requestStartedAt = performance.now();
   const auth = await requireAuth(req);
   if ("error" in auth) return auth.error;
+  const repository = getRepository();
 
   let body: { voiceId?: string; personaId?: string; text?: string; speech?: unknown };
   try {
@@ -30,12 +35,24 @@ export async function POST(req: NextRequest) {
 
   let voiceId = (body.voiceId || "").trim();
   if (!voiceId && body.personaId) {
-    const p = await getRepository().getPersonaForUser(body.personaId.trim(), auth.userId);
+    const p = await repository.getPersonaForUser(body.personaId.trim(), auth.userId);
     if (!p) return NextResponse.json({ error: "personaId 不存在或不属于你" }, { status: 403 });
     voiceId = p.voiceId;
   }
   if (!voiceId) {
     return NextResponse.json({ error: "缺少 voiceId 或 personaId" }, { status: 400 });
+  }
+
+  const authorization = await repository.getCurrentVoiceAuthorization(voiceId, auth.userId);
+  if (!canSynthesizeVoice({
+    authorization,
+    enforcementEnabled: isVoiceAuthorizationEnforced(),
+  })) {
+    const revoked = authorization?.status === "revoked";
+    return NextResponse.json({
+      error: revoked ? "该声音的合成授权已撤回" : "该声音尚未完成授权",
+      code: revoked ? "VOICE_AUTHORIZATION_REVOKED" : "VOICE_AUTHORIZATION_REQUIRED",
+    }, { status: 403 });
   }
 
   const voice = await resolveVoiceSynthesisSource(
@@ -69,7 +86,7 @@ export async function POST(req: NextRequest) {
       speech: speech || undefined,
       source: voice,
       store: getVoiceObjectStore(),
-      repository: getRepository(),
+      repository,
     });
     const audio = synthesis.audio;
     const providerMs = Math.round(performance.now() - providerStartedAt);

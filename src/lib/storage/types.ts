@@ -87,6 +87,46 @@ export type UpdateVoiceProviderStateInput = {
   errorCode: string | null;
 };
 
+export type VoiceSpeakerStatus = "living" | "deceased";
+
+export type VoiceAuthorizationBasis =
+  | "self"
+  | "speaker_separate_consent"
+  | "legal_representative"
+  | "close_relative_request";
+
+export type VoiceAuthorizationStatus =
+  | "pending_review"
+  | "approved"
+  | "rejected"
+  | "revoked";
+
+export type VoiceAuthorizationAttestation = {
+  speakerStatus: VoiceSpeakerStatus;
+  basis: VoiceAuthorizationBasis;
+  separateConsentConfirmed: boolean;
+  thirdPartyProcessingConfirmed: boolean;
+  syntheticDisclosureConfirmed: boolean;
+};
+
+export type VoiceAuthorization = VoiceAuthorizationAttestation & {
+  id: string;
+  voiceId: string;
+  userId: string;
+  status: VoiceAuthorizationStatus;
+  reasonCode: string | null;
+  noticeVersion: string;
+  attestedAt: string;
+  reviewedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+};
+
+export type CreateVoiceAuthorizationInput = Omit<
+  VoiceAuthorization,
+  "reviewedAt" | "revokedAt" | "createdAt"
+>;
+
 export interface AppRepository {
   getUserByEmail(email: string): Promise<User | null>;
   createUserByEmail(email: string, passwordHash?: string): Promise<User>;
@@ -111,6 +151,15 @@ export interface AppRepository {
     input: UpdateVoiceProviderStateInput,
   ): Promise<VoiceMeta | null>;
   deleteVoiceProfile(voiceId: string, userId: string): Promise<boolean>;
+  replaceVoiceAuthorization(input: CreateVoiceAuthorizationInput): Promise<VoiceAuthorization>;
+  getCurrentVoiceAuthorization(
+    voiceId: string,
+    userId: string,
+  ): Promise<VoiceAuthorization | null>;
+  revokeVoiceAuthorization(
+    voiceId: string,
+    userId: string,
+  ): Promise<VoiceAuthorization | null>;
   listMemories(personaId: string): Promise<Memory[]>;
   getMemoryById(id: string): Promise<Pick<Memory, "id" | "personaId" | "content"> | null>;
   insertMemory(input: InsertMemoryInput): Promise<void>;

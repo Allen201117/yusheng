@@ -11,6 +11,7 @@ const durableRoutes = [
   "persona/route.ts",
   "tts/route.ts",
   "voice/upload/route.ts",
+  "voice/authorization/route.ts",
 ];
 
 it("routes use the async persistence boundary instead of local SQLite or files", async () => {
@@ -25,7 +26,12 @@ it("routes use the async persistence boundary instead of local SQLite or files",
 });
 
 it("voice routes use the object store and data routes use the repository", async () => {
-  const voiceRoutes = ["voice/upload/route.ts", "tts/route.ts", "persona/route.ts"];
+  const voiceRoutes = [
+    "voice/upload/route.ts",
+    "voice/authorization/route.ts",
+    "tts/route.ts",
+    "persona/route.ts",
+  ];
   for (const route of voiceRoutes) {
     const source = await readFile(new URL(`../src/app/api/${route}`, import.meta.url), "utf8");
     assert.match(source, /getVoiceObjectStore/, route);
@@ -50,6 +56,9 @@ it("routes use the provider preset fast path and provider-aware deletion lifecyc
 
   assert.match(tts, /resolveVoiceSynthesisSource/);
   assert.match(tts, /synthesizeResolvedVoice/);
+  assert.match(tts, /getCurrentVoiceAuthorization/);
+  assert.match(tts, /canSynthesizeVoice/);
+  assert.match(tts, /isVoiceAuthorizationEnforced/);
   assert.match(persona, /deleteVoiceEverywhere/);
   assert.match(persona, /\.getMeta\(voiceId, auth\.userId\)/);
   assert.match(persona, /cleanupPending/);
@@ -61,4 +70,12 @@ it("routes use the provider preset fast path and provider-aware deletion lifecyc
   assert.match(voiceUpload, /export async function DELETE/);
   assert.match(voiceUpload, /countPersonasUsingVoice/);
   assert.match(voiceUpload, /deleteVoiceEverywhere/);
+
+  const authorization = await readFile(
+    new URL("../src/app/api/voice/authorization/route.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(authorization, /requireAuth/);
+  assert.match(authorization, /submitVoiceAuthorization/);
+  assert.match(authorization, /revokeStoredVoiceAuthorization/);
 });

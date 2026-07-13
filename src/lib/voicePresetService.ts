@@ -20,6 +20,36 @@ type ProvisionResult =
   | { status: "ready"; meta: VoiceMeta }
   | { status: "failed"; meta: VoiceMeta | null; errorCode: string };
 
+async function removeProviderPreset(
+  voiceId: string,
+  userId: string,
+  providerVoiceId: string,
+  dependencies: DeleteDependencies,
+  failureMessage: string,
+): Promise<void> {
+  await dependencies.repository.updateVoiceProviderState(voiceId, userId, {
+    status: "deleting",
+    providerVoiceId,
+    errorCode: null,
+  });
+  try {
+    const removePreset = dependencies.removePreset || deletePresetVoice;
+    await removePreset(providerVoiceId);
+  } catch (error) {
+    await dependencies.repository.updateVoiceProviderState(voiceId, userId, {
+      status: "failed",
+      providerVoiceId,
+      errorCode: stableProviderErrorCode(error),
+    });
+    throw new Error(failureMessage);
+  }
+  await dependencies.repository.updateVoiceProviderState(voiceId, userId, {
+    status: "not_created",
+    providerVoiceId: null,
+    errorCode: null,
+  });
+}
+
 export async function provisionVoicePreset(
   voiceId: string,
   userId: string,
@@ -82,28 +112,33 @@ export async function deleteVoiceEverywhere(
   if (!meta) return false;
 
   if (meta.providerVoiceId) {
-    await dependencies.repository.updateVoiceProviderState(voiceId, userId, {
-      status: "deleting",
-      providerVoiceId: meta.providerVoiceId,
-      errorCode: null,
-    });
-    try {
-      const removePreset = dependencies.removePreset || deletePresetVoice;
-      await removePreset(meta.providerVoiceId);
-    } catch (error) {
-      await dependencies.repository.updateVoiceProviderState(voiceId, userId, {
-        status: "failed",
-        providerVoiceId: meta.providerVoiceId,
-        errorCode: stableProviderErrorCode(error),
-      });
-      throw new Error("provider preset deletion failed");
-    }
-    await dependencies.repository.updateVoiceProviderState(voiceId, userId, {
-      status: "not_created",
-      providerVoiceId: null,
-      errorCode: null,
-    });
+    await removeProviderPreset(
+      voiceId,
+      userId,
+      meta.providerVoiceId,
+      dependencies,
+      "provider preset deletion failed",
+    );
   }
 
   return dependencies.store.delete(voiceId, userId);
+}
+
+export async function revokeVoicePreset(
+  voiceId: string,
+  userId: string,
+  dependencies: DeleteDependencies,
+): Promise<"not_found" | "not_configured" | "revoked"> {
+  const meta = await dependencies.store.getMeta(voiceId, userId);
+  if (!meta) return "not_found";
+  if (!meta.providerVoiceId) return "not_configured";
+
+  await removeProviderPreset(
+    voiceId,
+    userId,
+    meta.providerVoiceId,
+    dependencies,
+    "provider preset revocation failed",
+  );
+  return "revoked";
 }

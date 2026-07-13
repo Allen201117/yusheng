@@ -14,6 +14,9 @@ import {
   listMessages,
   listPersonas,
   loadMemoriesWithEmbeddings,
+  getCurrentVoiceAuthorization,
+  replaceVoiceAuthorization,
+  revokeVoiceAuthorization,
   setUserPassword,
   verifyCode,
 } from "../db";
@@ -93,6 +96,15 @@ export function createLocalRepository(): AppRepository {
     },
     async deleteVoiceProfile(voiceId, userId) {
       return deleteVoiceForUser(voiceId, userId);
+    },
+    async replaceVoiceAuthorization(input) {
+      return replaceVoiceAuthorization(input);
+    },
+    async getCurrentVoiceAuthorization(voiceId, userId) {
+      return getCurrentVoiceAuthorization(voiceId, userId);
+    },
+    async revokeVoiceAuthorization(voiceId, userId) {
+      return revokeVoiceAuthorization(voiceId, userId);
     },
     async listMemories(personaId) { return listMemories(personaId); },
     async getMemoryById(id) { return getMemoryById(id); },

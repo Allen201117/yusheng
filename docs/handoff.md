@@ -13,6 +13,8 @@
 登录 -> 上传或录制参考声音 -> 创建人物 -> 录入记忆 -> 流式文字对话 -> 克隆声音朗读
 ```
 
+授权策略的规则依据是《个人信息保护法》对生物识别敏感信息和单独同意的要求，以及《互联网信息服务深度合成管理规定》对人声编辑告知、单独同意和合成标识的要求。这些后端控制不等于已完成法律合规审查。
+
 ## 当前生产架构
 
 | 数据 | 本地开发 | Vercel Production / Preview |
@@ -32,6 +34,7 @@ BLOB_READ_WRITE_TOKEN=...
 SILICONFLOW_API_KEY=...
 SESSION_SECRET=...
 AUTH_MODE=email
+VOICE_AUTH_ENFORCEMENT=disabled
 ```
 
 缺少云配置或在生产设置 `STORAGE_BACKEND=local` 时，存储初始化必须报错，不能静默创建 `./data`。
@@ -49,6 +52,8 @@ src/lib/storage/postgresRepository.ts     Neon 数据访问
 src/lib/storage/voiceObjectStore.ts       本地文件/Private Blob 选择
 src/lib/voicePresetService.ts             预置音色创建与删除生命周期
 src/lib/voiceSynthesisService.ts          预置音色快路径与一次动态回退
+src/lib/voiceAuthorizationPolicy.ts       授权决策与 TTS 门禁
+src/app/api/voice/authorization           授权查询、提交与撤回
 src/app/api/*                             只调用上述异步边界
 ```
 
@@ -104,9 +109,10 @@ NODE_ENV=production STORAGE_BACKEND=local \
 - 真实 Preview 的 Neon / Private Blob 读写、跨用户隔离、重部署持久化和删除还没有形成证据前，不能宣称生产底座完成。
 - TTS 限流仍是进程内 Map，多实例会失真；应迁移到持久化计数或托管限流。
 - 句级 SSE 和有序播放队列已实现，但真实 Preview 的首音延迟、20 轮稳定性和 4 秒目标仍未验收。
-- 供应商预置音色状态机、TTS 快路径、失效 URI 的一次动态回退和可重试删除已有代码；在权利确认记录完成前不得对已有声音自动批量预置。
+- 供应商预置音色状态机、TTS 快路径、失效 URI 的一次动态回退和可重试删除已有代码；只有当前 `approved` 授权可触发预置音色。
+- 授权记录、撤回和受控预置 API 已有后端；只有健在本人会自动 approved，亲友与逝者均待人工审核。已有授权记录一旦为 pending/revoked 就禁止 TTS；开关关闭时只兼容“完全没有授权记录”的旧声音。当前没有功能客户端，Production 不得设置 `VOICE_AUTH_ENFORCEMENT=enabled`。
 - SiliconFlow 用户预置音色需供应商账号完成实名认证；当前尚无真实成功证据。
-- 授权、撤销、彻底删除、逝者场景的权利证明仍需单独实现。
+- 健在第三人授权证据核验、逝者场景人工审核、删除完成凭证和用户可见的 AI 合成标识仍未完成。
 - 人物设定和记忆仍偏自由文本，需要结构化事实、说话风格和不确定性边界。
 - 自伤检测仍是关键词规则，不能当作完整安全系统。
 

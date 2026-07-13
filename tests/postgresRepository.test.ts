@@ -64,6 +64,27 @@ it("adds durable provider voice lifecycle fields", async () => {
   assert.match(sql, /not_created.*pending.*ready.*failed.*deleting/s);
 });
 
+it("adds owner-scoped auditable voice authorization records", async () => {
+  const sql = await readFile(
+    new URL("../migrations/003_voice_authorizations.sql", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS voice_authorizations/);
+  assert.match(sql, /voice_id text NOT NULL REFERENCES voice_profiles\(id\)/);
+  assert.match(sql, /user_id text NOT NULL REFERENCES users\(id\)/);
+  assert.match(sql, /speaker_status IN \('living', 'deceased'\)/);
+  assert.match(sql, /basis IN \('self', 'speaker_separate_consent', 'legal_representative', 'close_relative_request'\)/);
+  assert.match(sql, /status IN \('pending_review', 'approved', 'rejected', 'revoked'\)/);
+  assert.match(sql, /notice_version text NOT NULL/);
+  assert.match(sql, /separate_consent_confirmed boolean NOT NULL/);
+  assert.match(sql, /third_party_processing_confirmed boolean NOT NULL/);
+  assert.match(sql, /synthetic_disclosure_confirmed boolean NOT NULL/);
+  assert.match(sql, /attested_at timestamptz NOT NULL/);
+  assert.match(sql, /revoked_at timestamptz/);
+  assert.match(sql, /WHERE status IN \('pending_review', 'approved'\)/);
+});
+
 it("applies a pending migration and records it in one transaction", async () => {
   const queries: Array<{ text: string; params: unknown[] }> = [];
   let transactions = 0;
@@ -286,6 +307,42 @@ it("updates provider voice state only for the owning user", async () => {
   assert.equal(voice?.providerVoiceId, "speech:yusheng-voice-1:provider-id");
   assert.deepEqual(fake.calls[0].params.slice(0, 2), ["voice-1", "user-1"]);
   assert.match(fake.calls[0].text, /id = \$1 AND user_id = \$2 AND deleted_at IS NULL/);
+});
+
+it("replaces, reads and revokes owner-scoped voice authorization atomically", async () => {
+  const row = {
+    id: "auth-1", voice_id: "voice-1", user_id: "user-1", speaker_status: "living",
+    basis: "self", status: "approved", reason_code: null,
+    notice_version: "voice-authorization-2026-07-13",
+    separate_consent_confirmed: true, third_party_processing_confirmed: true,
+    synthetic_disclosure_confirmed: true,
+    attested_at: "2026-07-13T09:00:00.000Z", reviewed_at: null,
+    revoked_at: null, created_at: "2026-07-13T09:00:00.000Z",
+  };
+  const fake = createFakeSql((text) => {
+    if (text.includes("INSERT INTO voice_authorizations")) return [row];
+    if (text.includes("UPDATE voice_authorizations") && text.includes("RETURNING")) {
+      return [{ ...row, status: "revoked", revoked_at: "2026-07-13T09:01:00.000Z" }];
+    }
+    if (text.includes("SELECT") && text.includes("voice_authorizations")) return [row];
+    return [];
+  });
+  const repo = createPostgresRepository(fake.executor);
+  const input = {
+    id: "auth-1", voiceId: "voice-1", userId: "user-1", speakerStatus: "living" as const,
+    basis: "self" as const, status: "approved" as const, reasonCode: null,
+    noticeVersion: "voice-authorization-2026-07-13",
+    separateConsentConfirmed: true, thirdPartyProcessingConfirmed: true,
+    syntheticDisclosureConfirmed: true, attestedAt: "2026-07-13T09:00:00.000Z",
+  };
+
+  assert.equal((await repo.replaceVoiceAuthorization(input)).status, "approved");
+  assert.equal(fake.transactions, 1);
+  assert.equal((await repo.getCurrentVoiceAuthorization("voice-1", "user-1"))?.id, "auth-1");
+  assert.equal((await repo.revokeVoiceAuthorization("voice-1", "user-1"))?.status, "revoked");
+  assert.ok(fake.calls
+    .filter((call) => call.text.includes("voice_authorizations"))
+    .every((call) => call.params.includes("user-1")));
 });
 
 it("updates a password by normalized email", async () => {

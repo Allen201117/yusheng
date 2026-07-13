@@ -3,6 +3,7 @@ import type { SqlExecutor } from "./postgres";
 import type {
   AppRepository,
   CreatePersonaInput,
+  CreateVoiceAuthorizationInput,
   CreateVoiceProfileInput,
   InsertMemoryInput,
   InsertMessageInput,
@@ -11,6 +12,7 @@ import type {
   Message,
   Persona,
   User,
+  VoiceAuthorization,
   VoiceMeta,
 } from "./types";
 
@@ -65,6 +67,24 @@ type VoiceProfileRow = {
   provider_voice_status?: VoiceMeta["providerVoiceStatus"];
   provider_voice_error_code?: string | null;
   provider_voice_updated_at?: Date | string | null;
+  created_at: Date | string;
+};
+
+type VoiceAuthorizationRow = {
+  id: string;
+  voice_id: string;
+  user_id: string;
+  speaker_status: VoiceAuthorization["speakerStatus"];
+  basis: VoiceAuthorization["basis"];
+  status: VoiceAuthorization["status"];
+  reason_code: string | null;
+  notice_version: string;
+  separate_consent_confirmed: boolean;
+  third_party_processing_confirmed: boolean;
+  synthetic_disclosure_confirmed: boolean;
+  attested_at: Date | string;
+  reviewed_at: Date | string | null;
+  revoked_at: Date | string | null;
   created_at: Date | string;
 };
 
@@ -133,6 +153,32 @@ function mapVoiceProfile(row: VoiceProfileRow): VoiceMeta {
   };
 }
 
+function mapVoiceAuthorization(row: VoiceAuthorizationRow): VoiceAuthorization {
+  return {
+    id: row.id,
+    voiceId: row.voice_id,
+    userId: row.user_id,
+    speakerStatus: row.speaker_status,
+    basis: row.basis,
+    status: row.status,
+    reasonCode: row.reason_code,
+    noticeVersion: row.notice_version,
+    separateConsentConfirmed: row.separate_consent_confirmed,
+    thirdPartyProcessingConfirmed: row.third_party_processing_confirmed,
+    syntheticDisclosureConfirmed: row.synthetic_disclosure_confirmed,
+    attestedAt: toIsoString(row.attested_at),
+    reviewedAt: row.reviewed_at ? toIsoString(row.reviewed_at) : null,
+    revokedAt: row.revoked_at ? toIsoString(row.revoked_at) : null,
+    createdAt: toIsoString(row.created_at),
+  };
+}
+
+const VOICE_AUTHORIZATION_COLUMNS = `
+  id, voice_id, user_id, speaker_status, basis, status, reason_code, notice_version,
+  separate_consent_confirmed, third_party_processing_confirmed,
+  synthetic_disclosure_confirmed, attested_at, reviewed_at, revoked_at, created_at
+`;
+
 function parseVector(value: string | number[]): Float32Array {
   if (Array.isArray(value)) return Float32Array.from(value);
   const trimmed = value.trim();
@@ -148,6 +194,21 @@ function serializeVector(value: Float32Array): string {
 }
 
 export function createPostgresRepository(sql: SqlExecutor): AppRepository {
+  async function getCurrentVoiceAuthorizationForUser(
+    voiceId: string,
+    userId: string,
+  ): Promise<VoiceAuthorization | null> {
+    const rows = await sql.query<VoiceAuthorizationRow>(
+      `SELECT ${VOICE_AUTHORIZATION_COLUMNS}
+       FROM voice_authorizations
+       WHERE voice_id = $1 AND user_id = $2
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+      [voiceId, userId],
+    );
+    return rows[0] ? mapVoiceAuthorization(rows[0]) : null;
+  }
+
   return {
     async getUserByEmail(email: string): Promise<User | null> {
       const rows = await sql.query<UserRow>(
@@ -315,6 +376,67 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
         [voiceId, userId],
       );
       return Boolean(rows[0]);
+    },
+
+    async replaceVoiceAuthorization(
+      input: CreateVoiceAuthorizationInput,
+    ): Promise<VoiceAuthorization> {
+      return sql.transaction(async (transaction) => {
+        await transaction.query(
+          `UPDATE voice_authorizations
+           SET status = 'revoked', revoked_at = now()
+           WHERE voice_id = $1 AND user_id = $2
+             AND status IN ('pending_review', 'approved')`,
+          [input.voiceId, input.userId],
+        );
+        const rows = await transaction.query<VoiceAuthorizationRow>(
+          `INSERT INTO voice_authorizations
+             (id, voice_id, user_id, speaker_status, basis, status, reason_code,
+              notice_version, separate_consent_confirmed,
+              third_party_processing_confirmed, synthetic_disclosure_confirmed, attested_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           RETURNING ${VOICE_AUTHORIZATION_COLUMNS}`,
+          [
+            input.id,
+            input.voiceId,
+            input.userId,
+            input.speakerStatus,
+            input.basis,
+            input.status,
+            input.reasonCode,
+            input.noticeVersion,
+            input.separateConsentConfirmed,
+            input.thirdPartyProcessingConfirmed,
+            input.syntheticDisclosureConfirmed,
+            input.attestedAt,
+          ],
+        );
+        if (!rows[0]) throw new Error("Failed to create voice authorization");
+        return mapVoiceAuthorization(rows[0]);
+      });
+    },
+
+    async getCurrentVoiceAuthorization(voiceId, userId): Promise<VoiceAuthorization | null> {
+      return getCurrentVoiceAuthorizationForUser(voiceId, userId);
+    },
+
+    async revokeVoiceAuthorization(voiceId, userId): Promise<VoiceAuthorization | null> {
+      const rows = await sql.query<VoiceAuthorizationRow>(
+        `UPDATE voice_authorizations
+         SET status = 'revoked', revoked_at = now()
+         WHERE id = (
+           SELECT id FROM voice_authorizations
+           WHERE voice_id = $1 AND user_id = $2
+             AND status IN ('pending_review', 'approved')
+           ORDER BY created_at DESC, id DESC
+           LIMIT 1
+           FOR UPDATE
+         )
+         RETURNING ${VOICE_AUTHORIZATION_COLUMNS}`,
+        [voiceId, userId],
+      );
+      if (rows[0]) return mapVoiceAuthorization(rows[0]);
+      return getCurrentVoiceAuthorizationForUser(voiceId, userId);
     },
 
     async insertMemory(input: InsertMemoryInput): Promise<void> {

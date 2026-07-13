@@ -10,6 +10,10 @@ import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs";
+import type {
+  CreateVoiceAuthorizationInput,
+  VoiceAuthorization,
+} from "./storage/types";
 
 const DATA_DIR = process.env.DATA_DIR || "./data";
 
@@ -75,6 +79,29 @@ function initSchema(db: Database.Database) {
       created_at  TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_messages_persona ON messages(persona_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS voice_authorizations (
+      id                                  TEXT PRIMARY KEY,
+      voice_id                            TEXT NOT NULL,
+      user_id                             TEXT NOT NULL,
+      speaker_status                      TEXT NOT NULL CHECK (speaker_status IN ('living','deceased')),
+      basis                               TEXT NOT NULL CHECK (basis IN ('self','speaker_separate_consent','legal_representative','close_relative_request')),
+      status                              TEXT NOT NULL CHECK (status IN ('pending_review','approved','rejected','revoked')),
+      reason_code                         TEXT,
+      notice_version                      TEXT NOT NULL,
+      separate_consent_confirmed          INTEGER NOT NULL,
+      third_party_processing_confirmed    INTEGER NOT NULL,
+      synthetic_disclosure_confirmed      INTEGER NOT NULL,
+      attested_at                         TEXT NOT NULL,
+      reviewed_at                         TEXT,
+      revoked_at                          TEXT,
+      created_at                          TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_authorizations_one_active
+      ON voice_authorizations(voice_id, user_id)
+      WHERE status IN ('pending_review','approved');
+    CREATE INDEX IF NOT EXISTS idx_voice_authorizations_owner_created
+      ON voice_authorizations(user_id, voice_id, created_at DESC);
   `);
 }
 
@@ -326,4 +353,92 @@ export function listMessages(personaId: string, limit = 50): Message[] {
       createdAt: r.created_at,
     }))
     .reverse();
+}
+
+// ------- Voice Authorization -------
+function rowToVoiceAuthorization(row: any): VoiceAuthorization {
+  return {
+    id: row.id,
+    voiceId: row.voice_id,
+    userId: row.user_id,
+    speakerStatus: row.speaker_status,
+    basis: row.basis,
+    status: row.status,
+    reasonCode: row.reason_code,
+    noticeVersion: row.notice_version,
+    separateConsentConfirmed: Boolean(row.separate_consent_confirmed),
+    thirdPartyProcessingConfirmed: Boolean(row.third_party_processing_confirmed),
+    syntheticDisclosureConfirmed: Boolean(row.synthetic_disclosure_confirmed),
+    attestedAt: row.attested_at,
+    reviewedAt: row.reviewed_at,
+    revokedAt: row.revoked_at,
+    createdAt: row.created_at,
+  };
+}
+
+export function replaceVoiceAuthorization(
+  input: CreateVoiceAuthorizationInput,
+): VoiceAuthorization {
+  const database = getDb();
+  return database.transaction(() => {
+    const now = new Date().toISOString();
+    database.prepare(
+      `UPDATE voice_authorizations
+       SET status = 'revoked', revoked_at = ?
+       WHERE voice_id = ? AND user_id = ?
+         AND status IN ('pending_review','approved')`,
+    ).run(now, input.voiceId, input.userId);
+    database.prepare(
+      `INSERT INTO voice_authorizations
+         (id, voice_id, user_id, speaker_status, basis, status, reason_code,
+          notice_version, separate_consent_confirmed, third_party_processing_confirmed,
+          synthetic_disclosure_confirmed, attested_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      input.id,
+      input.voiceId,
+      input.userId,
+      input.speakerStatus,
+      input.basis,
+      input.status,
+      input.reasonCode,
+      input.noticeVersion,
+      Number(input.separateConsentConfirmed),
+      Number(input.thirdPartyProcessingConfirmed),
+      Number(input.syntheticDisclosureConfirmed),
+      input.attestedAt,
+      now,
+    );
+    return getCurrentVoiceAuthorization(input.voiceId, input.userId)!;
+  })();
+}
+
+export function getCurrentVoiceAuthorization(
+  voiceId: string,
+  userId: string,
+): VoiceAuthorization | null {
+  const row = getDb().prepare(
+    `SELECT * FROM voice_authorizations
+     WHERE voice_id = ? AND user_id = ?
+     ORDER BY created_at DESC, id DESC
+     LIMIT 1`,
+  ).get(voiceId, userId) as any;
+  return row ? rowToVoiceAuthorization(row) : null;
+}
+
+export function revokeVoiceAuthorization(
+  voiceId: string,
+  userId: string,
+): VoiceAuthorization | null {
+  const database = getDb();
+  const current = getCurrentVoiceAuthorization(voiceId, userId);
+  if (!current) return null;
+  if (current.status !== "revoked") {
+    database.prepare(
+      `UPDATE voice_authorizations
+       SET status = 'revoked', revoked_at = ?
+       WHERE id = ? AND user_id = ?`,
+    ).run(new Date().toISOString(), current.id, userId);
+  }
+  return getCurrentVoiceAuthorization(voiceId, userId);
 }

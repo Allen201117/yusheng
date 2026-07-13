@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   deleteVoiceEverywhere,
   provisionVoicePreset,
+  revokeVoicePreset,
 } from "../src/lib/voicePresetService";
 import type { AppRepository, VoiceMeta } from "../src/lib/storage/types";
 import type { VoiceObjectStore } from "../src/lib/storage/voiceObjectStore";
@@ -155,6 +156,49 @@ it("keeps metadata retryable when provider deletion fails", async () => {
       removePreset: async () => { throw error; },
     }),
     /provider preset deletion failed/,
+  );
+  assert.equal(f.meta?.providerVoiceStatus, "failed");
+  assert.equal(f.meta?.providerVoiceId, "speech:yusheng-voice-1:provider-id");
+  assert.doesNotMatch(f.calls.join(","), /store:delete/);
+});
+
+it("revokes only the provider preset and preserves the private source recording", async () => {
+  const f = fixture(voiceMeta({
+    providerVoiceStatus: "ready",
+    providerVoiceId: "speech:yusheng-voice-1:provider-id",
+  }));
+  const result = await revokeVoicePreset("voice-1", "user-1", {
+    repository: f.repository,
+    store: f.store,
+    removePreset: async (uri) => { f.calls.push(`provider:delete:${uri}`); },
+  });
+
+  assert.equal(result, "revoked");
+  assert.deepEqual(f.calls, [
+    "meta",
+    "state:deleting",
+    "provider:delete:speech:yusheng-voice-1:provider-id",
+    "state:not_created",
+  ]);
+  assert.equal((await f.store.get("voice-1", "user-1"))?.body.toString(), "reference");
+});
+
+it("keeps a failed preset revocation retryable without deleting source audio", async () => {
+  const f = fixture(voiceMeta({
+    providerVoiceStatus: "ready",
+    providerVoiceId: "speech:yusheng-voice-1:provider-id",
+  }));
+  const error = Object.assign(new Error("provider unavailable"), {
+    code: "provider_http_503_unknown",
+  });
+
+  await assert.rejects(
+    revokeVoicePreset("voice-1", "user-1", {
+      repository: f.repository,
+      store: f.store,
+      removePreset: async () => { throw error; },
+    }),
+    /provider preset revocation failed/,
   );
   assert.equal(f.meta?.providerVoiceStatus, "failed");
   assert.equal(f.meta?.providerVoiceId, "speech:yusheng-voice-1:provider-id");
