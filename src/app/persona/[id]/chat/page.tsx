@@ -206,7 +206,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               enqueueSpeech(json.sentence as SpeechPlan);
             } else if (json.done) {
               await loadHistory();
-              if (json.reply && !receivedSentence) speak(json.reply);
+              if (json.reply && !receivedSentence && !json.safety) speak(json.reply);
             } else if (json.error) throw new Error(json.error);
           } catch (err) {
             if (!(err instanceof SyntaxError)) throw err;

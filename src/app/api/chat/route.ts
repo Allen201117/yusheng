@@ -7,17 +7,12 @@ import { logger } from "@/lib/logger";
 import { getRepository } from "@/lib/storage/repository";
 import { SpeechPlanAccumulator } from "@/lib/speechPlanning";
 import { buildPersonaSystemPrompt } from "@/lib/personaPrompt";
+import { detectSelfHarm, SAFETY_REPLY } from "@/lib/safety";
 
 export const runtime = "nodejs";
 
 const TOP_K = 3;
 const MIN_SCORE = 0.35;
-
-const SELF_HARM_SIGNALS = [
-  "自杀", "自残", "想死", "不想活", "活不下去", "结束自己", "了断",
-];
-const SAFETY_REPLY =
-  "我听到了你的痛。你愿意把这段难受多讲一点吗？现在就联系一个真实的人也很重要——北京心理危机研究与干预中心 24 小时热线：010-82951332，或拨打 12320-5。";
 
 export async function POST(req: NextRequest) {
   const requestStartedAt = performance.now();
@@ -46,29 +41,22 @@ export async function POST(req: NextRequest) {
   await repository.insertMessage({ id: randomUUID(), personaId, role: "user", content: text });
 
   // 自伤词兜底 — 走 SSE 协议保持一致
-  if (SELF_HARM_SIGNALS.some((w) => text.includes(w))) {
+  if (detectSelfHarm(text)) {
     await repository.insertMessage({ id: randomUUID(), personaId, role: "assistant", content: SAFETY_REPLY });
     const safetyStream = new ReadableStream({
       start(controller) {
         const enc = new TextEncoder();
-        const speech = new SpeechPlanAccumulator();
         controller.enqueue(enc.encode(`data: ${JSON.stringify({ meta: { retrievedMemories: [] } })}\n\n`));
         // 逐字发送安全回复，保持流式体验
         for (const char of SAFETY_REPLY) {
           controller.enqueue(enc.encode(`data: ${JSON.stringify({ token: char })}\n\n`));
-          for (const sentence of speech.push(char)) {
-            controller.enqueue(enc.encode(`data: ${JSON.stringify({ sentence })}\n\n`));
-          }
-        }
-        for (const sentence of speech.flush()) {
-          controller.enqueue(enc.encode(`data: ${JSON.stringify({ sentence })}\n\n`));
         }
         controller.enqueue(
           enc.encode(`data: ${JSON.stringify({
             done: true,
             reply: SAFETY_REPLY,
             safety: true,
-            metrics: { firstSentenceMs: Math.round(performance.now() - requestStartedAt) },
+            metrics: { totalMs: Math.round(performance.now() - requestStartedAt) },
           })}\n\n`),
         );
         controller.close();
@@ -101,7 +89,7 @@ export async function POST(req: NextRequest) {
     retrieved.length > 0
       ? "你和对方共同拥有的真实记忆（请自然引用，不要生硬复述）：\n" +
         retrieved.map((r, i) => `${i + 1}. ${r.content}`).join("\n")
-      : "（这次提问没有特别相关的记忆，凭借你对对方的了解自然回应即可。）";
+      : "（这次提问没有检索到相关的真实记忆。保持自然陪伴，但不要补充或暗示不存在的共同经历。）";
 
   const systemPrompt = buildPersonaSystemPrompt({
     name: persona.name,
