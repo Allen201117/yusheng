@@ -4,7 +4,7 @@ Updated: 2026-07-13 (Asia/Shanghai)
 
 ## Local evidence
 
-- `npm test`: 134 passed, 0 failed after sentence voice streaming, crisis-safety, provider preset lifecycle and fallback changes.
+- `npm test`: 159 passed, 0 failed after sentence voice streaming, crisis-safety, provider preset lifecycle, authorization gates, directly speakable output and identity disclosure changes.
 - `npm run typecheck`: passed.
 - `npm run build`: passed on Next.js 15.5.20.
 - `git diff --check`: passed.
@@ -30,12 +30,14 @@ Updated: 2026-07-13 (Asia/Shanghai)
 
 ## Latest verified Preview
 
-- Deployment: `dpl_H929kjZyiCuA1H1EscNF2pxqmRD4`
-- URL: `https://yusheng-9n8hnkbru-allens-projects-5408d95e.vercel.app`
+- Deployment: `dpl_2vLt2gyDUs3ZUxBqMTYNTvLaMVtB`
+- URL: `https://yusheng-12r8gmyuh-allens-projects-5408d95e.vercel.app`
 - Status: Ready
 - Function region: `sin1`
 - `/login`: HTTP 200 through Vercel protection bypass
 - `/api/auth/check` without a session: HTTP 401 with `{"ok":false}`
+- `/api/auth/login` with a disposable test identity: HTTP 500 on four retried requests. Vercel runtime logs consistently reported `STORAGE_BACKEND must be local or cloud`; no test user was created.
+- Preview environment listing contains `AUTH_MODE`, `RESEND_API_KEY`, `SESSION_SECRET`, `SILICONFLOW_API_KEY` and `BLOB_READ_WRITE_TOKEN`, but no `STORAGE_BACKEND` or `DATABASE_URL`.
 
 ## Pending gate
 
@@ -46,3 +48,5 @@ Neon is not provisioned because the Vercel account owner must first accept the N
 - authenticated voice/persona/memory/message persistence cannot be exercised;
 - cross-account isolation and redeploy persistence are not yet proven;
 - Production must not be promoted or switched to cloud storage.
+
+The current Preview proves automatic Git deployment and public route execution only. It is not a usable product environment until the database gate is completed.
