@@ -13,6 +13,8 @@
     "test:coverage": "node --import tsx --experimental-test-coverage --test tests/*.test.ts"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
+    "@vercel/blob": "^2.6.1",
     "better-sqlite3": "^11.5.0",
     "next": "15.5.20",
     "react": "^18.3.1",
