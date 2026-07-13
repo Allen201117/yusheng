@@ -1,123 +1,84 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件约束所有继续开发余声的 agent。产品已经部署，但仍处于 0→1 验证和生产加固阶段。
 
-## 项目概览
+## 核心目标
 
-- 项目名称：余声 v2（YuSheng）
-- 项目类型：AI 声音记忆陪伴机器人 — Next.js 15 Web 应用
-- 主要技术栈：Next.js 15 (App Router) + React 18 + TypeScript + better-sqlite3
-- 包管理器：npm
-- 外部服务：SiliconFlow（TTS/ASR/Embedding/LLM 全部走一个 API Key）
-- Node 版本：>=22
+余声是“经授权的声音记忆陪伴产品”。核心价值是：用真实授权的声音材料、人物事实与关系记忆，生成低延迟、有情绪但不冒充本人真实意志的语音对话。不要把产品描述成“复活逝者”。
+
+当前不做视觉重构。需要优先保证：数据不丢、用户隔离、声音授权与删除、声音相似度和情绪、首音速度、人物事实一致性。
+
+## 技术栈
+
+- Next.js 15 App Router、React 18、TypeScript、Node.js >= 22
+- 生产结构化数据：Neon Serverless Postgres + pgvector
+- 生产声音原文件：Vercel Private Blob
+- 本地开发和旧数据迁移：better-sqlite3 + `data/voices`
+- AI 服务：SiliconFlow ASR / bge-m3 / DeepSeek-V3 / CosyVoice
 
 ## 常用命令
 
 ```bash
-npm install          # 安装依赖
-npm run dev          # 开发启动（localhost:3000）
-npm run build        # 生产构建
-npm start            # 生产启动
-npm run lint         # ESLint
-node --test tests/*.test.js  # 运行测试
+npm install
+npm run dev
+npm test
+npm run test:coverage
+npm run typecheck
+npm run build
+npm run db:migrate:dry
+npm run db:migrate
+npm run data:migrate:dry -- --data-dir ./data
 ```
 
-## 目录结构
+## 存储边界
 
+- API 路由不得直接 import `@/lib/db` 或 `@/lib/voiceStore`。
+- 结构化数据只能通过 `src/lib/storage/repository.ts`。
+- 声音原文件只能通过 `src/lib/storage/voiceObjectStore.ts`。
+- 生产必须设置 `STORAGE_BACKEND=cloud`、`DATABASE_URL` 和 `BLOB_READ_WRITE_TOKEN`。
+- 生产拒绝 `STORAGE_BACKEND=local`，不得回退到 Vercel 临时文件系统。
+- 所有用户资源读取必须带 owner ID；人物的记忆和消息通过已验证的人物归属访问。
+
+## 目录重点
+
+```text
+src/app/api/                         已鉴权的业务入口
+src/lib/storage/config.ts            存储配置和生产保护
+src/lib/storage/repository.ts        本地/云结构化存储边界
+src/lib/storage/postgresRepository.ts Neon repository
+src/lib/storage/voiceObjectStore.ts  本地/Private Blob 边界
+migrations/                          版本化 Postgres schema
+scripts/apply-migrations.ts          schema migration
+scripts/migrate-local-data.ts        旧数据 dry-run / import / report
+tests/                               Node test runner 测试
+docs/handoff.md                      上线与交接契约
 ```
-src/
-  app/
-    layout.tsx / globals.css     # 根布局 + 暖光旧信设计系统
-    page.tsx                     # 首页：人物列表
-    login/page.tsx               # 共享密码登录
-    persona/
-      new/page.tsx               # 创建人物（绑定声音+性格描述）
-      [id]/chat/page.tsx         # 对话页（LLM 角色扮演 + 语音播放）
-      [id]/memories/page.tsx     # 记忆录入与管理
-    voice/new/page.tsx           # 上传参考声音 + 试听克隆效果
-    api/
-      auth/check|login|logout/   # 认证相关
-      chat/route.ts              # 对话（RAG 召回 + LLM）
-      memory/route.ts            # 记忆 CRUD + 向量化
-      persona/route.ts           # 人物 CRUD
-      tts/route.ts               # TTS 语音合成（CosyVoice 零样本克隆）
-      voice/upload|transcribe/   # 参考音频上传 + ASR
-  components/
-    AuthGuard.tsx                # 客户端鉴权守卫（调 /api/auth/check）
-  lib/
-    auth.ts       # HMAC-SHA256 签名 session
-    guard.ts      # API 路由鉴权守卫（requireAuth）
-    db.ts         # SQLite 数据层（personas/memories/messages）
-    cosyvoice.ts  # CosyVoice2-0.5B TTS 客户端
-    asr.ts        # SenseVoiceSmall ASR 客户端
-    llm.ts        # DeepSeek-V3 LLM 客户端
-    embedding.ts  # bge-m3 向量化 + cosineSim
-    voiceStore.ts # 参考音频文件存储
-    audioProbe.ts # 纯 JS 音频时长解析（WAV/MP3/M4A，无 ffmpeg）
-    logger.ts     # 结构化日志（console + 文件）
-    rateLimit.ts  # TTS 速率限制（内存 Map，每用户每天 50 次）
-data/              # 运行时数据（gitignore）— SQLite + 音频文件 + 日志
-docs/              # 设计规范 + 接入笔记 + 交接文档
-```
-
-## 核心架构
-
-### 用户流程
-```
-录参考声音 → 创建人物 → 录入记忆 → 对话（文字 + 语音克隆播放）
-```
-
-### 对话 + RAG 流程
-```
-用户发消息 → embedOne(text) → cosineSim 排序 → TOP 3 记忆召回
-→ 拼入 system prompt → chatComplete() → 写入 AI reply
-→ 前端自动调 /api/tts → CosyVoice 克隆语音播放
-```
-
-### 数据库（better-sqlite3，同步 API，WAL 模式）
-- `personas` — 人物（id, user_id, name, relation, voice_id, persona_desc）
-- `memories` — 记忆（id, persona_id, content, embedding BLOB, 级联删除）
-- `messages` — 聊天记录（id, persona_id, role, content, 级联删除）
-
-### 认证
-- 共享密码 + cookie session（HMAC-SHA256 签名）
-- 未设 `ACCESS_PASSWORD` 时免登（开发模式）
-- `SESSION_SECRET` 生产环境必须更换默认值
-- 预留 `AUTH_MODE = "feishu"` 切换点
-
-### Runtime
-- 全部 API 路由标记 `runtime = "nodejs"`（better-sqlite3 不支持 Edge）
 
 ## 开发规范
 
-- 按项目现有风格修改。UI 用 globals.css 的 CSS 变量，组件优先复用 `.y-*` class。
-- 不做无关格式化，不引入新依赖除非任务明确需要。
-- 所有 API 路由必须调 `requireAuth(req)`，前端页面由 `AuthGuard` 守卫。
-- 对外部 API 的调用必须用 lib 层的客户端函数，不在页面/路由里直接 fetch SiliconFlow。
-- 不吞错 catch，catch 里至少打 logger.error。
-- 不确定业务口径时标注"不确定"，不要猜。
+1. 先写能失败的测试，再实现；修复后跑相关测试、全量测试、类型检查和构建。
+2. API 必须先 `requireAuth(req)`；不得新开免鉴权的数据入口。
+3. 外部 AI API 只通过 `src/lib` 客户端调用，不在页面或路由散落请求。
+4. 新 schema 必须增加版本化 migration，同时更新 repository、测试和 `docs/handoff.md`。
+5. 不吞错误；日志不得包含密钥、完整声音字节、密码或验证码。
+6. 不把 `data/`、真实音频、`.env*` 或 `migration-report.json` 提交到 Git。
+7. 不改视觉设计，除非用户明确重新授权。
 
-## 测试规范
+## 当前事实与风险
 
-- 纯函数优先测试（cosineSim、rateLimit、auth 签名、自伤检测等）。
-- 涉及 SQLite 的测试用 `:memory:` 数据库。
-- 不 mock SiliconFlow API（单元测试不调网络）。
-
-## 已知风险与约束
-
-1. **SiliconFlow API Key 是唯一外部依赖**，所有 AI 能力靠它
-2. **不引入 ffmpeg**，音频解析走纯 JS
-3. **Next.js 15 App Router**，页面组件的 `params` 是 Promise，用 `use(params)` 解包
-4. **data/ 目录不入库**，数据库和音频文件需要单独备份（scripts/backup.sh）
-5. **CosyVoice 零样本克隆需要参考音频的文字稿**，这是 API 硬性要求
-6. **自伤检测是关键词匹配**，不是 NLP，可能漏检/误检
-7. **速率限制存内存**，重启清零
-8. **对话无流式输出**，用户需等 3-8 秒看到完整回复
+- `/api/chat` 已用 SSE 输出文字；语音仍在完整文本结束后单次生成，尚非句级流式。
+- 认证默认为邮箱密码；只有显式 `AUTH_MODE=disabled` 才免登。
+- `SESSION_SECRET` 在生产不能使用默认值或空值。
+- TTS 限流仍在单进程内存里，多实例不可靠。
+- 自伤检测仍是关键词规则。
+- 真实 Preview 持久化、跨用户隔离、Blob 删除和重部署后的读回必须有直接证据，不能用本地测试代替。
+- 授权、撤销和彻底删除流程尚未完成。
 
 ## 禁止事项
 
-- 引入 ffmpeg / 重型依赖
-- 在页面层堆复杂业务逻辑
-- 在 API 路由里直接写 SiliconFlow HTTP 调用（用 lib 封装）
-- 改 globals.css 的设计 token 值（颜色/间距/动效已定稿）
-- 改数据库 schema 而不更新 tests 和 handoff.md
+- 线上使用 SQLite、`data/voices` 或公开 Blob
+- 只凭 personaId / voiceId 读取资源，不核对 userId
+- 在迁移报告有 `missing` / `failed` 时切 Production
+- 假装“本地构建成功”等于“线上持久化已验证”
+- 引入 ffmpeg 作为必需依赖
+- 未经用户要求进行视觉层重构

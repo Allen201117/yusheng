@@ -1,130 +1,117 @@
-# 余声 YuSheng v2 交接文档
+# 余声交接文档
 
-> 最后更新：2026-06-01
-> 版本：0.1.0 成熟 MVP
-> 状态：核心闭环可运行，已补上用户级声音隔离和显式认证模式
+> 最后更新：2026-07-13
+> 当前阶段：已上线产品的生产底座加固；云存储切换尚需真实 Preview 验证
 
 ## 产品定位
 
-余声是一个 AI 声音记忆陪伴产品。用户上传或录制一段参考声音，创建一个人物，录入具体记忆，然后用文字对话，并听到克隆声音朗读回复。
+余声是“经授权的声音记忆陪伴产品”：保存本人或亲友的声音与真实记忆，通过低延迟、有情绪的语音对话让用户重新听见熟悉的表达。健在者和逝者需要走不同授权流程；产品不得暗示“复活”或把模型生成内容冒充本人的真实意志。
 
-核心流程：
-
-```text
-登录 -> 录参考声音 -> 创建人物 -> 录入记忆 -> 流式对话 -> 克隆声音朗读
-```
-
-## 技术栈
-
-| 层 | 选型 |
-|---|---|
-| 前端 | Next.js 15 App Router, React 18, TypeScript |
-| API | Next.js Route Handlers, `runtime = "nodejs"` |
-| 数据库 | better-sqlite3, WAL 模式 |
-| 声音文件 | 本地 `data/voices`，meta 中记录 `userId` |
-| ASR | SiliconFlow SenseVoiceSmall |
-| Embedding | SiliconFlow bge-m3 |
-| LLM | SiliconFlow DeepSeek-V3 |
-| TTS | SiliconFlow CosyVoice2-0.5B |
-| 邮件 | Resend，可选 |
-
-## 当前实现
-
-- 认证：默认 `AUTH_MODE=email`，邮箱 + 密码登录，首次登录自动注册。
-- 开发免登：仅当显式设置 `AUTH_MODE=disabled` 时启用，返回 `userId="__dev__"`。
-- 生产安全门：生产环境签发 session 时禁止使用默认 `SESSION_SECRET`。
-- 数据隔离：personas 按 `user_id` 查询；memory/message 通过 persona 归属间接隔离。
-- 声音隔离：新版 voice meta 写入 `userId`，上传列表、创建人物、TTS 均按当前用户校验。
-- 旧声音兼容：旧 meta 没有 `userId` 时视为 `__legacy__`，仅 `__legacy__` 和 `__dev__` 可访问。
-- 对话：`/api/chat` 使用 SSE 流式输出，召回 top 3 条相关记忆。
-- 历史截断：读取最近 100 条，再按约 2000 token 估算截断。
-- 语音合成：前端在收到完整 reply 后调用 `/api/tts` 播放克隆声音。
-- 限流：TTS 使用进程内 Map 按用户每日计数。
-- 自伤兜底：关键词命中时不调用 LLM，直接返回安全回复。
-
-## 关键文件
+当前核心流程：
 
 ```text
-src/lib/auth.ts              认证模式、session 签名
-src/lib/db.ts                SQLite schema 和数据访问
-src/lib/voiceStore.ts        用户级声音文件存储
-src/app/api/voice/upload     上传、ASR、列出当前用户声音
-src/app/api/persona          人物 CRUD，绑定当前用户声音
-src/app/api/memory           记忆 CRUD
-src/app/api/chat             RAG + SSE 流式对话
-src/app/api/tts              用户级 TTS 合成
-src/app/voice/new/page.tsx   浏览器录音和上传
-src/app/persona/[id]/chat    聊天 UI
+登录 -> 上传或录制参考声音 -> 创建人物 -> 录入记忆 -> 流式文字对话 -> 克隆声音朗读
 ```
 
-## 环境变量
+## 当前生产架构
 
-必填：
+| 数据 | 本地开发 | Vercel Production / Preview |
+|---|---|---|
+| 用户、人物、记忆、消息、声音元数据 | SQLite | Neon Serverless Postgres |
+| 参考声音原文件 | `data/voices` | Vercel Private Blob |
+| 向量 | SQLite BLOB | pgvector `vector(1024)` |
 
-```bash
-SILICONFLOW_API_KEY=sk-xxx
-SESSION_SECRET=生产环境必须换成随机长字符串
+所有 API 只能通过 `src/lib/storage/repository.ts` 和 `src/lib/storage/voiceObjectStore.ts` 读写数据。SQLite 与 `data/voices` 只允许用于本地开发和旧数据迁移，不能作为线上持久化方案。
+
+生产环境必须同时配置：
+
+```dotenv
+STORAGE_BACKEND=cloud
+DATABASE_URL=...
+BLOB_READ_WRITE_TOKEN=...
+SILICONFLOW_API_KEY=...
+SESSION_SECRET=...
 AUTH_MODE=email
 ```
 
-可选：
+缺少云配置或在生产设置 `STORAGE_BACKEND=local` 时，存储初始化必须报错，不能静默创建 `./data`。
 
-```bash
-COSYVOICE_MODEL=FunAudioLLM/CosyVoice2-0.5B
-ASR_MODEL=FunAudioLLM/SenseVoiceSmall
-EMBEDDING_MODEL=BAAI/bge-m3
-LLM_MODEL=deepseek-ai/DeepSeek-V3
-TTS_DAILY_LIMIT=50
-DATA_DIR=./data
-RESEND_API_KEY=
-EMAIL_FROM=余声 <onboarding@resend.dev>
+## 关键代码
+
+```text
+migrations/001_production_foundation.sql  Postgres / pgvector schema
+scripts/apply-migrations.ts               幂等 schema migration
+scripts/migrate-local-data.ts             SQLite + 本地声音盘点和迁移
+src/lib/storage/config.ts                 生产存储强制保护
+src/lib/storage/repository.ts             本地/云 repository 选择
+src/lib/storage/postgresRepository.ts     Neon 数据访问
+src/lib/storage/voiceObjectStore.ts       本地文件/Private Blob 选择
+src/app/api/*                             只调用上述异步边界
 ```
 
-本地演示免登：
+## 上线切换顺序
 
-```bash
-AUTH_MODE=disabled
-```
+不要直接把 Production 切到 cloud。按以下顺序执行：
 
-生产环境不要使用免登模式。
+1. 在 Vercel 项目中连接独立的 Preview Neon 数据库和 Private Blob。
+2. 只给 Preview 设置 `STORAGE_BACKEND=cloud`、`DATABASE_URL`、`BLOB_READ_WRITE_TOKEN`。
+3. 执行两次 `npm run db:migrate`；第一次只应用待执行版本，第二次必须显示零新增。
+4. 对真实旧数据执行 dry-run：
 
-## 验证命令
+   ```bash
+   npm run data:migrate:dry -- --data-dir ./data --report ./migration-report.json
+   ```
+
+5. 检查报告中的每个 `missing` 和 `failed`。旧声音没有 `userId` 时，工具会尝试按引用它的唯一人物所有者归属；多个用户共同引用时必须用 `--user-map` 人工确认。
+6. 执行正式迁移：
+
+   ```bash
+   STORAGE_BACKEND=cloud npm run data:migrate -- \
+     --data-dir ./data \
+     --user-map ./user-map.json \
+     --report ./migration-report.json
+   ```
+
+7. 重新执行正式迁移。相同 ID 和相同用户下的声音校验和必须全部变为 `skipped`，不能重复导入。
+8. 部署 Preview，使用两个测试账户验证：A 上传的声音，B 无法列出、读取、绑定或删除；重新部署后 A 的人物、记忆、消息和声音仍存在。
+9. 删除测试声音，确认 Blob 已不存在，Postgres 元数据已软删除，TTS 不再可用。
+10. 保存不含密钥的证据到 `docs/verification/production-foundation.md`，再决定是否切 Production。
+
+## 本地验证
 
 ```bash
 npm test
+npm run test:coverage
+npm run typecheck
 npm run build
-npm run lint
+git diff --check
 ```
 
-`npm run lint` 当前执行 `tsc --noEmit --pretty false`，是非交互式类型检查。项目尚未引入 ESLint 依赖。
+生产保护的直接验证：
 
-## 已解决的关键风险
+```bash
+NODE_ENV=production STORAGE_BACKEND=local \
+  node --import tsx -e 'import("./src/lib/storage/repository.ts").then(m => (m.getRepository || m.default.getRepository)())'
+```
 
-- 对话已从整段等待改为 SSE 流式输出。
-- 对话历史不再硬编码 16 条，已按估算 token 截断。
-- 浏览器录音已接入 MediaRecorder。
-- 删除人物时会检查同一用户是否还有 persona 复用该 voice，避免误删共享声音。
-- 声音列表、人物绑定、TTS 已按用户校验，避免直接枚举/复用他人 `voiceId`。
-- 认证不再因为 `ACCESS_PASSWORD` 为空而默认免登。
+预期报错：`Production requires STORAGE_BACKEND=cloud`。
 
-## 剩余风险
+## 已知但尚未完成的高风险项
 
-| 优先级 | 问题 | 建议 |
-|---|---|---|
-| 高 | 参考声音仍存本地磁盘 | 接入对象存储，或至少实现加密备份和恢复流程 |
-| 高 | 缺少完整同意与删除流程 | 增加上传授权提示、数据导出、彻底删除入口 |
-| 中 | TTS 限流是进程内 Map | 多实例部署时改 Redis 或持久化限流 |
-| 中 | SQLite schema 迁移靠代码内 ALTER | 引入轻量 migration 版本表 |
-| 中 | 自伤检测只是关键词 | 增加更完整的安全分类和人工求助引导 |
-| 低 | 无端到端浏览器测试 | 用 Playwright 覆盖登录、上传、创建、记忆、对话主链路 |
+- 真实 Preview 的 Neon / Private Blob 读写、跨用户隔离、重部署持久化和删除还没有形成证据前，不能宣称生产底座完成。
+- TTS 限流仍是进程内 Map，多实例会失真；应迁移到持久化计数或托管限流。
+- 当前是“文字 SSE 完成后再整段 TTS”，还没有达到句级语音流和 4 秒首音目标。
+- 授权、撤销、彻底删除、逝者场景的权利证明仍需单独实现。
+- 人物设定和记忆仍偏自由文本，需要结构化事实、说话风格和不确定性边界。
+- 自伤检测仍是关键词规则，不能当作完整安全系统。
 
-## 接手注意事项
+## 不得破坏的约束
 
-1. 所有 API 路由都必须调用 `requireAuth()`，不要新开未鉴权入口。
-2. 任何读取 voice 的地方都用 `loadVoiceForUser` 或 `readAudioBase64ForUser`。
-3. 创建 persona 前必须校验 voice 属于当前用户。
-4. 删除 persona 后，只有同一用户没有其他 persona 使用该 voice 时才删除声音文件。
-5. `AUTH_MODE=disabled` 只用于本地演示和测试。
-6. `data/` 不进 git，迁移部署时要单独备份 SQLite 和 voices。
-7. 不要引入 ffmpeg 作为必需依赖，当前音频时长解析依赖纯 JS。
-8. CosyVoice 零样本克隆高度依赖准确 reference text，ASR 结果需要允许用户修正。
+1. 所有业务 API 先执行 `requireAuth()`，再访问用户数据。
+2. 人物、声音查询必须带 `userId`；不得只凭可枚举 ID 返回数据。
+3. 参考声音必须使用 Private Blob；不得生成公开 Blob URL。
+4. 创建人物前必须确认 voice 属于当前用户。
+5. 删除人物后，只有该用户没有其他人物复用声音时才删除原文件。
+6. `AUTH_MODE=disabled` 只允许本地演示与测试。
+7. 不把密钥、迁移报告或真实声音样本提交到 Git。
+8. 不引入 ffmpeg 作为必需运行时依赖。

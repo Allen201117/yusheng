@@ -9,6 +9,7 @@ tsconfig.tsbuildinfo
 data/
 *.sqlite
 *.sqlite-journal
+migration-report.json
 
 # 环境变量
 .env
