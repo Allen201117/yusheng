@@ -46,6 +46,10 @@ function createFixture(options: { ownerMatch?: boolean; failMetadata?: boolean }
       meta = {
         ...input,
         audioFile: input.objectPath,
+        providerVoiceId: null,
+        providerVoiceStatus: "not_created",
+        providerVoiceErrorCode: null,
+        providerVoiceUpdatedAt: null,
         createdAt: "2026-07-13T00:00:00.000Z",
       };
       return meta;
@@ -58,6 +62,17 @@ function createFixture(options: { ownerMatch?: boolean; failMetadata?: boolean }
     async listVoiceProfiles(userId) {
       repositoryCalls.push("list");
       return meta?.userId === userId ? [meta] : [];
+    },
+    async updateVoiceProviderState(_voiceId, userId, input) {
+      if (meta?.userId !== userId) return null;
+      meta = {
+        ...meta,
+        providerVoiceId: input.providerVoiceId,
+        providerVoiceStatus: input.status,
+        providerVoiceErrorCode: input.errorCode,
+        providerVoiceUpdatedAt: "2026-07-13T00:01:00.000Z",
+      };
+      return meta;
     },
     async deleteVoiceProfile(_voiceId, userId) {
       repositoryCalls.push("delete");
@@ -142,6 +157,21 @@ it("reads a private object only after metadata ownership passes", async () => {
   assert.equal(result?.body.toString(), "secret");
   assert.equal(fixture.blobCalls.at(-1)?.operation, "get");
   assert.equal(fixture.blobCalls.at(-1)?.options?.access, "private");
+});
+
+it("reads owner-scoped metadata without downloading the private audio", async () => {
+  const fixture = createFixture();
+  const store = createCloudVoiceObjectStore(fixture.repository, fixture.blob, "blob-token");
+  await store.put({
+    userId: "user-a",
+    voiceId: "voice-a",
+    body: Buffer.from("secret"),
+    promptText: "你好",
+    mimeType: "audio/wav",
+  });
+
+  assert.equal((await store.getMeta("voice-a", "user-a"))?.voiceId, "voice-a");
+  assert.deepEqual(fixture.blobCalls.map((call) => call.operation), ["put"]);
 });
 
 it("removes an uploaded Blob when metadata creation fails", async () => {

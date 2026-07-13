@@ -4,11 +4,12 @@ Updated: 2026-07-13 (Asia/Shanghai)
 
 ## Local evidence
 
-- `npm test`: 111 passed, 0 failed after sentence voice streaming and crisis-safety changes.
+- `npm test`: 134 passed, 0 failed after sentence voice streaming, crisis-safety, provider preset lifecycle and fallback changes.
 - `npm run typecheck`: passed.
 - `npm run build`: passed on Next.js 15.5.20.
 - `git diff --check`: passed.
 - Production local-storage guard: `NODE_ENV=production STORAGE_BACKEND=local` fails with `Production requires STORAGE_BACKEND=cloud`.
+- Provider preset local evidence: ready presets avoid Blob reads; stale preset URI errors mark the preset failed and retry dynamic cloning once; general provider outages do not double-call; deleting voices cannot start new synthesis.
 
 ## Vercel project and Git deployment
 

@@ -37,3 +37,28 @@ it("voice routes use the object store and data routes use the repository", async
     assert.match(source, /getRepository/, route);
   }
 });
+
+it("routes use the provider preset fast path and provider-aware deletion lifecycle", async () => {
+  const tts = await readFile(
+    new URL("../src/app/api/tts/route.ts", import.meta.url),
+    "utf8",
+  );
+  const persona = await readFile(
+    new URL("../src/app/api/persona/route.ts", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(tts, /resolveVoiceSynthesisSource/);
+  assert.match(tts, /synthesizeResolvedVoice/);
+  assert.match(persona, /deleteVoiceEverywhere/);
+  assert.match(persona, /\.getMeta\(voiceId, auth\.userId\)/);
+  assert.match(persona, /cleanupPending/);
+
+  const voiceUpload = await readFile(
+    new URL("../src/app/api/voice/upload/route.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(voiceUpload, /export async function DELETE/);
+  assert.match(voiceUpload, /countPersonasUsingVoice/);
+  assert.match(voiceUpload, /deleteVoiceEverywhere/);
+});

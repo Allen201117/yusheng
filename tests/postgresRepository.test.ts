@@ -51,6 +51,19 @@ it("defines the complete durable schema with vector memory storage", async () =>
   assert.match(sql, /voice_id text NOT NULL REFERENCES voice_profiles\(id\) ON DELETE RESTRICT/);
 });
 
+it("adds durable provider voice lifecycle fields", async () => {
+  const sql = await readFile(
+    new URL("../migrations/002_provider_voice_lifecycle.sql", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(sql, /provider_voice_id text/);
+  assert.match(sql, /provider_voice_status text NOT NULL DEFAULT 'not_created'/);
+  assert.match(sql, /provider_voice_error_code text/);
+  assert.match(sql, /provider_voice_updated_at timestamptz/);
+  assert.match(sql, /not_created.*pending.*ready.*failed.*deleting/s);
+});
+
 it("applies a pending migration and records it in one transaction", async () => {
   const queries: Array<{ text: string; params: unknown[] }> = [];
   let transactions = 0;
@@ -248,6 +261,31 @@ it("stores and owner-scopes voice profile metadata", async () => {
   assert.equal(voice.userId, "user-1");
   await repo.getVoiceProfileForUser("voice-1", "user-1");
   assert.deepEqual(fake.calls[1].params, ["voice-1", "user-1"]);
+});
+
+it("updates provider voice state only for the owning user", async () => {
+  const fake = createFakeSql((text, params) => {
+    if (!text.includes("UPDATE voice_profiles")) return [];
+    return [{
+      id: "voice-1", user_id: "user-1", object_path: "users/user-1/voice.wav",
+      checksum_sha256: "abc", prompt_text: "你好", mime_type: "audio/wav",
+      duration_sec: 2, provider_voice_id: params[2], provider_voice_status: params[3],
+      provider_voice_error_code: params[4], provider_voice_updated_at: "2026-07-13T08:00:00.000Z",
+      created_at: "2026-07-13T07:00:00.000Z",
+    }];
+  });
+  const repo = createPostgresRepository(fake.executor);
+
+  const voice = await repo.updateVoiceProviderState("voice-1", "user-1", {
+    status: "ready",
+    providerVoiceId: "speech:yusheng-voice-1:provider-id",
+    errorCode: null,
+  });
+
+  assert.equal(voice?.providerVoiceStatus, "ready");
+  assert.equal(voice?.providerVoiceId, "speech:yusheng-voice-1:provider-id");
+  assert.deepEqual(fake.calls[0].params.slice(0, 2), ["voice-1", "user-1"]);
+  assert.match(fake.calls[0].text, /id = \$1 AND user_id = \$2 AND deleted_at IS NULL/);
 });
 
 it("updates a password by normalized email", async () => {

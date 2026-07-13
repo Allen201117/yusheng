@@ -61,6 +61,10 @@ type VoiceProfileRow = {
   prompt_text: string;
   mime_type: string;
   duration_sec: number | string | null;
+  provider_voice_id?: string | null;
+  provider_voice_status?: VoiceMeta["providerVoiceStatus"];
+  provider_voice_error_code?: string | null;
+  provider_voice_updated_at?: Date | string | null;
   created_at: Date | string;
 };
 
@@ -119,6 +123,12 @@ function mapVoiceProfile(row: VoiceProfileRow): VoiceMeta {
     promptText: row.prompt_text,
     mimeType: row.mime_type,
     durationSec: row.duration_sec === null ? null : Number(row.duration_sec),
+    providerVoiceId: row.provider_voice_id || null,
+    providerVoiceStatus: row.provider_voice_status || "not_created",
+    providerVoiceErrorCode: row.provider_voice_error_code || null,
+    providerVoiceUpdatedAt: row.provider_voice_updated_at
+      ? toIsoString(row.provider_voice_updated_at)
+      : null,
     createdAt: toIsoString(row.created_at),
   };
 }
@@ -247,7 +257,9 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
         `INSERT INTO voice_profiles
            (id, user_id, object_path, checksum_sha256, prompt_text, mime_type, duration_sec)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, user_id, object_path, checksum_sha256, prompt_text, mime_type, duration_sec, created_at`,
+         RETURNING id, user_id, object_path, checksum_sha256, prompt_text, mime_type, duration_sec,
+                   provider_voice_id, provider_voice_status, provider_voice_error_code,
+                   provider_voice_updated_at, created_at`,
         [input.voiceId, input.userId, input.objectPath, input.checksumSha256, input.promptText, input.mimeType, input.durationSec],
       );
       if (!rows[0]) throw new Error("Failed to create voice profile");
@@ -256,7 +268,9 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
 
     async getVoiceProfileForUser(voiceId: string, userId: string): Promise<VoiceMeta | null> {
       const rows = await sql.query<VoiceProfileRow>(
-        `SELECT id, user_id, object_path, checksum_sha256, prompt_text, mime_type, duration_sec, created_at
+        `SELECT id, user_id, object_path, checksum_sha256, prompt_text, mime_type, duration_sec,
+                provider_voice_id, provider_voice_status, provider_voice_error_code,
+                provider_voice_updated_at, created_at
          FROM voice_profiles
          WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
         [voiceId, userId],
@@ -266,13 +280,31 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
 
     async listVoiceProfiles(userId: string): Promise<VoiceMeta[]> {
       const rows = await sql.query<VoiceProfileRow>(
-        `SELECT id, user_id, object_path, checksum_sha256, prompt_text, mime_type, duration_sec, created_at
+        `SELECT id, user_id, object_path, checksum_sha256, prompt_text, mime_type, duration_sec,
+                provider_voice_id, provider_voice_status, provider_voice_error_code,
+                provider_voice_updated_at, created_at
          FROM voice_profiles
          WHERE user_id = $1 AND deleted_at IS NULL
          ORDER BY created_at DESC`,
         [userId],
       );
       return rows.map(mapVoiceProfile);
+    },
+
+    async updateVoiceProviderState(voiceId, userId, input): Promise<VoiceMeta | null> {
+      const rows = await sql.query<VoiceProfileRow>(
+        `UPDATE voice_profiles
+         SET provider_voice_id = $3,
+             provider_voice_status = $4,
+             provider_voice_error_code = $5,
+             provider_voice_updated_at = now()
+         WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+         RETURNING id, user_id, object_path, checksum_sha256, prompt_text, mime_type, duration_sec,
+                   provider_voice_id, provider_voice_status, provider_voice_error_code,
+                   provider_voice_updated_at, created_at`,
+        [voiceId, userId, input.providerVoiceId, input.status, input.errorCode],
+      );
+      return rows[0] ? mapVoiceProfile(rows[0]) : null;
     },
 
     async deleteVoiceProfile(voiceId: string, userId: string): Promise<boolean> {

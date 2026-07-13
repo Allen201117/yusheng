@@ -21,6 +21,7 @@ import {
   deleteVoiceForUser,
   listVoicesForUser,
   loadVoiceForUser,
+  updateVoiceProviderStateForUser,
 } from "../voiceStore";
 import { getStorageConfig, type StorageConfig } from "./config";
 import { getSql } from "./postgres";
@@ -46,6 +47,10 @@ function mapLocalVoice(meta: Awaited<ReturnType<typeof loadVoiceForUser>>): Voic
     promptText: meta.promptText,
     mimeType: meta.mimeType,
     durationSec: meta.durationSec ?? null,
+    providerVoiceId: meta.providerVoiceId || null,
+    providerVoiceStatus: meta.providerVoiceStatus || "not_created",
+    providerVoiceErrorCode: meta.providerVoiceErrorCode || null,
+    providerVoiceUpdatedAt: meta.providerVoiceUpdatedAt || null,
     createdAt: meta.createdAt,
   };
 }
@@ -82,6 +87,9 @@ export function createLocalRepository(): AppRepository {
     async listVoiceProfiles(userId) {
       const voices = await listVoicesForUser(userId);
       return voices.map((voice) => mapLocalVoice(voice)).filter((voice): voice is VoiceMeta => Boolean(voice));
+    },
+    async updateVoiceProviderState(voiceId, userId, input) {
+      return mapLocalVoice(await updateVoiceProviderStateForUser(voiceId, userId, input));
     },
     async deleteVoiceProfile(voiceId, userId) {
       return deleteVoiceForUser(voiceId, userId);

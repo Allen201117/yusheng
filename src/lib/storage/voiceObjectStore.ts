@@ -51,6 +51,7 @@ export type VoiceObject = {
 
 export interface VoiceObjectStore {
   put(input: PutVoiceObjectInput): Promise<VoiceMeta>;
+  getMeta(voiceId: string, userId: string): Promise<VoiceMeta | null>;
   get(voiceId: string, userId: string): Promise<VoiceObject | null>;
   list(userId: string): Promise<VoiceMeta[]>;
   delete(voiceId: string, userId: string): Promise<boolean>;
@@ -166,6 +167,10 @@ export function createCloudVoiceObjectStore(
       return { meta, body: await streamToBuffer(result.stream) };
     },
 
+    async getMeta(voiceId, userId) {
+      return repository.getVoiceProfileForUser(voiceId, userId);
+    },
+
     async list(userId) {
       return repository.listVoiceProfiles(userId);
     },
@@ -192,6 +197,10 @@ function mapLocalVoice(
     promptText: voice.promptText,
     mimeType: voice.mimeType,
     durationSec: voice.durationSec ?? null,
+    providerVoiceId: voice.providerVoiceId || null,
+    providerVoiceStatus: voice.providerVoiceStatus || "not_created",
+    providerVoiceErrorCode: voice.providerVoiceErrorCode || null,
+    providerVoiceUpdatedAt: voice.providerVoiceUpdatedAt || null,
     createdAt: voice.createdAt,
   };
 }
@@ -215,6 +224,10 @@ export function createLocalVoiceObjectStore(): VoiceObjectStore {
       ]);
       if (!meta || !base64) return null;
       return { meta: mapLocalVoice(meta), body: Buffer.from(base64, "base64") };
+    },
+    async getMeta(voiceId, userId) {
+      const meta = await loadVoiceForUser(voiceId, userId);
+      return meta ? mapLocalVoice(meta) : null;
     },
     async list(userId) {
       const voices = await listVoicesForUser(userId);

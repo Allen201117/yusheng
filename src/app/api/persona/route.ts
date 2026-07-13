@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { requireAuth } from "@/lib/guard";
 import { getRepository } from "@/lib/storage/repository";
 import { getVoiceObjectStore } from "@/lib/storage/voiceObjectStore";
+import { deleteVoiceEverywhere } from "@/lib/voicePresetService";
+import { logger } from "@/lib/logger";
 
 export const runtime = "nodejs";
 
@@ -31,7 +33,7 @@ export async function POST(req: NextRequest) {
   if (!relation) return NextResponse.json({ error: "缺少 relation" }, { status: 400 });
   if (!voiceId) return NextResponse.json({ error: "缺少 voiceId" }, { status: 400 });
 
-  const voice = await getVoiceObjectStore().get(voiceId, auth.userId);
+  const voice = await getVoiceObjectStore().getMeta(voiceId, auth.userId);
   if (!voice) return NextResponse.json({ error: "voiceId 不存在或不属于你" }, { status: 404 });
 
   const persona = await getRepository().createPersona({
@@ -63,7 +65,22 @@ export async function DELETE(req: NextRequest) {
 
   // 仅当当前用户没有其他 persona 复用该 voice 时才清参考音频
   if (await repository.countPersonasUsingVoice(voiceId, auth.userId) === 0) {
-    await getVoiceObjectStore().delete(voiceId, auth.userId);
+    try {
+      await deleteVoiceEverywhere(voiceId, auth.userId, {
+        repository,
+        store: getVoiceObjectStore(),
+      });
+    } catch (error) {
+      logger.error("voice_cleanup_pending", {
+        voiceId,
+        userId: auth.userId,
+        errorType: error instanceof Error ? error.name : "unknown",
+      });
+      return NextResponse.json(
+        { ok: true, cleanupPending: true, voiceId },
+        { status: 202 },
+      );
+    }
   }
 
   return NextResponse.json({ ok: true });

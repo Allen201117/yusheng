@@ -23,6 +23,10 @@ export type VoiceMeta = {
   mimeType: string; // 原始音频 MIME 类型（TTS 调用需要）
   userId?: string; // 新版声音所有者；旧 meta 缺失时视为 "__legacy__"
   durationSec?: number | null; // 单段参考音频时长；旧 meta 可能缺失
+  providerVoiceId?: string | null;
+  providerVoiceStatus?: "not_created" | "pending" | "ready" | "failed" | "deleting";
+  providerVoiceErrorCode?: string | null;
+  providerVoiceUpdatedAt?: string | null;
 };
 
 /** 根据 MIME 类型推断文件扩展名 */
@@ -128,6 +132,31 @@ export async function deleteVoiceForUser(voiceId: string, userId: string): Promi
   if (!meta) return false;
   await deleteVoice(voiceId);
   return true;
+}
+
+export async function updateVoiceProviderStateForUser(
+  voiceId: string,
+  userId: string,
+  input: {
+    status: "not_created" | "pending" | "ready" | "failed" | "deleting";
+    providerVoiceId: string | null;
+    errorCode: string | null;
+  },
+): Promise<VoiceMeta | null> {
+  const meta = await loadVoiceForUser(voiceId, userId);
+  if (!meta) return null;
+  const next: VoiceMeta = {
+    ...meta,
+    providerVoiceId: input.providerVoiceId,
+    providerVoiceStatus: input.status,
+    providerVoiceErrorCode: input.errorCode,
+    providerVoiceUpdatedAt: new Date().toISOString(),
+  };
+  const metaFile = path.join(voicesDir(), `${voiceId}.meta.json`);
+  const temporary = `${metaFile}.${randomUUID()}.tmp`;
+  await fs.writeFile(temporary, JSON.stringify(next, null, 2));
+  await fs.rename(temporary, metaFile);
+  return next;
 }
 
 export async function listVoices(): Promise<VoiceMeta[]> {

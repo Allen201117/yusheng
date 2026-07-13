@@ -40,12 +40,15 @@ AUTH_MODE=email
 
 ```text
 migrations/001_production_foundation.sql  Postgres / pgvector schema
+migrations/002_provider_voice_lifecycle.sql 供应商音色状态机
 scripts/apply-migrations.ts               幂等 schema migration
 scripts/migrate-local-data.ts             SQLite + 本地声音盘点和迁移
 src/lib/storage/config.ts                 生产存储强制保护
 src/lib/storage/repository.ts             本地/云 repository 选择
 src/lib/storage/postgresRepository.ts     Neon 数据访问
 src/lib/storage/voiceObjectStore.ts       本地文件/Private Blob 选择
+src/lib/voicePresetService.ts             预置音色创建与删除生命周期
+src/lib/voiceSynthesisService.ts          预置音色快路径与一次动态回退
 src/app/api/*                             只调用上述异步边界
 ```
 
@@ -100,7 +103,9 @@ NODE_ENV=production STORAGE_BACKEND=local \
 
 - 真实 Preview 的 Neon / Private Blob 读写、跨用户隔离、重部署持久化和删除还没有形成证据前，不能宣称生产底座完成。
 - TTS 限流仍是进程内 Map，多实例会失真；应迁移到持久化计数或托管限流。
-- 当前是“文字 SSE 完成后再整段 TTS”，还没有达到句级语音流和 4 秒首音目标。
+- 句级 SSE 和有序播放队列已实现，但真实 Preview 的首音延迟、20 轮稳定性和 4 秒目标仍未验收。
+- 供应商预置音色状态机、TTS 快路径、失效 URI 的一次动态回退和可重试删除已有代码；在权利确认记录完成前不得对已有声音自动批量预置。
+- SiliconFlow 用户预置音色需供应商账号完成实名认证；当前尚无真实成功证据。
 - 授权、撤销、彻底删除、逝者场景的权利证明仍需单独实现。
 - 人物设定和记忆仍偏自由文本，需要结构化事实、说话风格和不确定性边界。
 - 自伤检测仍是关键词规则，不能当作完整安全系统。
@@ -111,7 +116,7 @@ NODE_ENV=production STORAGE_BACKEND=local \
 2. 人物、声音查询必须带 `userId`；不得只凭可枚举 ID 返回数据。
 3. 参考声音必须使用 Private Blob；不得生成公开 Blob URL。
 4. 创建人物前必须确认 voice 属于当前用户。
-5. 删除人物后，只有该用户没有其他人物复用声音时才删除原文件。
+5. 删除人物后，只有该用户没有其他人物复用声音时才删除原文件；供应商删除失败必须返回 `cleanupPending`，并可通过已鉴权的 `DELETE /api/voice/upload?id=...` 重试。
 6. `AUTH_MODE=disabled` 只允许本地演示与测试。
 7. 不把密钥、迁移报告或真实声音样本提交到 Git。
 8. 不引入 ffmpeg 作为必需运行时依赖。

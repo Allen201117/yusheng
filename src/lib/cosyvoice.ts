@@ -3,64 +3,95 @@
  *
  * 文档：https://docs.siliconflow.cn/cn/api-reference/audio/create-speech
  *
- * Slice 1 用 CosyVoice2-0.5B 的"零样本声音克隆"模式：
- *   - 上传一段参考音频（推荐 10-30 秒清晰人声）
- *   - 提供这段音频的文字稿（reference text）
- *   - 提供想让它读出的目标文本
- *   - 返回克隆出的音频
- *
- * 注意：SiliconFlow 提供两种方式：
- *   方案 A (本文件采用)：每次推理都把参考音频随请求传上去（base64）。简单，无需上传步骤。
- *   方案 B：先调 /uploads/audio/voice 上传得到 voice id，再用 voice 字段引用。适合多人复用。
- * Slice 1 选 A，省一个 API 调用，等多用户化时再升级到 B。
+ * 同时支持两种受控的声音来源：
+ *   - 预置音色 URI：参考音频只上传一次，适合反复对话；
+ *   - 动态参考音频：作为预置音色不可用时的回退。
  */
 
 import { toCosyVoiceControls, type SpeechControls } from "./speechPlanning";
+import { providerHttpErrorCode } from "./providerErrors";
 
 const API_BASE = "https://api.siliconflow.cn/v1";
 const DEFAULT_MODEL = process.env.COSYVOICE_MODEL || "FunAudioLLM/CosyVoice2-0.5B";
 
-export type CosyVoiceCloneInput = {
+type CosyVoiceBaseInput = {
   /** 想让 AI 朗读的目标文本 */
   text: string;
-  /** 参考音频（任意采样率的 wav/mp3），base64 字符串 */
-  referenceAudioBase64: string;
-  referenceMime?: string; // 默认 audio/wav
-  /** 参考音频的文字稿，用来对齐音色 */
-  referenceText: string;
   /** 输出格式 */
   responseFormat?: "wav" | "mp3";
   /** 经过白名单归一化的语音表达控制 */
   speech?: SpeechControls;
 };
 
+type CosyVoicePresetInput = CosyVoiceBaseInput & {
+  presetVoiceId: string;
+  referenceAudioBase64?: never;
+  referenceMime?: never;
+  referenceText?: never;
+};
+
+type CosyVoiceDynamicInput = CosyVoiceBaseInput & {
+  presetVoiceId?: never;
+  /** 参考音频（任意采样率的 wav/mp3），base64 字符串 */
+  referenceAudioBase64: string;
+  referenceMime?: string;
+  /** 参考音频的文字稿，用来对齐音色 */
+  referenceText: string;
+};
+
+export type CosyVoiceCloneInput = CosyVoicePresetInput | CosyVoiceDynamicInput;
+
 export type CosyVoiceRequestBody = {
   model: string;
   input: string;
   voice: string;
   response_format: "wav" | "mp3";
-  references: Array<{ audio: string; text: string }>;
+  references?: Array<{ audio: string; text: string }>;
   stream: true;
   speed: number;
   gain: number;
   instruct?: never;
 };
 
+export class CosyVoiceProviderError extends Error {
+  readonly code: string;
+  readonly status: number;
+
+  constructor(status: number, providerCode: unknown) {
+    const code = providerHttpErrorCode(status, providerCode);
+    super(`SiliconFlow CosyVoice 调用失败 (${code})`);
+    this.name = "CosyVoiceProviderError";
+    this.code = code;
+    this.status = status;
+  }
+}
+
 export function createCosyVoiceRequestBody(input: CosyVoiceCloneInput): CosyVoiceRequestBody {
-  const referenceMime = input.referenceMime || "audio/wav";
   const controls = input.speech
     ? toCosyVoiceControls(input.speech)
     : { prompt: "", speed: 1, gain: 0 };
 
+  const presetVoiceId = "presetVoiceId" in input ? input.presetVoiceId?.trim() : "";
+  const referenceAudio = "referenceAudioBase64" in input
+    ? input.referenceAudioBase64?.trim()
+    : "";
+  if (!presetVoiceId && !referenceAudio) {
+    throw new Error("缺少预置音色或参考音频");
+  }
+
+  const references = referenceAudio
+    ? [{
+        audio: `data:${("referenceMime" in input && input.referenceMime) || "audio/wav"};base64,${referenceAudio}`,
+        text: ("referenceText" in input && input.referenceText) || "",
+      }]
+    : undefined;
+
   return {
     model: DEFAULT_MODEL,
     input: controls.prompt ? `${controls.prompt}<|endofprompt|>${input.text}` : input.text,
-    voice: "",
+    voice: presetVoiceId || "",
     response_format: input.responseFormat || "mp3",
-    references: [{
-      audio: `data:${referenceMime};base64,${input.referenceAudioBase64}`,
-      text: input.referenceText,
-    }],
+    references,
     stream: true,
     speed: controls.speed,
     gain: controls.gain,
@@ -86,8 +117,14 @@ export async function synthesizeWithClonedVoice(input: CosyVoiceCloneInput): Pro
   });
 
   if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`SiliconFlow CosyVoice 调用失败 ${resp.status}: ${errText}`);
+    const errorText = await resp.text();
+    let providerCode: unknown = "unknown";
+    try {
+      providerCode = (JSON.parse(errorText) as { code?: unknown }).code || "unknown";
+    } catch {
+      // 不向上层传递供应商原始响应。
+    }
+    throw new CosyVoiceProviderError(resp.status, providerCode);
   }
 
   const arrayBuf = await resp.arrayBuffer();

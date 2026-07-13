@@ -48,6 +48,13 @@ export type Message = {
 
 export type InsertMessageInput = Omit<Message, "createdAt">;
 
+export type ProviderVoiceStatus =
+  | "not_created"
+  | "pending"
+  | "ready"
+  | "failed"
+  | "deleting";
+
 export type VoiceMeta = {
   voiceId: string;
   userId: string;
@@ -57,10 +64,28 @@ export type VoiceMeta = {
   promptText: string;
   mimeType: string;
   durationSec: number | null;
+  providerVoiceId: string | null;
+  providerVoiceStatus: ProviderVoiceStatus;
+  providerVoiceErrorCode: string | null;
+  providerVoiceUpdatedAt: string | null;
   createdAt: string;
 };
 
-export type CreateVoiceProfileInput = Omit<VoiceMeta, "audioFile" | "createdAt">;
+export type CreateVoiceProfileInput = Omit<
+  VoiceMeta,
+  | "audioFile"
+  | "createdAt"
+  | "providerVoiceId"
+  | "providerVoiceStatus"
+  | "providerVoiceErrorCode"
+  | "providerVoiceUpdatedAt"
+>;
+
+export type UpdateVoiceProviderStateInput = {
+  status: ProviderVoiceStatus;
+  providerVoiceId: string | null;
+  errorCode: string | null;
+};
 
 export interface AppRepository {
   getUserByEmail(email: string): Promise<User | null>;
@@ -80,6 +105,11 @@ export interface AppRepository {
   createVoiceProfile(input: CreateVoiceProfileInput): Promise<VoiceMeta>;
   getVoiceProfileForUser(voiceId: string, userId: string): Promise<VoiceMeta | null>;
   listVoiceProfiles(userId: string): Promise<VoiceMeta[]>;
+  updateVoiceProviderState(
+    voiceId: string,
+    userId: string,
+    input: UpdateVoiceProviderStateInput,
+  ): Promise<VoiceMeta | null>;
   deleteVoiceProfile(voiceId: string, userId: string): Promise<boolean>;
   listMemories(personaId: string): Promise<Memory[]>;
   getMemoryById(id: string): Promise<Pick<Memory, "id" | "personaId" | "content"> | null>;
