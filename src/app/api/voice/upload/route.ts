@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { saveVoiceForUser, listVoicesForUser } from "@/lib/voiceStore";
 import { probeAudioDuration } from "@/lib/audioProbe";
 import { transcribeAudio } from "@/lib/asr";
 import { requireAuth } from "@/lib/guard";
+import { getVoiceObjectStore } from "@/lib/storage/voiceObjectStore";
 import {
   MAX_REFERENCE_AUDIO_DURATION_SEC,
   MAX_VOICE_MATERIAL_TOTAL_DURATION_SEC,
@@ -14,7 +14,7 @@ export async function GET(req: NextRequest) {
   try {
     const auth = await requireAuth(req);
     if ("error" in auth) return auth.error;
-    const voices = await listVoicesForUser(auth.userId);
+    const voices = await getVoiceObjectStore().list(auth.userId);
     return NextResponse.json({ voices });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -35,7 +35,8 @@ export async function POST(req: NextRequest) {
     if (files.length === 0) {
       return NextResponse.json({ error: "缺少 audio 文件字段" }, { status: 400 });
     }
-    const existing = await listVoicesForUser(auth.userId);
+    const voiceStore = getVoiceObjectStore();
+    const existing = await voiceStore.list(auth.userId);
     const existingDuration = existing.reduce((sum, voice) => sum + (voice.durationSec || 0), 0);
     let batchDuration = 0;
     const prepared: Array<{
@@ -122,7 +123,13 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      const meta = await saveVoiceForUser(buffer, finalPromptText, mimeType, auth.userId, duration);
+      const meta = await voiceStore.put({
+        body: buffer,
+        promptText: finalPromptText,
+        mimeType,
+        userId: auth.userId,
+        durationSec: duration,
+      });
       saved.push({ ...meta, durationSec: duration, autoTranscribed: !promptText });
     }
 

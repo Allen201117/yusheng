@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getUserByEmail, setUserPassword, verifyCode } from "@/lib/db";
 import { hashPassword } from "@/lib/password";
+import { getRepository } from "@/lib/storage/repository";
 
 export const runtime = "nodejs";
 
@@ -30,17 +30,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "新密码至少 4 位" }, { status: 400 });
   }
 
-  const user = getUserByEmail(email);
+  const repository = getRepository();
+  const user = await repository.getUserByEmail(email);
   if (!user) {
     return NextResponse.json({ error: "该邮箱未注册" }, { status: 404 });
   }
 
-  if (!verifyCode({ email }, code)) {
+  if (!await repository.verifyCode({ email }, code)) {
     return NextResponse.json({ error: "验证码错误或已过期" }, { status: 401 });
   }
 
   const hash = await hashPassword(password);
-  setUserPassword(email, hash);
+  await repository.setUserPassword(email, hash);
 
   return NextResponse.json({ ok: true });
 }

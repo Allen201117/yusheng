@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createVerificationCode } from "@/lib/db";
 import { sendEmailCode, sendSmsCode } from "@/lib/email";
+import { getRepository } from "@/lib/storage/repository";
 
 export const runtime = "nodejs";
 
@@ -54,7 +54,7 @@ async function sendAndRespond(
   lastSent.set(target, now);
 
   const code = String(Math.floor(100000 + Math.random() * 900000));
-  createVerificationCode(
+  await getRepository().createVerificationCode(
     type === "email" ? { email: target } : { phone: target },
     code,
     5,

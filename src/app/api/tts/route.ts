@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { loadVoiceForUser, readAudioBase64ForUser } from "@/lib/voiceStore";
 import { synthesizeWithClonedVoice } from "@/lib/cosyvoice";
-import { getPersonaForUser } from "@/lib/db";
 import { requireAuth } from "@/lib/guard";
 import { checkTtsRateLimit } from "@/lib/rateLimit";
+import { getRepository } from "@/lib/storage/repository";
+import { getVoiceObjectStore } from "@/lib/storage/voiceObjectStore";
 
 export const runtime = "nodejs";
 
@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
 
   let voiceId = (body.voiceId || "").trim();
   if (!voiceId && body.personaId) {
-    const p = getPersonaForUser(body.personaId.trim(), auth.userId);
+    const p = await getRepository().getPersonaForUser(body.personaId.trim(), auth.userId);
     if (!p) return NextResponse.json({ error: "personaId 不存在或不属于你" }, { status: 403 });
     voiceId = p.voiceId;
   }
@@ -46,20 +46,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "缺少 voiceId 或 personaId" }, { status: 400 });
   }
 
-  const meta = await loadVoiceForUser(voiceId, auth.userId);
-  if (!meta) return NextResponse.json({ error: "voiceId 不存在或不属于你" }, { status: 404 });
+  const voice = await getVoiceObjectStore().get(voiceId, auth.userId);
+  if (!voice) return NextResponse.json({ error: "voiceId 不存在或不属于你" }, { status: 404 });
 
-  const refB64 = await readAudioBase64ForUser(voiceId, auth.userId);
-  if (!refB64) return NextResponse.json({ error: "参考音频读取失败" }, { status: 500 });
-
-  const refMime = meta.mimeType || "audio/wav";
+  const refB64 = voice.body.toString("base64");
+  const refMime = voice.meta.mimeType || "audio/wav";
 
   try {
     const audio = await synthesizeWithClonedVoice({
       text,
       referenceAudioBase64: refB64,
       referenceMime: refMime,
-      referenceText: meta.promptText,
+      referenceText: voice.meta.promptText,
       responseFormat: "mp3",
       // 不传 instruct：让 CosyVoice2 完全从参考音频学习语调和韵律
     });

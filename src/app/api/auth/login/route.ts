@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSession, sessionCookieOptions } from "@/lib/auth";
-import { getUserByEmail, createUserByEmail, setUserPassword } from "@/lib/db";
 import { hashPassword, verifyPassword } from "@/lib/password";
+import { getRepository } from "@/lib/storage/repository";
 
 export const runtime = "nodejs";
 
@@ -33,16 +33,17 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "密码至少 4 位" }, { status: 400 });
   }
 
-  let user = getUserByEmail(email);
+  const repository = getRepository();
+  let user = await repository.getUserByEmail(email);
 
   if (!user) {
     // 首次登录：自动注册
     const hash = await hashPassword(password);
-    user = createUserByEmail(email, hash);
+    user = await repository.createUserByEmail(email, hash);
   } else if (!user.password) {
     // 老验证码用户首次设密码
     const hash = await hashPassword(password);
-    setUserPassword(email, hash);
+    await repository.setUserPassword(email, hash);
     user.password = hash;
   } else {
     // 验证密码

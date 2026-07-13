@@ -1,15 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
-import { createPersona, listPersonas, getPersonaForUser, getDb, countPersonasUsingVoice } from "@/lib/db";
-import { loadVoiceForUser, deleteVoiceForUser } from "@/lib/voiceStore";
 import { requireAuth } from "@/lib/guard";
+import { getRepository } from "@/lib/storage/repository";
+import { getVoiceObjectStore } from "@/lib/storage/voiceObjectStore";
 
 export const runtime = "nodejs";
 
 export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if ("error" in auth) return auth.error;
-  return NextResponse.json({ personas: listPersonas(auth.userId) });
+  return NextResponse.json({ personas: await getRepository().listPersonas(auth.userId) });
 }
 
 export async function POST(req: NextRequest) {
@@ -31,10 +31,10 @@ export async function POST(req: NextRequest) {
   if (!relation) return NextResponse.json({ error: "缺少 relation" }, { status: 400 });
   if (!voiceId) return NextResponse.json({ error: "缺少 voiceId" }, { status: 400 });
 
-  const voice = await loadVoiceForUser(voiceId, auth.userId);
+  const voice = await getVoiceObjectStore().get(voiceId, auth.userId);
   if (!voice) return NextResponse.json({ error: "voiceId 不存在或不属于你" }, { status: 404 });
 
-  const persona = createPersona({
+  const persona = await getRepository().createPersona({
     id: randomUUID(),
     userId: auth.userId,
     name,
@@ -52,17 +52,18 @@ export async function DELETE(req: NextRequest) {
   const id = req.nextUrl.searchParams.get("id") || "";
   if (!id) return NextResponse.json({ error: "缺少 id" }, { status: 400 });
 
-  const persona = getPersonaForUser(id, auth.userId);
+  const repository = getRepository();
+  const persona = await repository.getPersonaForUser(id, auth.userId);
   if (!persona) return NextResponse.json({ error: "persona 不存在或不属于你" }, { status: 403 });
 
   const voiceId = persona.voiceId;
 
   // 先删 persona（memories/messages 级联删除）
-  getDb().prepare("DELETE FROM personas WHERE id = ?").run(id);
+  await repository.deletePersona(id, auth.userId);
 
   // 仅当当前用户没有其他 persona 复用该 voice 时才清参考音频
-  if (countPersonasUsingVoice(voiceId, auth.userId) === 0) {
-    await deleteVoiceForUser(voiceId, auth.userId);
+  if (await repository.countPersonasUsingVoice(voiceId, auth.userId) === 0) {
+    await getVoiceObjectStore().delete(voiceId, auth.userId);
   }
 
   return NextResponse.json({ ok: true });
