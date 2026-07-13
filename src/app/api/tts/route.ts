@@ -4,7 +4,7 @@ import { checkTtsRateLimit } from "@/lib/rateLimit";
 import { getRepository } from "@/lib/storage/repository";
 import { getVoiceObjectStore } from "@/lib/storage/voiceObjectStore";
 import { logger } from "@/lib/logger";
-import { normalizeSpeechControls } from "@/lib/speechPlanning";
+import { normalizeSpeechControls, sanitizeSpeechText } from "@/lib/speechPlanning";
 import { resolveVoiceSynthesisSource } from "@/lib/voiceSynthesisSource";
 import { synthesizeResolvedVoice } from "@/lib/voiceSynthesisService";
 import {
@@ -31,6 +31,10 @@ export async function POST(req: NextRequest) {
   if (!text) return NextResponse.json({ error: "缺少 text" }, { status: 400 });
   if (text.length > 500) {
     return NextResponse.json({ error: "text 不得超过 500 字" }, { status: 400 });
+  }
+  const spokenText = sanitizeSpeechText(text);
+  if (!spokenText) {
+    return NextResponse.json({ error: "没有可朗读的内容" }, { status: 400 });
   }
 
   let voiceId = (body.voiceId || "").trim();
@@ -82,7 +86,7 @@ export async function POST(req: NextRequest) {
     const synthesis = await synthesizeResolvedVoice({
       voiceId,
       userId: auth.userId,
-      text,
+      text: spokenText,
       speech: speech || undefined,
       source: voice,
       store: getVoiceObjectStore(),
@@ -94,7 +98,7 @@ export async function POST(req: NextRequest) {
     logger.info("tts_completed", {
       voiceId,
       userId: auth.userId,
-      characters: text.length,
+      characters: spokenText.length,
       emotion: speech?.emotion || "natural",
       voiceSource: synthesis.source,
       presetFallback: synthesis.fellBack,

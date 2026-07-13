@@ -8,6 +8,10 @@ import { getRepository } from "@/lib/storage/repository";
 import { SpeechPlanAccumulator } from "@/lib/speechPlanning";
 import { buildPersonaSystemPrompt } from "@/lib/personaPrompt";
 import { detectSelfHarm, SAFETY_REPLY } from "@/lib/safety";
+import {
+  buildIdentityDisclosureReply,
+  isIdentityRealityQuestion,
+} from "@/lib/identitySafety";
 
 export const runtime = "nodejs";
 
@@ -67,6 +71,49 @@ export async function POST(req: NextRequest) {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
         Connection: "keep-alive",
+      },
+    });
+  }
+
+  if (isIdentityRealityQuestion(text, [persona.name, persona.relation])) {
+    const identityReply = buildIdentityDisclosureReply(persona.name);
+    await repository.insertMessage({
+      id: randomUUID(),
+      personaId,
+      role: "assistant",
+      content: identityReply,
+    });
+    const identityStream = new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        const speech = new SpeechPlanAccumulator();
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+          meta: { retrievedMemories: [], identityDisclosure: true },
+        })}\n\n`));
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify({ token: identityReply })}\n\n`),
+        );
+        for (const sentence of speech.push(identityReply)) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ sentence })}\n\n`));
+        }
+        for (const sentence of speech.flush()) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ sentence })}\n\n`));
+        }
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+          done: true,
+          reply: identityReply,
+          identityDisclosure: true,
+          metrics: { totalMs: Math.round(performance.now() - requestStartedAt) },
+        })}\n\n`));
+        controller.close();
+      },
+    });
+    return new NextResponse(identityStream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
       },
     });
   }

@@ -4,6 +4,7 @@ import {
   createSpeechPlan,
   extractSpeakableSentences,
   normalizeSpeechControls,
+  sanitizeSpeechText,
   SpeechPlanAccumulator,
   toCosyVoiceControls,
 } from "../src/lib/speechPlanning";
@@ -78,4 +79,23 @@ it("converts only supported controls into a provider prompt", () => {
     speed: 0.75,
     gain: 0,
   });
+});
+
+it("removes leading stage directions before speech synthesis", () => {
+  assert.equal(
+    sanitizeSpeechText("（轻声）（温和地笑）囡囡，慢慢来。"),
+    "囡囡，慢慢来。",
+  );
+  assert.equal(
+    sanitizeSpeechText("*pause* [softly] Take your time."),
+    "Take your time.",
+  );
+});
+
+it("keeps spoken parentheses that are not leading stage directions", () => {
+  assert.equal(
+    sanitizeSpeechText("我记得那天（就是下雨的周三）你回来得很晚。"),
+    "我记得那天（就是下雨的周三）你回来得很晚。",
+  );
+  assert.equal(sanitizeSpeechText("（沉默）"), "");
 });

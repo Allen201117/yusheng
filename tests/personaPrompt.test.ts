@@ -28,3 +28,15 @@ it("forbids generated details from becoming claimed real memories", () => {
   assert.match(prompt, /不要编造/);
   assert.match(prompt, /不知道|不确定/);
 });
+
+it("asks for directly speakable dialogue without stage directions", () => {
+  const prompt = buildPersonaSystemPrompt({
+    name: "外婆",
+    relation: "外婆",
+    personaDesc: "温和克制",
+    memoryBlock: "1. 喜欢桂花茶",
+  });
+
+  assert.match(prompt, /只输出.*说出口/);
+  assert.match(prompt, /不要.*动作.*语气.*括号/);
+});

@@ -59,6 +59,8 @@ it("routes use the provider preset fast path and provider-aware deletion lifecyc
   assert.match(tts, /getCurrentVoiceAuthorization/);
   assert.match(tts, /canSynthesizeVoice/);
   assert.match(tts, /isVoiceAuthorizationEnforced/);
+  assert.match(tts, /sanitizeSpeechText/);
+  assert.match(tts, /text:\s*spokenText/);
   assert.match(persona, /deleteVoiceEverywhere/);
   assert.match(persona, /\.getMeta\(voiceId, auth\.userId\)/);
   assert.match(persona, /cleanupPending/);

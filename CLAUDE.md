@@ -67,6 +67,7 @@ docs/handoff.md                      上线与交接契约
 ## 当前事实与风险
 
 - `/api/chat` 已按完整句子输出语音事件，客户端并发准备且按序播放；真实首音延迟尚未验收。
+- TTS 入口会去掉“（轻声）”类开头舞台说明；直接本人/复活身份问题由服务端返回固定 AI 披露，不交给模型自由生成。
 - 预置音色 ready 时 TTS 不下载 Blob；URI 失效可一次回退动态克隆。权利确认未落库前不得自动批量预置。
 - 声音授权已有独立记录和撤回状态；只有“健在 + 本人 + 三项单独确认”会自动 approved，健在亲友与逝者均进入 `pending_review`。
 - TTS 始终拒绝 `revoked`；`VOICE_AUTH_ENFORCEMENT=enabled` 时还会拒绝缺失或待审核授权。功能客户端未接通前不得在 Production 开启。
@@ -75,6 +76,7 @@ docs/handoff.md                      上线与交接契约
 - TTS 限流仍在单进程内存里，多实例不可靠。
 - 自伤检测仍是关键词规则。
 - 真实 Preview 持久化、跨用户隔离、Blob 删除和重部署后的读回必须有直接证据，不能用本地测试代替。
+- Vercel Sensitive 变量在 `env pull` 中会被脱敏为空，不能据此判断缺少 Key。Preview `SILICONFLOW_API_KEY` 已重新写入为 Sensitive；是否可用必须由新 deployment 的真实请求证明。
 - 授权依据、告知版本和撤回已落库；健在第三人的证据核验、逝者场景人工审核、删除完成凭证与用户可见的 AI 合成标识仍未完成。
 
 ## 禁止事项

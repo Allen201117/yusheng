@@ -109,6 +109,8 @@ NODE_ENV=production STORAGE_BACKEND=local \
 - 真实 Preview 的 Neon / Private Blob 读写、跨用户隔离、重部署持久化和删除还没有形成证据前，不能宣称生产底座完成。
 - TTS 限流仍是进程内 Map，多实例会失真；应迁移到持久化计数或托管限流。
 - 句级 SSE 和有序播放队列已实现，但真实 Preview 的首音延迟、20 轮稳定性和 4 秒目标仍未验收。
+- 本地真实模型行为探针已记录在 `docs/verification/persona-behavior-baseline.md`；舞台说明从 9/10 降为 0/10，本人/复活问题已改为固定 AI 披露。20 次模型请求的首句延迟 P50 1.852s、P95 4.083s、最慢 7.484s，所以 4 秒目标尚未稳定达成。这不等于真实音频和 20 轮用户验收。
+- Vercel Sensitive 变量通过 `env pull` 时会被脱敏为空，不能用拉取文件判定 Key 是否存在。Preview `SILICONFLOW_API_KEY` 已从项目本地秘密重新写入为 Sensitive；Production 没有改动。两者是否可用都必须由真实 deployment 请求证明。
 - 供应商预置音色状态机、TTS 快路径、失效 URI 的一次动态回退和可重试删除已有代码；只有当前 `approved` 授权可触发预置音色。
 - 授权记录、撤回和受控预置 API 已有后端；只有健在本人会自动 approved，亲友与逝者均待人工审核。已有授权记录一旦为 pending/revoked 就禁止 TTS；开关关闭时只兼容“完全没有授权记录”的旧声音。当前没有功能客户端，Production 不得设置 `VOICE_AUTH_ENFORCEMENT=enabled`。
 - SiliconFlow 用户预置音色需供应商账号完成实名认证；当前尚无真实成功证据。

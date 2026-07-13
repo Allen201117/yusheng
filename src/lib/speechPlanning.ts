@@ -18,6 +18,19 @@ export type SpeechControls = {
 const HARD_BOUNDARIES = new Set(["。", "！", "？", "!", "?", "；", ";", "\n"]);
 const SOFT_BOUNDARIES = new Set(["，", ","]);
 
+const LEADING_STAGE_DIRECTION = /^(?:（[^（）\r\n]{1,40}）|\([^()\r\n]{1,40}\)|【[^【】\r\n]{1,40}】|\[[^\[\]\r\n]{1,40}\]|\*[^*\r\n]{1,40}\*)\s*/u;
+
+/** Remove non-spoken role-play annotations before text reaches the TTS provider. */
+export function sanitizeSpeechText(input: string): string {
+  let spoken = input.trim();
+  while (spoken) {
+    const next = spoken.replace(LEADING_STAGE_DIRECTION, "").trimStart();
+    if (next === spoken) break;
+    spoken = next;
+  }
+  return spoken;
+}
+
 export function extractSpeakableSentences(
   input: string,
   maxUnpunctuatedChars = 36,
