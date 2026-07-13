@@ -30,8 +30,8 @@ Updated: 2026-07-13 (Asia/Shanghai)
 
 ## Latest verified Preview
 
-- Deployment: `dpl_DpJE6uhJUxGTXzxo5AUSBLRuGaBY`
-- URL: `https://yusheng-czvtn1et6-allens-projects-5408d95e.vercel.app`
+- Deployment: `dpl_H929kjZyiCuA1H1EscNF2pxqmRD4`
+- URL: `https://yusheng-9n8hnkbru-allens-projects-5408d95e.vercel.app`
 - Status: Ready
 - Function region: `sin1`
 - `/login`: HTTP 200 through Vercel protection bypass
