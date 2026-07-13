@@ -15,6 +15,8 @@
  * Slice 1 选 A，省一个 API 调用，等多用户化时再升级到 B。
  */
 
+import { toCosyVoiceControls, type SpeechControls } from "./speechPlanning";
+
 const API_BASE = "https://api.siliconflow.cn/v1";
 const DEFAULT_MODEL = process.env.COSYVOICE_MODEL || "FunAudioLLM/CosyVoice2-0.5B";
 
@@ -28,9 +30,42 @@ export type CosyVoiceCloneInput = {
   referenceText: string;
   /** 输出格式 */
   responseFormat?: "wav" | "mp3";
-  /** 语调控制（CosyVoice2 instruct 模式），如 "语速慢一点，语气温柔" */
-  instruct?: string;
+  /** 经过白名单归一化的语音表达控制 */
+  speech?: SpeechControls;
 };
+
+export type CosyVoiceRequestBody = {
+  model: string;
+  input: string;
+  voice: string;
+  response_format: "wav" | "mp3";
+  references: Array<{ audio: string; text: string }>;
+  stream: true;
+  speed: number;
+  gain: number;
+  instruct?: never;
+};
+
+export function createCosyVoiceRequestBody(input: CosyVoiceCloneInput): CosyVoiceRequestBody {
+  const referenceMime = input.referenceMime || "audio/wav";
+  const controls = input.speech
+    ? toCosyVoiceControls(input.speech)
+    : { prompt: "", speed: 1, gain: 0 };
+
+  return {
+    model: DEFAULT_MODEL,
+    input: controls.prompt ? `${controls.prompt}<|endofprompt|>${input.text}` : input.text,
+    voice: "",
+    response_format: input.responseFormat || "mp3",
+    references: [{
+      audio: `data:${referenceMime};base64,${input.referenceAudioBase64}`,
+      text: input.referenceText,
+    }],
+    stream: true,
+    speed: controls.speed,
+    gain: controls.gain,
+  };
+}
 
 export async function synthesizeWithClonedVoice(input: CosyVoiceCloneInput): Promise<Buffer> {
   const apiKey = process.env.SILICONFLOW_API_KEY;
@@ -38,25 +73,7 @@ export async function synthesizeWithClonedVoice(input: CosyVoiceCloneInput): Pro
     throw new Error("SILICONFLOW_API_KEY 未配置，请在 .env.local 中填入");
   }
 
-  const referenceMime = input.referenceMime || "audio/wav";
-
-  const body: Record<string, unknown> = {
-    model: DEFAULT_MODEL,
-    input: input.text,
-    voice: "", // 留空表示用 references 中的零样本克隆
-    response_format: input.responseFormat || "mp3",
-    references: [
-      {
-        audio: `data:${referenceMime};base64,${input.referenceAudioBase64}`,
-        text: input.referenceText,
-      },
-    ],
-  };
-
-  // CosyVoice2 instruct 模式：用自然语言控制语速、语气、情感
-  if (input.instruct) {
-    body.instruct = input.instruct;
-  }
+  const body = createCosyVoiceRequestBody(input);
 
   const resp = await fetch(`${API_BASE}/audio/speech`, {
     method: "POST",
@@ -65,6 +82,7 @@ export async function synthesizeWithClonedVoice(input: CosyVoiceCloneInput): Pro
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(20_000),
   });
 
   if (!resp.ok) {

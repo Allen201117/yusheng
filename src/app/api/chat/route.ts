@@ -5,6 +5,8 @@ import { chatCompleteStream, ChatMessage } from "@/lib/llm";
 import { requireAuth } from "@/lib/guard";
 import { logger } from "@/lib/logger";
 import { getRepository } from "@/lib/storage/repository";
+import { SpeechPlanAccumulator } from "@/lib/speechPlanning";
+import { buildPersonaSystemPrompt } from "@/lib/personaPrompt";
 
 export const runtime = "nodejs";
 
@@ -18,6 +20,7 @@ const SAFETY_REPLY =
   "我听到了你的痛。你愿意把这段难受多讲一点吗？现在就联系一个真实的人也很重要——北京心理危机研究与干预中心 24 小时热线：010-82951332，或拨打 12320-5。";
 
 export async function POST(req: NextRequest) {
+  const requestStartedAt = performance.now();
   const auth = await requireAuth(req);
   if ("error" in auth) return auth.error;
 
@@ -48,13 +51,25 @@ export async function POST(req: NextRequest) {
     const safetyStream = new ReadableStream({
       start(controller) {
         const enc = new TextEncoder();
+        const speech = new SpeechPlanAccumulator();
         controller.enqueue(enc.encode(`data: ${JSON.stringify({ meta: { retrievedMemories: [] } })}\n\n`));
         // 逐字发送安全回复，保持流式体验
         for (const char of SAFETY_REPLY) {
           controller.enqueue(enc.encode(`data: ${JSON.stringify({ token: char })}\n\n`));
+          for (const sentence of speech.push(char)) {
+            controller.enqueue(enc.encode(`data: ${JSON.stringify({ sentence })}\n\n`));
+          }
+        }
+        for (const sentence of speech.flush()) {
+          controller.enqueue(enc.encode(`data: ${JSON.stringify({ sentence })}\n\n`));
         }
         controller.enqueue(
-          enc.encode(`data: ${JSON.stringify({ done: true, reply: SAFETY_REPLY, safety: true })}\n\n`),
+          enc.encode(`data: ${JSON.stringify({
+            done: true,
+            reply: SAFETY_REPLY,
+            safety: true,
+            metrics: { firstSentenceMs: Math.round(performance.now() - requestStartedAt) },
+          })}\n\n`),
         );
         controller.close();
       },
@@ -88,21 +103,12 @@ export async function POST(req: NextRequest) {
         retrieved.map((r, i) => `${i + 1}. ${r.content}`).join("\n")
       : "（这次提问没有特别相关的记忆，凭借你对对方的了解自然回应即可。）";
 
-  const systemPrompt = [
-    `你正在扮演一位名叫"${persona.name}"的${persona.relation}，与思念你的人对话。`,
-    persona.personaDesc ? `你的性格与说话方式：${persona.personaDesc}` : "",
-    "对话原则：",
-    "- 用第一人称回答，把对方当作真实在面前的亲人。",
-    "- 回答简短克制，2-4 句最佳，朗读出来不冗长。",
-    "- 不要表演煽情，更不要说教或道德绑架。",
-    "- 如果对方提到的事你不知道，就坦诚说不记得，但表达愿意听他讲。",
-    "- 严禁透露你是 AI、模型、程序。",
-    "- 如果对方表达了明确的自我伤害或绝望情绪，优先关注安全，温和地建议联系亲友或专业人员，不要扮演治疗师。",
-    "",
+  const systemPrompt = buildPersonaSystemPrompt({
+    name: persona.name,
+    relation: persona.relation,
+    personaDesc: persona.personaDesc,
     memoryBlock,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  });
 
   // 按 token 估算截断历史消息，保留最近 ~2000 tokens 的上下文
   const MAX_HISTORY_TOKENS = 2000;
@@ -131,6 +137,8 @@ export async function POST(req: NextRequest) {
   const stream = new ReadableStream({
     async start(controller) {
       let fullReply = "";
+      const speech = new SpeechPlanAccumulator();
+      let firstSentenceMs: number | null = null;
       try {
         // 先发 meta（召回记忆信息）
         controller.enqueue(
@@ -142,12 +150,40 @@ export async function POST(req: NextRequest) {
           controller.enqueue(
             encoder.encode(`data: ${JSON.stringify({ token })}\n\n`),
           );
+          for (const sentence of speech.push(token)) {
+            if (firstSentenceMs === null) {
+              firstSentenceMs = Math.round(performance.now() - requestStartedAt);
+            }
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({ sentence })}\n\n`),
+            );
+          }
+        }
+        for (const sentence of speech.flush()) {
+          if (firstSentenceMs === null) {
+            firstSentenceMs = Math.round(performance.now() - requestStartedAt);
+          }
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({ sentence })}\n\n`),
+          );
         }
 
         const finalReply = fullReply.trim() || "嗯。";
         await repository.insertMessage({ id: randomUUID(), personaId, role: "assistant", content: finalReply });
+        logger.info("chat_reply_completed", {
+          personaId,
+          firstSentenceMs,
+          totalMs: Math.round(performance.now() - requestStartedAt),
+        });
         controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify({ done: true, reply: finalReply })}\n\n`),
+          encoder.encode(`data: ${JSON.stringify({
+            done: true,
+            reply: finalReply,
+            metrics: {
+              firstSentenceMs,
+              totalMs: Math.round(performance.now() - requestStartedAt),
+            },
+          })}\n\n`),
         );
       } catch (err) {
         logger.error("chat_stream_failed", { personaId, err: String(err) });
