@@ -12,7 +12,9 @@
     "test": "node --import tsx --test tests/*.test.ts",
     "test:coverage": "node --import tsx --experimental-test-coverage --test tests/*.test.ts",
     "db:migrate": "node --import tsx scripts/apply-migrations.ts",
-    "db:migrate:dry": "node --import tsx scripts/apply-migrations.ts --dry-run"
+    "db:migrate:dry": "node --import tsx scripts/apply-migrations.ts --dry-run",
+    "data:migrate:dry": "node --import tsx scripts/migrate-local-data.ts --dry-run",
+    "data:migrate": "node --import tsx scripts/migrate-local-data.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

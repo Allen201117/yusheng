@@ -1,0 +1,9 @@
+{
+  "voiceId": "voice-fixture",
+  "userId": "fixture-user",
+  "promptText": "你好，今天过得怎么样？",
+  "createdAt": "2026-07-13T00:00:00.000Z",
+  "audioFile": "voices/voice-fixture.wav",
+  "mimeType": "audio/wav",
+  "durationSec": 3
+}
