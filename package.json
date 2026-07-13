@@ -10,7 +10,9 @@
     "lint": "tsc --noEmit --pretty false",
     "typecheck": "tsc --noEmit --pretty false",
     "test": "node --import tsx --test tests/*.test.ts",
-    "test:coverage": "node --import tsx --experimental-test-coverage --test tests/*.test.ts"
+    "test:coverage": "node --import tsx --experimental-test-coverage --test tests/*.test.ts",
+    "db:migrate": "node --import tsx scripts/apply-migrations.ts",
+    "db:migrate:dry": "node --import tsx scripts/apply-migrations.ts --dry-run"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
