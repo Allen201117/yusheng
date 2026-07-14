@@ -270,6 +270,34 @@ test("relationship confirmation embeds edited content instead of pending content
   }]);
 });
 
+test("terminal fact and relationship confirmations fail before embedding or atomic review", async () => {
+  for (const status of ["confirmed", "rejected", "revoked"] as const) {
+    for (const item of [
+      fact({ id: `fact-${status}`, status }),
+      memory({ id: `memory-${status}`, status }),
+    ]) {
+      const fixture = reviewRepository(item);
+      let embeddingCalls = 0;
+
+      await assert.rejects(reviewPersonaKnowledge({
+        repository: fixture.repository,
+        embedText: async () => {
+          embeddingCalls += 1;
+          return new Float32Array(1024);
+        },
+        personaId: item.personaId,
+        actorUserId: "user-1",
+        kind: item.kind,
+        id: item.id,
+        action: "confirm",
+      }), new RegExp(`invalid_transition:${status}:confirmed`));
+
+      assert.equal(embeddingCalls, 0);
+      assert.equal(fixture.calls.length, 0);
+    }
+  }
+});
+
 test("reject, revoke, and speech-style confirm never request embeddings", async () => {
   for (const scenario of [
     { item: fact({ id: "fact-reject", status: "pending" }), action: "reject" as const },

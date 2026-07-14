@@ -155,6 +155,7 @@ export async function reviewPersonaKnowledge(
     review.action === "confirm"
     && (review.kind === "fact" || review.kind === "relationship_memory")
   ) {
+    requireKnowledgeTransition(item.status, "confirmed");
     const finalContent = review.edits?.content ?? item.content;
     if (typeof finalContent !== "string") throw new Error("invalid_knowledge_content");
     const vector = await embedText(finalContent);
