@@ -28,8 +28,7 @@ export async function embed(texts: string[]): Promise<Float32Array[]> {
     }),
   });
   if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`Embedding 调用失败 ${resp.status}: ${err}`);
+    throw new Error(`embedding_provider_error:${resp.status}`);
   }
   let json: unknown;
   try {
@@ -79,8 +78,20 @@ export async function embed(texts: string[]): Promise<Float32Array[]> {
         `embedding_dimension_mismatch:${embedding.length}:${EMBEDDING_DIM}`,
       );
     }
+    for (let i = 0; i < embedding.length; i++) {
+      const value = embedding[i];
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        throw new Error("embedding_response_invalid:vector_values");
+      }
+    }
 
-    result[index as number] = Float32Array.from(embedding);
+    const vector = Float32Array.from(embedding);
+    for (const value of vector) {
+      if (!Number.isFinite(value)) {
+        throw new Error("embedding_response_invalid:vector_values");
+      }
+    }
+    result[index as number] = vector;
   }
 
   if (result.some((embedding) => embedding === undefined)) {

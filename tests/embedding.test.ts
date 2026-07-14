@@ -63,7 +63,7 @@ describe("cosineSim", () => {
   });
 });
 
-type ProviderRow = { embedding: number[]; index: number };
+type ProviderRow = { embedding: unknown[]; index: number };
 
 function makeEmbedding(marker: number): number[] {
   return Array.from({ length: EMBEDDING_DIM }, (_, index) =>
@@ -75,20 +75,37 @@ async function withMockProviderData(
   data: ProviderRow[],
   run: () => Promise<void>,
 ): Promise<void> {
-  await withMockProviderBody(JSON.stringify({ data }), run);
+  await withMockFetch(
+    {
+      ok: true,
+      status: 200,
+      json: async () => ({ data }),
+    } as Response,
+    run,
+  );
 }
 
 async function withMockProviderBody(
   body: string,
   run: () => Promise<void>,
+  status = 200,
+): Promise<void> {
+  await withMockFetch(
+    new Response(body, {
+      status,
+      headers: { "Content-Type": "application/json" },
+    }),
+    run,
+  );
+}
+
+async function withMockFetch(
+  response: Response,
+  run: () => Promise<void>,
 ): Promise<void> {
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.SILICONFLOW_API_KEY;
-  globalThis.fetch = async () =>
-    new Response(body, {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+  globalThis.fetch = async () => response;
   process.env.SILICONFLOW_API_KEY = "test-siliconflow-api-key";
 
   try {
@@ -105,6 +122,21 @@ async function withMockProviderBody(
 
 describe("embed", { concurrency: false }, () => {
   const texts = ["query", "fact", "memory"];
+
+  it("拒绝并隐藏 provider 非 2xx 响应正文", async () => {
+    await withMockProviderBody(
+      "secret-provider-detail",
+      async () => {
+        await assert.rejects(embed(["query"]), (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.match(error.message, /embedding_provider_error:500/);
+          assert.doesNotMatch(error.message, /secret-provider-detail/);
+          return true;
+        });
+      },
+      500,
+    );
+  });
 
   it("拒绝 JSON 根值为 null 的响应", async () => {
     await withMockProviderBody("null", async () => {
@@ -194,5 +226,53 @@ describe("embed", { concurrency: false }, () => {
         );
       },
     );
+  });
+
+  it("拒绝含字符串或 null 的向量", async () => {
+    for (const value of ["not-a-number", null]) {
+      const embedding: unknown[] = makeEmbedding(1);
+      embedding[10] = value;
+      await withMockProviderData([{ index: 0, embedding }], async () => {
+        await assert.rejects(
+          embed(["query"]),
+          /embedding_response_invalid:vector_values/,
+        );
+      });
+    }
+  });
+
+  it("拒绝含 NaN 或 Infinity 的向量", async () => {
+    for (const value of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const embedding: unknown[] = makeEmbedding(1);
+      embedding[10] = value;
+      await withMockProviderData([{ index: 0, embedding }], async () => {
+        await assert.rejects(
+          embed(["query"]),
+          /embedding_response_invalid:vector_values/,
+        );
+      });
+    }
+  });
+
+  it("拒绝转换为 Float32 后溢出的向量值", async () => {
+    const embedding: unknown[] = makeEmbedding(1);
+    embedding[10] = Number.MAX_VALUE;
+    await withMockProviderData([{ index: 0, embedding }], async () => {
+      await assert.rejects(
+        embed(["query"]),
+        /embedding_response_invalid:vector_values/,
+      );
+    });
+  });
+
+  it("拒绝稀疏向量", async () => {
+    const embedding: unknown[] = makeEmbedding(1);
+    delete embedding[10];
+    await withMockProviderData([{ index: 0, embedding }], async () => {
+      await assert.rejects(
+        embed(["query"]),
+        /embedding_response_invalid:vector_values/,
+      );
+    });
   });
 });
