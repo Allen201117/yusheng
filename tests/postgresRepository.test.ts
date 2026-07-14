@@ -331,6 +331,9 @@ it("rejects revoked or mismatched authorization before mutating Postgres session
 
 it("rejects a turn/session persona mismatch before persisting its user message", async () => {
   const fake = createFakeSql((text) => {
+    if (text.includes("FROM personas") && text.includes("FOR UPDATE")) {
+      return [{ id: "persona-2" }];
+    }
     if (text.includes("FROM conversation_sessions") && text.includes("FOR UPDATE")) return [];
     throw new Error(`unexpected query: ${text}`);
   });
@@ -1209,6 +1212,9 @@ it("starts, binds, and completes a grounded turn in transactions with stable loc
     updated_at: now,
   };
   const fake = createFakeSql((text, params) => {
+    if (text.includes("FROM personas") && text.includes("FOR UPDATE")) {
+      return [{ id: "persona-1" }];
+    }
     if (text.includes("FROM conversation_sessions") && text.includes("FOR UPDATE")) {
       return [{ id: "session-1" }];
     }
@@ -1300,6 +1306,11 @@ it("starts, binds, and completes a grounded turn in transactions with stable loc
   assert.match(sessionLock.text, /authorization\.status = 'approved'/);
   assert.match(sessionLock.text, /FOR UPDATE OF authorization/);
   assert.doesNotMatch(sessionLock.text, /FOR UPDATE\s*$/m);
+  const personaLock = fake.calls.find((call) =>
+    call.text.includes("FROM personas") && call.text.includes("FOR UPDATE"))!;
+  assert.equal(fake.calls[0], personaLock);
+  assert.ok(fake.calls.indexOf(personaLock) < fake.calls.indexOf(sessionLock));
+  assert.match(personaLock.text, /WHERE id = \$1/);
   const assistantInsert = fake.calls.find((call) =>
     call.text.includes("INSERT INTO messages") && call.params[0] === "assistant-1")!;
   assert.match(assistantInsert.text, /'assistant'/);
@@ -1307,6 +1318,46 @@ it("starts, binds, and completes a grounded turn in transactions with stable loc
   assert.match(completionUpdate.text, /id = \$1 AND persona_id = \$2 AND status = 'started'/);
   assert.ok(fake.calls.some((call) =>
     call.text.includes("INSERT INTO message_evidence") && call.text.includes("conversation_turn_evidence")));
+});
+
+it("locks the persona before persisting a null-session boundary turn", async () => {
+  const now = "2026-07-14T00:00:00.000Z";
+  const startedBoundary = {
+    id: "turn-boundary",
+    session_id: null,
+    persona_id: "persona-1",
+    user_message_id: "message-boundary",
+    assistant_message_id: null,
+    mode: null,
+    status: "started",
+    boundary_kind: null,
+    degradation_reason: null,
+    retrieval_ms: null,
+    first_sentence_ms: null,
+    total_ms: null,
+    created_at: now,
+    updated_at: now,
+  };
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM personas") && text.includes("FOR UPDATE")) return [{ id: "persona-1" }];
+    if (text.includes("INSERT INTO messages")) return [{ id: "message-boundary" }];
+    if (text.includes("INSERT INTO conversation_turns")) return [startedBoundary];
+    throw new Error(`unexpected query: ${text}`);
+  });
+  const repo = createPostgresRepository(fake.executor);
+  const started = await repo.startConversationTurn({
+    turnId: "turn-boundary",
+    sessionId: null,
+    personaId: "persona-1",
+    userMessageId: "message-boundary",
+    content: "固定边界回复",
+  });
+  assert.equal(started.sessionId, null);
+  assert.match(fake.calls[0].text, /FROM personas[\s\S]*WHERE id = \$1[\s\S]*FOR UPDATE/);
+  assert.equal(fake.calls.some((call) => call.text.includes("FROM voice_authorizations")), false);
+  assert.equal(fake.calls.some((call) => call.text.includes("FROM conversation_sessions")), false);
+  const messageInsert = fake.calls.findIndex((call) => call.text.includes("INSERT INTO messages"));
+  assert.ok(messageInsert > 0);
 });
 
 it("fails only a matching started turn with owner/status compare-and-set", async () => {

@@ -1584,7 +1584,7 @@ export function startConversationTurn(input: {
     ).get(input.turnId, input.personaId, input.userMessageId, input.sessionId, now, now);
     if (!row) throw new Error("conversation_turn_start_failed");
     return rowToConversationTurn(row);
-  })();
+  }).immediate();
 }
 
 export function bindConversationTurnEvidence(input: {

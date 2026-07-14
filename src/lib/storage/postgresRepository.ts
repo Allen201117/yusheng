@@ -1545,6 +1545,14 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
 
     async startConversationTurn(input): Promise<ConversationTurn> {
       return sql.transaction(async (transaction) => {
+        const personas = await transaction.query<{ id: string }>(
+          `SELECT id FROM personas
+           WHERE id = $1
+           FOR UPDATE`,
+          [input.personaId],
+        );
+        if (personas.length !== 1) throw new Error("conversation_turn_persona_mismatch");
+
         if (input.sessionId !== null) {
           const sessions = await transaction.query<{ id: string }>(
             `SELECT sessions.id FROM conversation_sessions sessions
