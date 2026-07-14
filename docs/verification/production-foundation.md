@@ -1,15 +1,18 @@
 # Production Foundation Verification
 
-Updated: 2026-07-13 (Asia/Shanghai)
+Updated: 2026-07-14 (Asia/Shanghai)
 
 ## Local evidence
 
-- `npm test`: 159 passed, 0 failed after sentence voice streaming, crisis-safety, provider preset lifecycle, authorization gates, directly speakable output and identity disclosure changes.
+- `npm test`: 215 passed, 0 failed after adding three-layer persona knowledge, atomic candidate review, confirmed-only retrieval, legacy memory compatibility and cross-owner migration guards.
 - `npm run typecheck`: passed.
 - `npm run build`: passed on Next.js 15.5.20.
 - `git diff --check`: passed.
 - Production local-storage guard: `NODE_ENV=production STORAGE_BACKEND=local` fails with `Production requires STORAGE_BACKEND=cloud`.
 - Provider preset local evidence: ready presets avoid Blob reads; stale preset URI errors mark the preset failed and retry dynamic cloning once; general provider outages do not double-call; deleting voices cannot start new synthesis.
+- Persona knowledge local evidence: facts, relationship memories and speech styles are stored separately; only `confirmed` items are retrievable; manual `/api/memory` writes are explicit user confirmations; AI candidates remain `pending`; source revocation immediately revokes unsupported derived items and reports their references.
+- Legacy memory local evidence: old rows are copied idempotently into source + relationship memory + evidence link records, while the old table remains intact in this phase. Cross-owner persona/voice conflicts and mismatched deterministic IDs abort instead of linking unrelated data.
+- Not locally complete: grounded/companionship modes, message evidence, restoration feedback metrics and real user validation.
 
 ## Vercel project and Git deployment
 
@@ -41,7 +44,7 @@ Updated: 2026-07-13 (Asia/Shanghai)
 
 ## Pending gate
 
-Neon is not provisioned because the Vercel account owner must first accept the Neon Marketplace terms. Until this is done:
+Neon is not provisioned because the Vercel account owner must first accept the Neon Marketplace terms. Preview remains unusable until Neon supplies `DATABASE_URL` and Preview is configured with `STORAGE_BACKEND=cloud`. Until this is done:
 
 - Preview does not have `DATABASE_URL` or `STORAGE_BACKEND=cloud`;
 - Postgres schema migration/readback is not verified;

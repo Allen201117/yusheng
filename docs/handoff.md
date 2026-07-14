@@ -1,6 +1,6 @@
 # 余声交接文档
 
-> 最后更新：2026-07-13
+> 最后更新：2026-07-14
 > 当前阶段：已上线产品的生产底座加固；云存储切换尚需真实 Preview 验证
 
 ## 产品定位
@@ -24,6 +24,14 @@
 | 向量 | SQLite BLOB | pgvector `vector(1024)` |
 
 所有 API 只能通过 `src/lib/storage/repository.ts` 和 `src/lib/storage/voiceObjectStore.ts` 读写数据。SQLite 与 `data/voices` 只允许用于本地开发和旧数据迁移，不能作为线上持久化方案。
+
+## 人物知识与证据边界
+
+- 人物知识已拆为结构化事实、关系记忆、说话风格三层；只有 `confirmed` 内容能被对话检索。
+- 用户手工调用 `/api/memory` 录入的内容视为明确确认；AI 后续提取的候选内容只能先进入 `pending`，必须经用户确认。
+- 旧版 `memories` 会幂等复制成来源、关系记忆和证据关联。旧表本阶段保留，便于回查和回滚，不能提前删除。
+- 删除来源会立刻撤销所有已没有其他 `ready` 来源支撑的派生内容，并返回受影响内容的类型和 ID，供调用方审计。
+- 当前只是知识底座完成。grounded/陪伴两种对话模式、消息级证据、还原度反馈指标和真实用户验证还没有完成。
 
 生产环境必须同时配置：
 
@@ -107,6 +115,7 @@ NODE_ENV=production STORAGE_BACKEND=local \
 ## 已知但尚未完成的高风险项
 
 - 真实 Preview 的 Neon / Private Blob 读写、跨用户隔离、重部署持久化和删除还没有形成证据前，不能宣称生产底座完成。
+- 当前 Preview 仍不可用：必须先由 Neon 提供 `DATABASE_URL`，并在 Preview 设置 `STORAGE_BACKEND=cloud`，之后才能继续真实持久化门禁。
 - TTS 限流仍是进程内 Map，多实例会失真；应迁移到持久化计数或托管限流。
 - 句级 SSE 和有序播放队列已实现，但真实 Preview 的首音延迟、20 轮稳定性和 4 秒目标仍未验收。
 - 本地真实模型行为探针已记录在 `docs/verification/persona-behavior-baseline.md`；舞台说明从 9/10 降为 0/10，本人/复活问题已改为固定 AI 披露。20 次模型请求的首句延迟 P50 1.852s、P95 4.083s、最慢 7.484s，所以 4 秒目标尚未稳定达成。这不等于真实音频和 20 轮用户验收。
@@ -115,7 +124,7 @@ NODE_ENV=production STORAGE_BACKEND=local \
 - 授权记录、撤回和受控预置 API 已有后端；只有健在本人会自动 approved，亲友与逝者均待人工审核。已有授权记录一旦为 pending/revoked 就禁止 TTS；开关关闭时只兼容“完全没有授权记录”的旧声音。当前没有功能客户端，Production 不得设置 `VOICE_AUTH_ENFORCEMENT=enabled`。
 - SiliconFlow 用户预置音色需供应商账号完成实名认证；当前尚无真实成功证据。
 - 健在第三人授权证据核验、逝者场景人工审核、删除完成凭证和用户可见的 AI 合成标识仍未完成。
-- 人物设定和记忆仍偏自由文本，需要结构化事实、说话风格和不确定性边界。
+- 三层人物知识和 confirmed-only 检索已经落地，但 AI 候选提取、grounded/陪伴模式、消息级证据和还原度反馈尚未落地。
 - 自伤检测仍是关键词规则，不能当作完整安全系统。
 
 ## 不得破坏的约束
