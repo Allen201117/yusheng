@@ -39,7 +39,8 @@
 - 每条完成的 `grounded` 助手消息会复制本轮选中的 evidence ID 到消息证据表。之后来源被撤销也不删这份生成时快照。
 - 未知遗愿、代表承诺、重大决策、本人/复活/另一个世界、自伤、现实暴力或医疗急症、声音未获有效授权，都走固定 `boundary` 回复。这些路径不调用自由生成模型，也不输出可交给 TTS 的 sentence 事件。
 - 对话历史只是临时上下文，不是 evidence；用户本轮的主张也不能变成 evidence。
-- 确定性行为探针、播放队列失败隔离、同一 voiceId/声音源重试已纳入本地回归。`npm run probe:grounded` 另外调用真实模型验证虚构样本，JSON 报告不包含 API key 或请求 headers。
+- 确定性行为探针和播放队列失败隔离已纳入本地回归。对同一 persona 的句子做外部重试时，会重新通过该 persona 解析它自己的 voice/source；A/B 双 persona fixture 证明 A 的两次尝试都没有访问或使用 B 的声音。`npm run probe:grounded` 另外调用真实模型验证虚构样本，JSON 报告不包含 API key 或请求 headers。
+- 真实模型探针只把已完成模型回复的内容断言失败记为 `red_line_failed` (exit 1)。未配置 provider 是 `provider_not_configured` (exit 2)；网络、HTTP/401/429/5xx、超时和响应解析异常都是 `provider_failed` (exit 3)。每个 case 最多调用模型一次，超时会通过 AbortSignal 取消正在进行的 fetch。
 
 生产环境必须同时配置：
 

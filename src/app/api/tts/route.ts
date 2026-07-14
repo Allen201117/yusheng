@@ -7,6 +7,7 @@ import { logger } from "@/lib/logger";
 import { normalizeSpeechControls, sanitizeSpeechText } from "@/lib/speechPlanning";
 import { resolveVoiceSynthesisSource } from "@/lib/voiceSynthesisSource";
 import { synthesizeResolvedVoice } from "@/lib/voiceSynthesisService";
+import { resolveTtsVoiceId } from "@/lib/ttsVoiceBinding";
 import {
   canSynthesizeVoice,
   isVoiceAuthorizationEnforced,
@@ -37,15 +38,19 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "没有可朗读的内容" }, { status: 400 });
   }
 
-  let voiceId = (body.voiceId || "").trim();
-  if (!voiceId && body.personaId) {
-    const p = await repository.getPersonaForUser(body.personaId.trim(), auth.userId);
-    if (!p) return NextResponse.json({ error: "personaId 不存在或不属于你" }, { status: 403 });
-    voiceId = p.voiceId;
+  const binding = await resolveTtsVoiceId({
+    requestedVoiceId: body.voiceId,
+    personaId: body.personaId,
+    userId: auth.userId,
+    repository,
+  });
+  if (binding.status === "persona_not_found") {
+    return NextResponse.json({ error: "personaId 不存在或不属于你" }, { status: 403 });
   }
-  if (!voiceId) {
+  if (binding.status === "voice_required") {
     return NextResponse.json({ error: "缺少 voiceId 或 personaId" }, { status: 400 });
   }
+  const voiceId = binding.voiceId;
 
   const authorization = await repository.getCurrentVoiceAuthorization(voiceId, auth.userId);
   if (!canSynthesizeVoice({

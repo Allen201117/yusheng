@@ -1,7 +1,10 @@
 import { it } from "node:test";
 import assert from "node:assert/strict";
 import { synthesizeStoredVoice } from "../src/lib/voiceSynthesisService";
-import type { AppRepository, VoiceMeta } from "../src/lib/storage/types";
+import { synthesizeResolvedVoice } from "../src/lib/voiceSynthesisService";
+import { resolveTtsVoiceId } from "../src/lib/ttsVoiceBinding";
+import { resolveVoiceSynthesisSource } from "../src/lib/voiceSynthesisSource";
+import type { AppRepository, Persona, VoiceMeta } from "../src/lib/storage/types";
 import type { VoiceObjectStore } from "../src/lib/storage/voiceObjectStore";
 
 const meta: VoiceMeta = {
@@ -113,17 +116,38 @@ it("does not double-call the provider for a general outage", async () => {
   assert.deepEqual(f.calls, ["meta"]);
 });
 
-it("retries a sentence with the same voice and resolved source", async () => {
-  const requestedVoices: Array<{ voiceId: string; userId: string }> = [];
+it("keeps an external sentence retry on the same persona voice and source", async () => {
+  const personas: Record<string, Persona> = {
+    "persona-A": {
+      id: "persona-A", userId: "user-1", name: "A", relation: "mother",
+      voiceId: "voice-A", personaDesc: "", createdAt: "2026-01-01T00:00:00.000Z",
+    },
+    "persona-B": {
+      id: "persona-B", userId: "user-1", name: "B", relation: "aunt",
+      voiceId: "voice-B", personaDesc: "", createdAt: "2026-01-01T00:00:00.000Z",
+    },
+  };
+  const voices: Record<string, VoiceMeta> = {
+    "voice-A": { ...meta, voiceId: "voice-A", providerVoiceId: "provider-source-A" },
+    "voice-B": { ...meta, voiceId: "voice-B", providerVoiceId: "provider-source-B" },
+  };
+  const personaLookups: string[] = [];
+  const sourceLookups: string[] = [];
   const providerSources: string[] = [];
   let attempts = 0;
   const store = {
     async getMeta(voiceId: string, userId: string) {
-      requestedVoices.push({ voiceId, userId });
-      return meta;
+      sourceLookups.push(`${userId}:${voiceId}`);
+      return voices[voiceId] ?? null;
     },
   } as unknown as VoiceObjectStore;
-  const repository = {} as AppRepository;
+  const repository = {
+    async getPersonaForUser(personaId: string, userId: string) {
+      personaLookups.push(`${userId}:${personaId}`);
+      const persona = personas[personaId];
+      return persona?.userId === userId ? persona : null;
+    },
+  } as AppRepository;
   const synthesize = async (input: { presetVoiceId?: string }) => {
     attempts += 1;
     providerSources.push(input.presetVoiceId ?? "dynamic");
@@ -132,24 +156,37 @@ it("retries a sentence with the same voice and resolved source", async () => {
     }
     return Buffer.from("retried audio");
   };
-  const sentence = {
-    voiceId: "voice-1",
-    userId: "user-1",
-    text: "这是同一句话",
-    store,
-    repository,
-    synthesize,
+  const synthesizePersonaA = async () => {
+    const binding = await resolveTtsVoiceId({
+      requestedVoiceId: "",
+      personaId: "persona-A",
+      userId: "user-1",
+      repository,
+    });
+    assert.deepEqual(binding, { status: "resolved", voiceId: "voice-A" });
+    if (binding.status !== "resolved") throw new Error("voice binding failed");
+    const source = await resolveVoiceSynthesisSource(store, binding.voiceId, "user-1");
+    assert.ok(source);
+    return synthesizeResolvedVoice({
+      voiceId: binding.voiceId,
+      userId: "user-1",
+      text: "这是同一句话",
+      source,
+      store,
+      repository,
+      synthesize,
+    });
   };
 
-  await assert.rejects(synthesizeStoredVoice(sentence), /temporary outage/);
-  const retried = await synthesizeStoredVoice(sentence);
+  await assert.rejects(synthesizePersonaA(), /temporary outage/);
+  const retried = await synthesizePersonaA();
 
   assert.equal(retried.audio.toString(), "retried audio");
   assert.equal(retried.source, "preset");
-  assert.deepEqual(requestedVoices, [
-    { voiceId: "voice-1", userId: "user-1" },
-    { voiceId: "voice-1", userId: "user-1" },
-  ]);
-  assert.deepEqual(providerSources, [meta.providerVoiceId, meta.providerVoiceId]);
-  assert.equal(requestedVoices.some(({ voiceId }) => voiceId !== "voice-1"), false);
+  assert.deepEqual(personaLookups, ["user-1:persona-A", "user-1:persona-A"]);
+  assert.deepEqual(sourceLookups, ["user-1:voice-A", "user-1:voice-A"]);
+  assert.deepEqual(providerSources, ["provider-source-A", "provider-source-A"]);
+  assert.equal(personaLookups.some((value) => value.includes("persona-B")), false);
+  assert.equal(sourceLookups.some((value) => value.includes("voice-B")), false);
+  assert.equal(providerSources.some((value) => value.includes("source-B")), false);
 });

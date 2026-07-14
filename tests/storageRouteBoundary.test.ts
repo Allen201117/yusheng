@@ -124,12 +124,19 @@ it("routes use the provider preset fast path and provider-aware deletion lifecyc
   );
 
   assert.match(tts, /resolveVoiceSynthesisSource/);
+  assert.match(tts, /resolveTtsVoiceId/);
   assert.match(tts, /synthesizeResolvedVoice/);
   assert.match(tts, /getCurrentVoiceAuthorization/);
   assert.match(tts, /canSynthesizeVoice/);
   assert.match(tts, /isVoiceAuthorizationEnforced/);
   assert.match(tts, /sanitizeSpeechText/);
   assert.match(tts, /text:\s*spokenText/);
+  const ttsVoiceBinding = await readFile(
+    new URL("../src/lib/ttsVoiceBinding.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(ttsVoiceBinding, /getPersonaForUser\(personaId, input\.userId\)/);
+  assert.match(ttsVoiceBinding, /voiceId:\s*persona\.voiceId/);
   assert.match(persona, /deleteVoiceEverywhere/);
   assert.match(persona, /\.getMeta\(voiceId, auth\.userId\)/);
   assert.match(persona, /cleanupPending/);

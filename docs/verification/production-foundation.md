@@ -4,8 +4,8 @@ Updated: 2026-07-14 (Asia/Shanghai)
 
 ## Local evidence
 
-- Grounded focused regression bundle: 148 passed, 0 failed.
-- `npm test`: 291 passed, 0 failed after adding grounded routing/evidence, boundary, playback failure isolation and same-voice retry probes.
+- Grounded focused regression bundle: 155 passed, 0 failed.
+- `npm test`: 298 passed, 0 failed after hardening grounded verification result categories, cancellable provider timeouts and persona-bound external TTS retry coverage.
 - `npm run typecheck`: passed.
 - `npm run build`: passed on Next.js 15.5.20 and includes `/api/chat`.
 - `git diff --check`: passed.
@@ -14,9 +14,10 @@ Updated: 2026-07-14 (Asia/Shanghai)
 - Persona knowledge local evidence: facts, relationship memories and speech styles are stored separately; only `confirmed` items are retrievable; manual `/api/memory` writes are explicit user confirmations; AI candidates remain `pending`; source revocation immediately revokes unsupported derived items and reports their references.
 - Legacy memory local evidence: old rows are copied idempotently into source + relationship memory + evidence link records, while the old table remains intact in this phase. Cross-owner persona/voice conflicts and mismatched deterministic IDs abort instead of linking unrelated data.
 - Grounded conversation local evidence: confirmed facts/memories are ranked separately from confirmed styles; known facts carry their evidence IDs; contradictory user claims and history-only claims do not become evidence; no evidence and retrieval failure degrade to companionship; boundary paths use fixed replies with zero free-model calls and no sentence events; completed grounded messages persist selection-time evidence IDs.
-- Playback local evidence: a failed first sentence preparation reports exactly one error and does not block the next prepared sentence; retrying a sentence reuses the same `voiceId` and resolved source instead of switching to another persona voice.
+- Playback local evidence: a failed first sentence preparation reports exactly one error and does not block the next prepared sentence. For an external retry of the same persona's sentence, the production persona→voice binding, source resolution and synthesis chain resolve persona A to voice/source A on both attempts; a simultaneous persona B/voice B fixture is never accessed or used. This does not claim an automatic provider retry: a general 503 still makes one provider call per request.
 - Deterministic probes verify routing and evidence only. They do not prove subjective voice resemblance, emotional authenticity or real-user success.
 - `npm run probe:grounded` on 2026-07-14 returned `provider_not_configured` (exit 2). The four-case synthetic real-model behavior remains unverified in this shell; this is recorded as missing evidence, not a pass.
+- Probe result semantics are regression-tested separately: only completed content assertion failures are `red_line_failed` (exit 1); missing configuration is exit 2; network, HTTP 401/429/5xx, timeout and response parsing failures are `provider_failed` (exit 3). Every case has one cancellable provider call at most, and provider reports include only stable error category/name fields.
 - Not locally complete: browser playback telemetry, effective-restoration feedback, people who know the voice owner, and a usable Preview environment.
 - Local tests, typecheck and build do not authorize a push, Preview deployment or Production promotion.
 
