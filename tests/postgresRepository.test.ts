@@ -442,6 +442,7 @@ it("creates pending persona knowledge candidates in one scoped transaction", asy
       content: params[4], normalized_value: params[5], status: "pending", conflict_group_id: null,
       confirmed_by: null, confirmed_at: null, revoked_at: null, created_at: now, updated_at: now,
     }];
+    if (text.includes("INSERT INTO persona_item_sources")) return [{ item_id: params[1] }];
     return [];
   });
   const repo = createPostgresRepository(fake.executor);
@@ -462,6 +463,57 @@ it("creates pending persona knowledge candidates in one scoped transaction", asy
   const knowledgeCalls = fake.calls.filter((call) => /persona_(sources|facts|item_sources)/.test(call.text));
   assert.ok(knowledgeCalls.every((call) => call.params.includes("persona-1") || call.text.includes("persona_item_sources")));
   assert.ok(fake.calls.some((call) => call.text.includes("persona_item_sources")));
+});
+
+it("rolls back candidate creation when the source link is not inserted", async () => {
+  const now = "2026-07-14T00:00:00.000Z";
+  const fake = createFakeSql((text, params) => {
+    if (text.includes("INSERT INTO persona_sources")) return [{
+      id: params[0], persona_id: params[1], source_type: params[2], content_text: params[3],
+      object_path: params[4], checksum_algorithm: params[5], checksum: params[6], status: params[7],
+      created_by: params[8], created_at: now, revoked_at: null,
+    }];
+    if (text.includes("INSERT INTO persona_facts")) return [{
+      id: params[0], persona_id: params[1], fact_type: params[2], fact_key: params[3],
+      content: params[4], normalized_value: params[5], status: "pending", conflict_group_id: null,
+      confirmed_by: null, confirmed_at: null, revoked_at: null, created_at: now, updated_at: now,
+    }];
+    return [];
+  });
+  const repo = createPostgresRepository(fake.executor);
+
+  await assert.rejects(
+    repo.createPersonaKnowledgeCandidates({
+      source: {
+        id: "source-missing", personaId: "persona-1", sourceType: "manual_text", contentText: "x",
+        objectPath: null, checksumAlgorithm: "sha256", checksum: "sum-x", status: "ready", createdBy: "user-1",
+      },
+      candidates: [{
+        kind: "fact", id: "fact-missing", personaId: "persona-1", factType: "preference",
+        factKey: "drink", content: "x", normalizedValue: "x", sourceId: "source-missing", sourceExcerpt: "x",
+      }],
+    }),
+    /persona_source_link_failed/,
+  );
+  assert.equal(fake.transactions, 1);
+});
+
+it("finds confirmed facts with normalized type and key", async () => {
+  const now = "2026-07-14T00:00:00.000Z";
+  const fake = createFakeSql((text, params) => {
+    if (text.includes("FROM persona_facts") && params.length === 1) return [{
+      id: "fact-1", persona_id: "persona-1", fact_type: "Preference",
+      fact_key: " favorite   drink ", content: "喜欢桂花茶", normalized_value: "桂花茶",
+      status: "confirmed", conflict_group_id: null, confirmed_by: "user-1", confirmed_at: now,
+      revoked_at: null, created_at: now, updated_at: now,
+    }];
+    return [];
+  });
+  const repo = createPostgresRepository(fake.executor);
+
+  const facts = await repo.findConfirmedFacts("persona-1", "preference", "favorite drink");
+  assert.deepEqual(facts.map((fact) => fact.id), ["fact-1"]);
+  assert.deepEqual(fake.calls[0].params, ["persona-1"]);
 });
 
 it("uses confirmed relationship memories and compare-and-set status updates", async () => {
@@ -506,6 +558,7 @@ it("revokes only unsupported persona knowledge for an owner-scoped source", asyn
       { item_kind: "fact", item_id: "fact-1" },
       { item_kind: "speech_style", item_id: "style-1" },
     ];
+    if (text.includes("FOR UPDATE")) return [{ id: params[0] }];
     if (text.includes("UPDATE persona_facts")) return [{ id: "fact-1" }];
     return [];
   });
@@ -515,6 +568,18 @@ it("revokes only unsupported persona knowledge for an owner-scoped source", asyn
   assert.equal(result.sourceRevoked, true);
   assert.deepEqual(result.revokedItems, [{ kind: "fact", id: "fact-1" }]);
   assert.equal(fake.transactions, 1);
+  for (const item of [
+    { table: "persona_facts", id: "fact-1" },
+    { table: "speech_style_items", id: "style-1" },
+  ]) {
+    const lockIndex = fake.calls.findIndex((call) =>
+      call.text.includes(`FROM ${item.table}`) && call.text.includes("FOR UPDATE") && call.params.includes(item.id));
+    const countIndex = fake.calls.findIndex((call) =>
+      call.text.includes("COUNT(*)") && call.params.includes(item.id));
+    assert.ok(lockIndex >= 0 && lockIndex < countIndex, `${item.id} must be locked before support count`);
+  }
+  const revokeUpdate = fake.calls.find((call) => call.text.includes("UPDATE persona_facts"))!;
+  assert.match(revokeUpdate.text, /status IN \('pending', 'confirmed', 'conflicted'\)/);
   assert.ok(fake.calls
     .filter((call) => /persona_sources|persona_item_sources|persona_facts|speech_style_items/.test(call.text))
     .every((call) => call.params.includes("persona-1") || call.text.includes("persona_item_sources")));

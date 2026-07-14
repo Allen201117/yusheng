@@ -21,7 +21,7 @@ export function requireKnowledgeTransition(
   }
 }
 
-function normalize(value: string): string {
+export function normalizePersonaKnowledgeText(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLocaleLowerCase("zh-CN");
 }
 
@@ -29,7 +29,8 @@ export function factsConflict(
   left: { factType: string; factKey: string; normalizedValue: string },
   right: { factType: string; factKey: string; normalizedValue: string },
 ): boolean {
-  return normalize(left.factType) === normalize(right.factType)
-    && normalize(left.factKey) === normalize(right.factKey)
-    && normalize(left.normalizedValue) !== normalize(right.normalizedValue);
+  return normalizePersonaKnowledgeText(left.factType) === normalizePersonaKnowledgeText(right.factType)
+    && normalizePersonaKnowledgeText(left.factKey) === normalizePersonaKnowledgeText(right.factKey)
+    && normalizePersonaKnowledgeText(left.normalizedValue)
+      !== normalizePersonaKnowledgeText(right.normalizedValue);
 }

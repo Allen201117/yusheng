@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { normalizePersonaKnowledgeText } from "../personaKnowledge";
 import type { SqlExecutor } from "./postgres";
 import type {
   AppRepository,
@@ -702,17 +703,19 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
             if (!rows[0]) throw new Error("Failed to create speech style item");
             styles.push(mapSpeechStyleItem(rows[0]));
           }
-          await transaction.query(
+          const linkRows = await transaction.query<{ item_id: string }>(
             `INSERT INTO persona_item_sources
                (item_kind, item_id, source_id, source_excerpt)
              SELECT $1, $2, source.id, $4
              FROM persona_sources source
-             WHERE source.id = $3 AND source.persona_id = $5`,
+             WHERE source.id = $3 AND source.persona_id = $5
+             RETURNING item_id`,
             [
               candidate.kind, candidate.id, candidate.sourceId, candidate.sourceExcerpt,
               candidate.personaId,
             ],
           );
+          if (linkRows.length !== 1) throw new Error("persona_source_link_failed");
         }
         return {
           sources: [mapPersonaSource(sourceRows[0])],
@@ -775,11 +778,17 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
     ): Promise<PersonaFact[]> {
       const rows = await sql.query<PersonaFactRow>(
         `SELECT ${PERSONA_FACT_COLUMNS} FROM persona_facts
-         WHERE persona_id = $1 AND fact_type = $2 AND fact_key = $3 AND status = 'confirmed'
+         WHERE persona_id = $1 AND status = 'confirmed'
          ORDER BY created_at, id`,
-        [personaId, factType, factKey],
+        [personaId],
       );
-      return rows.map(mapPersonaFact);
+      const normalizedFactType = normalizePersonaKnowledgeText(factType);
+      const normalizedFactKey = normalizePersonaKnowledgeText(factKey);
+      return rows
+        .map(mapPersonaFact)
+        .filter((fact) =>
+          normalizePersonaKnowledgeText(fact.factType) === normalizedFactType
+          && normalizePersonaKnowledgeText(fact.factKey) === normalizedFactKey);
     },
 
     async updatePersonaKnowledgeCandidate(input): Promise<PersonaKnowledgeItem | null> {
@@ -880,6 +889,14 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
         );
         const revokedItems: Array<{ kind: PersonaKnowledgeKind; id: string }> = [];
         for (const link of links) {
+          const table = KNOWLEDGE_TABLES[link.item_kind];
+          const lockedRows = await transaction.query<{ id: string }>(
+            `SELECT id FROM ${table}
+             WHERE id = $1 AND persona_id = $2
+             FOR UPDATE`,
+            [link.item_id, personaId],
+          );
+          if (!lockedRows[0]) continue;
           const supportRows = await transaction.query<{ count: number | string }>(
             `SELECT COUNT(*) AS count
              FROM persona_item_sources links
@@ -889,12 +906,12 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
             [link.item_kind, link.item_id, sourceId, personaId],
           );
           if (Number(supportRows[0]?.count || 0) > 0) continue;
-          const table = KNOWLEDGE_TABLES[link.item_kind];
           const rows = await transaction.query<{ id: string }>(
             `UPDATE ${table}
              SET status = 'revoked', confirmed_by = NULL, confirmed_at = NULL,
                  revoked_at = now(), updated_at = now()
-             WHERE id = $1 AND persona_id = $2 AND status <> 'revoked'
+             WHERE id = $1 AND persona_id = $2
+               AND status IN ('pending', 'confirmed', 'conflicted')
              RETURNING id`,
             [link.item_id, personaId],
           );

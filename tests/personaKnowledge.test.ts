@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   canUsePersonaKnowledge,
   factsConflict,
+  normalizePersonaKnowledgeText,
   requireKnowledgeTransition,
 } from "../src/lib/personaKnowledge";
 
@@ -50,4 +51,15 @@ it("detects incompatible normalized values only for the same fact key", () => {
     factsConflict(base, { ...base, factKey: "dessert", normalizedValue: "桂花糕" }),
     false,
   );
+  assert.equal(
+    factsConflict(
+      { factType: "Preference", factKey: " favorite   drink ", normalizedValue: "桂花茶" },
+      { factType: "preference", factKey: "favorite drink", normalizedValue: "咖啡" },
+    ),
+    true,
+  );
+});
+
+it("normalizes persona knowledge keys consistently", () => {
+  assert.equal(normalizePersonaKnowledgeText("  Preference\n  Favorite   Drink  "), "preference favorite drink");
 });

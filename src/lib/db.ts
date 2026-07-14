@@ -10,6 +10,7 @@ import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs";
+import { normalizePersonaKnowledgeText } from "./personaKnowledge";
 import type {
   CreatePersonaKnowledgeCandidateInput,
   CreatePersonaSourceInput,
@@ -524,11 +525,17 @@ export function findConfirmedFacts(
   factType: string,
   factKey: string,
 ): PersonaFact[] {
+  const normalizedFactType = normalizePersonaKnowledgeText(factType);
+  const normalizedFactKey = normalizePersonaKnowledgeText(factKey);
   return (getDb().prepare(
     `SELECT * FROM persona_facts
-     WHERE persona_id = ? AND fact_type = ? AND fact_key = ? AND status = 'confirmed'
+     WHERE persona_id = ? AND status = 'confirmed'
      ORDER BY created_at, id`,
-  ).all(personaId, factType, factKey) as any[]).map(rowToPersonaFact);
+  ).all(personaId) as any[])
+    .map(rowToPersonaFact)
+    .filter((fact) =>
+      normalizePersonaKnowledgeText(fact.factType) === normalizedFactType
+      && normalizePersonaKnowledgeText(fact.factKey) === normalizedFactKey);
 }
 
 export function createPersonaKnowledgeCandidates(input: {
@@ -744,7 +751,8 @@ export function revokePersonaSource(
         `UPDATE ${table}
          SET status = 'revoked', confirmed_by = NULL, confirmed_at = NULL,
              revoked_at = ?, updated_at = ?
-         WHERE id = ? AND persona_id = ? AND status <> 'revoked'`,
+         WHERE id = ? AND persona_id = ?
+           AND status IN ('pending', 'confirmed', 'conflicted')`,
       ).run(now, now, link.item_id, personaId);
       if (changed.changes > 0) revokedItems.push({ kind: link.item_kind, id: link.item_id });
     }

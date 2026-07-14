@@ -117,8 +117,8 @@ it("persists persona knowledge atomically with scoped edits, status changes, and
       kind: "fact" as const,
       id: "fact-1",
       personaId: "persona-1",
-      factType: "preference",
-      factKey: "flower",
+      factType: "Preference",
+      factKey: " favorite   drink ",
       content: "妈妈喜欢茉莉花",
       normalizedValue: "茉莉花",
       sourceId: "source-1",
@@ -196,7 +196,7 @@ it("persists persona knowledge atomically with scoped edits, status changes, and
     conflictGroupId: null,
   }]);
   assert.equal(confirmed[0].status, "confirmed");
-  assert.equal(dbModule.findConfirmedFacts("persona-1", "preference", "flower").length, 1);
+  assert.equal(dbModule.findConfirmedFacts("persona-1", "preference", "favorite drink").length, 1);
   assert.throws(
     () => dbModule.setPersonaKnowledgeStatuses([{
       kind: "fact",
@@ -220,17 +220,25 @@ it("persists persona knowledge atomically with scoped edits, status changes, and
      VALUES ('fact', ?, ?, '', ?)`,
   ).run("fact-1", "source-2", "2026-07-14T02:00:00.000Z");
 
+  dbModule.setPersonaKnowledgeStatuses([{
+    kind: "speech_style",
+    id: "style-1",
+    personaId: "persona-1",
+    expectedStatus: "pending",
+    nextStatus: "rejected",
+    actorUserId: "user-1",
+    conflictGroupId: null,
+  }]);
+
   assert.deepEqual(dbModule.revokePersonaSource("source-1", "persona-2", "user-1"), {
     sourceRevoked: false,
     revokedItems: [],
   });
   assert.deepEqual(dbModule.revokePersonaSource("source-1", "persona-1", "user-1"), {
     sourceRevoked: true,
-    revokedItems: [
-      { kind: "relationship_memory", id: "memory-1" },
-      { kind: "speech_style", id: "style-1" },
-    ],
+    revokedItems: [{ kind: "relationship_memory", id: "memory-1" }],
   });
+  assert.equal(dbModule.getPersonaKnowledgeItem("speech_style", "style-1", "persona-1")?.status, "rejected");
   assert.equal(dbModule.getPersonaKnowledgeItem("fact", "fact-1", "persona-1")?.status, "confirmed");
   assert.deepEqual(dbModule.revokePersonaSource("source-2", "persona-1", "user-1"), {
     sourceRevoked: true,
