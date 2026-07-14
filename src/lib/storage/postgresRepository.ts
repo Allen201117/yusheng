@@ -20,6 +20,7 @@ import type {
   CreateVoiceProfileInput,
   InsertMemoryInput,
   InsertMessageInput,
+  GroundingEvidenceKind,
   Memory,
   MemoryEmbedding,
   Message,
@@ -224,6 +225,29 @@ const EVIDENCE_TABLES = {
   fact: "persona_facts",
   relationship_memory: "relationship_memories",
 } as const;
+
+const EVIDENCE_KIND_ORDER: Record<GroundingEvidenceKind, number> = {
+  fact: 0,
+  relationship_memory: 1,
+};
+
+function compareAscii(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function canonicalizeEvidenceLocks<T extends { kind: GroundingEvidenceKind }>(
+  items: T[],
+  getId: (item: T) => string,
+): T[] {
+  const unique = new Map<string, T>();
+  for (const item of items) {
+    const key = `${EVIDENCE_KIND_ORDER[item.kind]}\0${getId(item)}`;
+    if (!unique.has(key)) unique.set(key, item);
+  }
+  return Array.from(unique.values()).sort((left, right) =>
+    EVIDENCE_KIND_ORDER[left.kind] - EVIDENCE_KIND_ORDER[right.kind]
+    || compareAscii(getId(left), getId(right)));
+}
 
 const PERSONA_SOURCE_COLUMNS = `
   id, persona_id, source_type, content_text, object_path, checksum_algorithm,
@@ -1173,7 +1197,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
            FROM persona_item_sources links
            JOIN persona_sources source ON source.id = links.source_id
            WHERE links.source_id = $1 AND source.persona_id = $2
-           ORDER BY links.item_kind, links.item_id`,
+           ORDER BY links.item_kind COLLATE "C", links.item_id COLLATE "C"`,
           [sourceId, personaId],
         );
         const revokedItems: Array<{ kind: PersonaKnowledgeKind; id: string }> = [];
@@ -1347,8 +1371,9 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       if (updates.some((update) => !isValidConversationVector(update.embedding))) {
         throw new Error("conversation_embedding_status_changed");
       }
+      const orderedUpdates = canonicalizeEvidenceLocks(updates, (update) => update.id);
       await sql.transaction(async (transaction) => {
-        for (const update of updates) {
+        for (const update of orderedUpdates) {
           const table = EVIDENCE_TABLES[update.kind];
           const changed = await transaction.query<{ id: string }>(
             `UPDATE ${table}
@@ -1409,10 +1434,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
           [input.turnId, input.personaId],
         );
         if (turns.length !== 1) throw new Error("conversation_turn_status_changed");
-        const evidence = Array.from(
-          new Map(input.evidence.map((item) => [`${item.kind}:${item.itemId}`, item])).values(),
-        ).sort((left, right) =>
-          left.kind.localeCompare(right.kind) || left.itemId.localeCompare(right.itemId));
+        const evidence = canonicalizeEvidenceLocks(input.evidence, (item) => item.itemId);
         const sourceIdsByItem = new Map<string, string[]>();
         for (const item of evidence) {
           const rows = await transaction.query<{
@@ -1425,7 +1447,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
              JOIN persona_sources source ON source.id = links.source_id
              WHERE links.item_kind = $1 AND links.item_id = $2
                AND source.persona_id = $3 AND source.status = 'ready'
-             ORDER BY source.id`,
+             ORDER BY source.id COLLATE "C"`,
             [item.kind, item.itemId, input.personaId],
           );
           if (rows.length === 0) throw new Error("conversation_evidence_unavailable");
@@ -1435,12 +1457,13 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
           );
         }
 
-        const sourceIds = Array.from(new Set(Array.from(sourceIdsByItem.values()).flat())).sort();
+        const sourceIds = Array.from(new Set(Array.from(sourceIdsByItem.values()).flat()))
+          .sort(compareAscii);
         if (sourceIds.length > 0) {
           const lockedSources = await transaction.query<{ id: string }>(
             `SELECT id FROM persona_sources
              WHERE persona_id = $1 AND status = 'ready' AND id = ANY($2::text[])
-             ORDER BY id
+             ORDER BY id COLLATE "C"
              FOR UPDATE`,
             [input.personaId, sourceIds],
           );

@@ -853,6 +853,12 @@ it("revokes only unsupported persona knowledge for an owner-scoped source", asyn
   }
   const revokeUpdate = fake.calls.find((call) => call.text.includes("UPDATE persona_facts"))!;
   assert.match(revokeUpdate.text, /status IN \('pending', 'confirmed', 'conflicted'\)/);
+  const orderedLinks = fake.calls.find((call) =>
+    call.text.includes("FROM persona_item_sources") && call.text.includes("ORDER BY"))!;
+  assert.match(
+    orderedLinks.text,
+    /ORDER BY links\.item_kind COLLATE "C", links\.item_id COLLATE "C"/,
+  );
   assert.ok(fake.calls
     .filter((call) => /persona_sources|persona_item_sources|persona_facts|speech_style_items/.test(call.text))
     .every((call) => call.params.includes("persona-1") || call.text.includes("persona_item_sources")));
@@ -951,6 +957,36 @@ it("backfills confirmed embeddings with owner/status/null CAS and idempotent re-
   assert.equal(wrongSize.calls.length, 0);
 });
 
+it("deduplicates and canonically orders conversation embedding row locks", async () => {
+  const fake = createFakeSql((text, params) =>
+    text.includes("SET embedding") ? [{ id: params[0] }] : []);
+  const repo = createPostgresRepository(fake.executor);
+  const vector = new Float32Array(1024).fill(0.25);
+
+  await repo.storeConfirmedConversationEmbeddings("persona-1", [
+    { kind: "relationship_memory", id: "memory-b", embedding: vector },
+    { kind: "fact", id: "fact-z", embedding: vector },
+    { kind: "relationship_memory", id: "memory-a", embedding: vector },
+    { kind: "fact", id: "fact-a", embedding: vector },
+    { kind: "fact", id: "fact-a", embedding: vector },
+  ]);
+
+  assert.deepEqual(
+    fake.calls
+      .filter((call) => call.text.includes("SET embedding"))
+      .map((call) => [
+        call.text.includes("persona_facts") ? "fact" : "relationship_memory",
+        call.params[0],
+      ]),
+    [
+      ["fact", "fact-a"],
+      ["fact", "fact-z"],
+      ["relationship_memory", "memory-a"],
+      ["relationship_memory", "memory-b"],
+    ],
+  );
+});
+
 it("starts, binds, and completes a grounded turn in transactions with stable lock order", async () => {
   const now = "2026-07-14T00:00:00.000Z";
   const startedTurn = {
@@ -1039,7 +1075,10 @@ it("starts, binds, and completes a grounded turn in transactions with stable loc
   const itemLockIndex = fake.calls.findIndex((call) =>
     call.text.includes("FROM persona_facts") && call.text.includes("FOR UPDATE"));
   assert.ok(sourceLockIndex >= 0 && sourceLockIndex < itemLockIndex);
-  assert.match(fake.calls[sourceLockIndex].text, /ORDER BY id/);
+  assert.match(fake.calls[sourceLockIndex].text, /ORDER BY id COLLATE "C"/);
+  const sourceDiscovery = fake.calls.find((call) =>
+    call.text.includes("FROM persona_item_sources") && call.text.includes("source.id AS source_id"))!;
+  assert.match(sourceDiscovery.text, /ORDER BY source.id COLLATE "C"/);
 
   const userInsert = fake.calls.find((call) =>
     call.text.includes("INSERT INTO messages") && call.params[0] === "user-message-1")!;

@@ -37,6 +37,7 @@ import type {
   CreateVoiceAuthorizationInput,
   VoiceAuthorization,
   InsertMemoryInput,
+  GroundingEvidenceKind,
   MessageEvidence,
 } from "./storage/types";
 
@@ -479,6 +480,29 @@ const EVIDENCE_TABLES = {
   relationship_memory: "relationship_memories",
 } as const;
 
+const EVIDENCE_KIND_ORDER: Record<GroundingEvidenceKind, number> = {
+  fact: 0,
+  relationship_memory: 1,
+};
+
+function compareAscii(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function canonicalizeEvidenceLocks<T extends { kind: GroundingEvidenceKind }>(
+  items: T[],
+  getId: (item: T) => string,
+): T[] {
+  const unique = new Map<string, T>();
+  for (const item of items) {
+    const key = `${EVIDENCE_KIND_ORDER[item.kind]}\0${getId(item)}`;
+    if (!unique.has(key)) unique.set(key, item);
+  }
+  return Array.from(unique.values()).sort((left, right) =>
+    EVIDENCE_KIND_ORDER[left.kind] - EVIDENCE_KIND_ORDER[right.kind]
+    || compareAscii(getId(left), getId(right)));
+}
+
 function float32ToBuffer(vector: Float32Array): Buffer {
   return Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength);
 }
@@ -914,7 +938,7 @@ export function revokePersonaSource(
        FROM persona_item_sources links
        JOIN persona_sources source ON source.id = links.source_id
        WHERE links.source_id = ? AND source.persona_id = ?
-       ORDER BY links.item_kind, links.item_id`,
+       ORDER BY links.item_kind COLLATE BINARY, links.item_id COLLATE BINARY`,
     ).all(sourceId, personaId) as Array<{ item_kind: PersonaKnowledgeKind; item_id: string }>;
     const revokedItems: Array<{ kind: PersonaKnowledgeKind; id: string }> = [];
     for (const link of links) {
@@ -1158,9 +1182,10 @@ export function storeConfirmedConversationEmbeddings(
   if (updates.some((update) => !isValidConversationEmbedding(update.embedding))) {
     throw new Error("conversation_embedding_status_changed");
   }
+  const orderedUpdates = canonicalizeEvidenceLocks(updates, (update) => update.id);
   const database = getDb();
   database.transaction(() => {
-    for (const update of updates) {
+    for (const update of orderedUpdates) {
       const table = EVIDENCE_TABLES[update.kind];
       const changed = database.prepare(
         `UPDATE ${table}
@@ -1217,10 +1242,7 @@ export function bindConversationTurnEvidence(input: {
        WHERE id = ? AND persona_id = ? AND status = 'started'`,
     ).get(input.turnId, input.personaId);
     if (!turn) throw new Error("conversation_turn_status_changed");
-    const evidence = Array.from(
-      new Map(input.evidence.map((item) => [`${item.kind}:${item.itemId}`, item])).values(),
-    ).sort((left, right) =>
-      left.kind.localeCompare(right.kind) || left.itemId.localeCompare(right.itemId));
+    const evidence = canonicalizeEvidenceLocks(input.evidence, (item) => item.itemId);
 
     for (const item of evidence) {
       const source = database.prepare(
@@ -1229,7 +1251,7 @@ export function bindConversationTurnEvidence(input: {
          JOIN persona_sources source ON source.id = links.source_id
          WHERE links.item_kind = ? AND links.item_id = ?
            AND source.persona_id = ? AND source.status = 'ready'
-         ORDER BY source.id
+         ORDER BY source.id COLLATE BINARY
          LIMIT 1`,
       ).get(item.kind, item.itemId, input.personaId);
       if (!source) throw new Error("conversation_evidence_unavailable");
