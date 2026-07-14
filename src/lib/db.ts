@@ -1462,10 +1462,10 @@ export function getOrStartConversationSession(input: {
 
     database.prepare(
       `UPDATE conversation_sessions
-       SET status = 'expired', last_activity_at = ?
+       SET status = 'expired'
        WHERE persona_id = ? AND evaluator_user_id = ?
-         AND status = 'active' AND last_activity_at < ?`,
-    ).run(input.now, input.personaId, input.evaluatorUserId, input.staleBefore);
+         AND status = 'active' AND last_activity_at <= ?`,
+    ).run(input.personaId, input.evaluatorUserId, input.staleBefore);
 
     const active = database.prepare(
       `SELECT * FROM conversation_sessions

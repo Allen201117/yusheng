@@ -230,6 +230,11 @@ it("locks the owner-scoped persona before atomically reusing an active restorati
     call.text.includes("FROM conversation_sessions") && call.text.includes("status = 'active'"));
   assert.ok(personaLock >= 0 && personaLock < expiry && expiry < activeSelect);
   assert.match(fake.calls[personaLock].text, /id = \$1 AND user_id = \$2 AND voice_id = \$3/);
+  assert.match(fake.calls[expiry].text, /last_activity_at <= \$3/);
+  assert.doesNotMatch(fake.calls[expiry].text, /SET[\s\S]*last_activity_at\s*=/);
+  assert.deepEqual(fake.calls[expiry].params, [
+    "persona-1", "user-1", "2026-07-14T09:30:00.000Z",
+  ]);
 });
 
 it("creates a new Postgres session with immutable voice authorization and cohort snapshots", async () => {

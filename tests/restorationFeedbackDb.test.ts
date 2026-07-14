@@ -287,14 +287,19 @@ it("atomically reuses fresh sessions, expires stale sessions, and isolates owner
     voiceId: "voice-1",
     voiceAuthorizationId: "auth-1",
     cohort: "living",
-    now: "2026-07-14T10:31:00.000Z",
-    staleBefore: "2026-07-14T10:01:00.000Z",
+    now: "2026-07-14T10:30:00.000Z",
+    staleBefore: "2026-07-14T10:00:00.000Z",
   });
   assert.equal(replacement.id, "session-replacement");
   assert.equal(
     (database.prepare("SELECT status FROM conversation_sessions WHERE id = ?")
       .get(first.id) as { status: string }).status,
     "expired",
+  );
+  assert.equal(
+    (database.prepare("SELECT last_activity_at FROM conversation_sessions WHERE id = ?")
+      .get(first.id) as { last_activity_at: string }).last_activity_at,
+    "2026-07-14T10:00:00.000Z",
   );
 
   await assert.rejects(repository.getOrStartConversationSession({

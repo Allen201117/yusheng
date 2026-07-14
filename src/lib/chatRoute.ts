@@ -417,6 +417,7 @@ export function createChatHandlers(overrides: Partial<ChatRouteDependencies> = {
         deps.logError("chat_session_tracking_unavailable", {
           personaId, turnId, errorName: "RepositoryMethodUnavailableError",
         });
+        return jsonError("对话会话创建失败，请稍后重试", 500, "CHAT_SESSION_START_FAILED");
       } else {
         const now = deps.nowIso();
         const staleBefore = new Date(Date.parse(now) - 30 * 60 * 1_000).toISOString();

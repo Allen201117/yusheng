@@ -56,7 +56,25 @@ function createProbe(options: ProbeOptions = {}) {
     },
     async getCurrentVoiceAuthorization() {
       const status = options.authorization === undefined ? "approved" : options.authorization;
-      return status ? { status } : null;
+      return status ? {
+        id: "probe-authorization",
+        speakerStatus: "living",
+        status,
+      } : null;
+    },
+    async getOrStartConversationSession(input: { proposedSessionId: string }) {
+      return {
+        id: input.proposedSessionId,
+        personaId: PERSONA.id,
+        evaluatorUserId: PERSONA.userId,
+        voiceId: PERSONA.voiceId,
+        voiceAuthorizationId: "probe-authorization",
+        cohort: "living",
+        status: "active",
+        startedAt: "2026-07-14T10:00:00.000Z",
+        lastActivityAt: "2026-07-14T10:00:00.000Z",
+        ratedAt: null,
+      };
     },
     async startConversationTurn(input: Record<string, unknown>) {
       messages.push({

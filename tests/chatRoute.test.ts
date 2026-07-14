@@ -53,6 +53,7 @@ type FakeOptions = {
   authorization?: "approved" | "pending_review" | "rejected" | "revoked" | null;
   authorizationError?: Error;
   sessionError?: Error;
+  sessionMethodMissing?: boolean;
   knowledge?: ConfirmedConversationKnowledge;
   loadError?: Error;
   startError?: Error;
@@ -145,6 +146,10 @@ function makeRepository(options: FakeOptions = {}) {
       return messages.slice(-limit);
     },
   } as unknown as AppRepository;
+  if (options.sessionMethodMissing) {
+    delete (repo as unknown as { getOrStartConversationSession?: unknown })
+      .getOrStartConversationSession;
+  }
   return { repo, calls, messages };
 }
 
@@ -285,6 +290,20 @@ it("stops before turn persistence and modeling when session creation fails", asy
   assert.equal(h.calls.start.length, 0);
   assert.equal(h.modelCalls.length, 0);
   assert.doesNotMatch(JSON.stringify(h.logs), /session db secret/);
+});
+
+it("fails closed before turn persistence when session tracking is unavailable", async () => {
+  const h = makeHarness({ sessionMethodMissing: true });
+  const response = await h.handlers.POST(postRequest({ personaId: persona.id, text: "hello" }));
+  assert.equal(response.status, 500);
+  assert.deepEqual(await response.json(), {
+    error: "对话会话创建失败，请稍后重试",
+    code: "CHAT_SESSION_START_FAILED",
+  });
+  assert.equal(h.calls.sessions.length, 0);
+  assert.equal(h.calls.start.length, 0);
+  assert.equal(h.modelCalls.length, 0);
+  assert.ok(h.logs.some((entry) => entry.event === "chat_session_tracking_unavailable"));
 });
 
 it("still streams self-harm safety guidance when persona lookup storage fails", async () => {

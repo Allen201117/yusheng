@@ -1447,11 +1447,11 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
 
         await transaction.query<{ id: string }>(
           `UPDATE conversation_sessions
-           SET status = 'expired', last_activity_at = $3
+           SET status = 'expired'
            WHERE persona_id = $1 AND evaluator_user_id = $2
-             AND status = 'active' AND last_activity_at < $4
+             AND status = 'active' AND last_activity_at <= $3
            RETURNING id`,
-          [input.personaId, input.evaluatorUserId, input.now, input.staleBefore],
+          [input.personaId, input.evaluatorUserId, input.staleBefore],
         );
 
         const active = await transaction.query<ConversationSessionRow>(
