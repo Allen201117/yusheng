@@ -293,6 +293,8 @@ export function migrateRestorationFeedbackSchema(db: Database.Database) {
         ON personas(id, user_id, voice_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_authorizations_restoration_owner_voice
         ON voice_authorizations(id, voice_id, user_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_authorizations_restoration_owner_voice_status
+        ON voice_authorizations(id, voice_id, user_id, speaker_status);
 
       CREATE TABLE IF NOT EXISTS conversation_sessions (
         id                     TEXT PRIMARY KEY,
@@ -307,9 +309,59 @@ export function migrateRestorationFeedbackSchema(db: Database.Database) {
         rated_at               TEXT,
         FOREIGN KEY (persona_id, evaluator_user_id, voice_id)
           REFERENCES personas(id, user_id, voice_id) ON DELETE CASCADE,
-        FOREIGN KEY (voice_authorization_id, voice_id, evaluator_user_id)
-          REFERENCES voice_authorizations(id, voice_id, user_id) ON DELETE RESTRICT
+        FOREIGN KEY (voice_authorization_id, voice_id, evaluator_user_id, cohort)
+          REFERENCES voice_authorizations(id, voice_id, user_id, speaker_status) ON DELETE RESTRICT
       );
+
+      CREATE TRIGGER IF NOT EXISTS trg_conversation_sessions_authorization_cohort_insert
+      BEFORE INSERT ON conversation_sessions
+      FOR EACH ROW
+      WHEN NOT EXISTS (
+        SELECT 1
+        FROM voice_authorizations authorization
+        WHERE authorization.id = NEW.voice_authorization_id
+          AND authorization.voice_id = NEW.voice_id
+          AND authorization.user_id = NEW.evaluator_user_id
+          AND authorization.speaker_status = NEW.cohort
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'conversation_session_authorization_mismatch');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_conversation_sessions_authorization_cohort_update
+      BEFORE UPDATE OF voice_authorization_id, voice_id, evaluator_user_id, cohort
+      ON conversation_sessions
+      FOR EACH ROW
+      WHEN NOT EXISTS (
+        SELECT 1
+        FROM voice_authorizations authorization
+        WHERE authorization.id = NEW.voice_authorization_id
+          AND authorization.voice_id = NEW.voice_id
+          AND authorization.user_id = NEW.evaluator_user_id
+          AND authorization.speaker_status = NEW.cohort
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'conversation_session_authorization_mismatch');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_voice_authorizations_session_cohort_update
+      BEFORE UPDATE OF id, voice_id, user_id, speaker_status
+      ON voice_authorizations
+      FOR EACH ROW
+      WHEN EXISTS (
+        SELECT 1
+        FROM conversation_sessions sessions
+        WHERE sessions.voice_authorization_id = OLD.id
+          AND (
+            sessions.voice_authorization_id <> NEW.id
+            OR sessions.voice_id <> NEW.voice_id
+            OR sessions.evaluator_user_id <> NEW.user_id
+            OR sessions.cohort <> NEW.speaker_status
+          )
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'conversation_session_authorization_mismatch');
+      END;
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_sessions_one_active
         ON conversation_sessions(persona_id, evaluator_user_id) WHERE status = 'active';
@@ -322,6 +374,21 @@ export function migrateRestorationFeedbackSchema(db: Database.Database) {
       CREATE INDEX IF NOT EXISTS idx_conversation_sessions_evaluator_activity
         ON conversation_sessions(evaluator_user_id, last_activity_at DESC);
     `);
+
+    const mismatchedSession = db.prepare(
+      `SELECT sessions.id
+       FROM conversation_sessions sessions
+       LEFT JOIN voice_authorizations authorization
+         ON authorization.id = sessions.voice_authorization_id
+        AND authorization.voice_id = sessions.voice_id
+        AND authorization.user_id = sessions.evaluator_user_id
+        AND authorization.speaker_status = sessions.cohort
+       WHERE authorization.id IS NULL
+       LIMIT 1`,
+    ).get();
+    if (mismatchedSession) {
+      throw new Error("conversation_session_authorization_mismatch");
+    }
 
     const turnColumns = db.pragma("table_info(conversation_turns)") as { name: string }[];
     if (!turnColumns.some((column) => column.name === "session_id")) {

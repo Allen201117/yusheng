@@ -2,6 +2,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_personas_restoration_owner_voice
   ON personas(id, user_id, voice_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_authorizations_restoration_owner_voice
   ON voice_authorizations(id, voice_id, user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_authorizations_restoration_owner_voice_status
+  ON voice_authorizations(id, voice_id, user_id, speaker_status);
 
 CREATE TABLE IF NOT EXISTS conversation_sessions (
   id text PRIMARY KEY,
@@ -16,8 +18,8 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
   rated_at timestamptz,
   FOREIGN KEY (persona_id, evaluator_user_id, voice_id)
     REFERENCES personas(id, user_id, voice_id) ON DELETE CASCADE,
-  FOREIGN KEY (voice_authorization_id, voice_id, evaluator_user_id)
-    REFERENCES voice_authorizations(id, voice_id, user_id) ON DELETE RESTRICT
+  FOREIGN KEY (voice_authorization_id, voice_id, evaluator_user_id, cohort)
+    REFERENCES voice_authorizations(id, voice_id, user_id, speaker_status) ON DELETE RESTRICT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_sessions_one_active

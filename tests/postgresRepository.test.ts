@@ -177,7 +177,8 @@ it("adds owner-consistent auditable restoration feedback schema", async () => {
   assert.match(sql, /CHECK \(knows_voice_owner = true\)/);
   assert.match(sql, /CHECK \(heard_all_rounds = true\)/);
   assert.match(sql, /FOREIGN KEY \(persona_id, evaluator_user_id, voice_id\)[\s\S]*REFERENCES personas\(id, user_id, voice_id\)/);
-  assert.match(sql, /FOREIGN KEY \(voice_authorization_id, voice_id, evaluator_user_id\)[\s\S]*REFERENCES voice_authorizations\(id, voice_id, user_id\)/);
+  assert.match(sql, /ON voice_authorizations\(id, voice_id, user_id, speaker_status\)/);
+  assert.match(sql, /FOREIGN KEY \(voice_authorization_id, voice_id, evaluator_user_id, cohort\)[\s\S]*REFERENCES voice_authorizations\(id, voice_id, user_id, speaker_status\)/);
   assert.match(sql, /CHECK \(comment IS NULL OR char_length\(comment\) <= 1000\)/);
 });
 

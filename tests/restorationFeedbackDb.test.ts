@@ -157,14 +157,36 @@ it("upgrades legacy turns without rewriting them and is idempotent", async () =>
   legacy.exec(`
     CREATE TABLE users (id TEXT PRIMARY KEY);
     CREATE TABLE personas (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, voice_id TEXT NOT NULL);
-    CREATE TABLE voice_authorizations (id TEXT PRIMARY KEY, voice_id TEXT NOT NULL, user_id TEXT NOT NULL);
+    CREATE TABLE voice_authorizations (
+      id TEXT PRIMARY KEY,
+      voice_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      speaker_status TEXT NOT NULL
+    );
     CREATE TABLE conversation_turns (
       id TEXT PRIMARY KEY,
       persona_id TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE conversation_sessions (
+      id TEXT PRIMARY KEY,
+      persona_id TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+      evaluator_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      voice_id TEXT NOT NULL,
+      voice_authorization_id TEXT NOT NULL REFERENCES voice_authorizations(id),
+      cohort TEXT NOT NULL CHECK (cohort IN ('living','deceased')),
+      status TEXT NOT NULL CHECK (status IN ('active','rated','expired')),
+      started_at TEXT NOT NULL,
+      last_activity_at TEXT NOT NULL,
+      rated_at TEXT
+    );
     INSERT INTO users VALUES ('legacy-user');
     INSERT INTO personas VALUES ('legacy-persona', 'legacy-user', 'legacy-voice');
+    INSERT INTO voice_authorizations VALUES ('legacy-auth', 'legacy-voice', 'legacy-user', 'living');
+    INSERT INTO conversation_sessions VALUES (
+      'legacy-session', 'legacy-persona', 'legacy-user', 'legacy-voice', 'legacy-auth',
+      'living', 'rated', '${NOW}', '${NOW}', '${NOW}'
+    );
     INSERT INTO conversation_turns VALUES ('legacy-turn', 'legacy-persona', '${NOW}');
   `);
 
@@ -184,6 +206,27 @@ it("upgrades legacy turns without rewriting them and is idempotent", async () =>
       speech_tracking_failed: 0,
     },
   );
+  assert.equal(
+    (legacy.prepare("SELECT cohort FROM conversation_sessions WHERE id = 'legacy-session'")
+      .get() as { cohort: string }).cohort,
+    "living",
+  );
+  assert.throws(
+    () => legacy.prepare(
+      `INSERT INTO conversation_sessions
+         (id, persona_id, evaluator_user_id, voice_id, voice_authorization_id,
+          cohort, status, started_at, last_activity_at)
+       VALUES ('legacy-mismatch', 'legacy-persona', 'legacy-user', 'legacy-voice',
+               'legacy-auth', 'deceased', 'rated', ?, ?)`,
+    ).run(NOW, NOW),
+    /conversation_session_authorization_mismatch/,
+  );
+  assert.throws(
+    () => legacy.prepare(
+      "UPDATE voice_authorizations SET speaker_status = 'deceased' WHERE id = 'legacy-auth'",
+    ).run(),
+    /conversation_session_authorization_mismatch/,
+  );
   legacy.close();
 });
 
@@ -191,6 +234,22 @@ it("allows only one active session per persona and evaluator", () => {
   insertSession();
   assert.throws(() => insertSession("session-2"), /UNIQUE constraint failed/);
   insertSession("session-rated", "persona-1", "user-1", "voice-1", "auth-1", "living", "rated");
+});
+
+it("binds the session cohort to the authorization speaker status", () => {
+  assert.throws(
+    () => insertSession(
+      "session-cohort-mismatch",
+      "persona-1",
+      "user-1",
+      "voice-1",
+      "auth-1",
+      "deceased",
+      "rated",
+    ),
+    /FOREIGN KEY constraint failed|conversation_session_authorization_mismatch/,
+  );
+  insertSession("session-cohort-match", "persona-1", "user-1", "voice-1", "auth-1", "living", "rated");
 });
 
 it("keeps legacy turn session links nullable", () => {
@@ -261,7 +320,7 @@ it("accepts one attested bounded feedback row per session and evaluator", () => 
 it("rejects owner mismatches and rolls back the whole transaction", () => {
   assert.throws(
     () => insertSession("session-owner-mismatch", "persona-1", "user-2", "voice-2", "auth-2"),
-    /FOREIGN KEY constraint failed/,
+    /FOREIGN KEY constraint failed|conversation_session_authorization_mismatch/,
   );
 
   const transaction = database.transaction(() => {
