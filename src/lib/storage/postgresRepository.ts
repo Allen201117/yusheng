@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { SqlExecutor } from "./postgres";
 import type {
   AppRepository,
+  CreatePersonaKnowledgeCandidateInput,
   CreatePersonaInput,
+  CreatePersonaSourceInput,
   CreateVoiceAuthorizationInput,
   CreateVoiceProfileInput,
   InsertMemoryInput,
@@ -11,6 +13,14 @@ import type {
   MemoryEmbedding,
   Message,
   Persona,
+  PersonaFact,
+  PersonaKnowledgeBundle,
+  PersonaKnowledgeItem,
+  PersonaKnowledgeKind,
+  PersonaKnowledgeStatus,
+  PersonaSource,
+  RelationshipMemory,
+  SpeechStyleItem,
   User,
   VoiceAuthorization,
   VoiceMeta,
@@ -45,6 +55,67 @@ type MemoryEmbeddingRow = {
   id: string;
   content: string;
   embedding: string | number[] | null;
+};
+
+type PersonaSourceRow = {
+  id: string;
+  persona_id: string;
+  source_type: PersonaSource["sourceType"];
+  content_text: string | null;
+  object_path: string | null;
+  checksum_algorithm: PersonaSource["checksumAlgorithm"];
+  checksum: string;
+  status: PersonaSource["status"];
+  created_by: string;
+  created_at: Date | string;
+  revoked_at: Date | string | null;
+};
+
+type PersonaFactRow = {
+  id: string;
+  persona_id: string;
+  fact_type: string;
+  fact_key: string;
+  content: string;
+  normalized_value: string;
+  status: PersonaKnowledgeStatus;
+  conflict_group_id: string | null;
+  confirmed_by: string | null;
+  confirmed_at: Date | string | null;
+  revoked_at: Date | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+};
+
+type RelationshipMemoryRow = {
+  id: string;
+  persona_id: string;
+  content: string;
+  occurred_at: Date | string | null;
+  location: string | null;
+  participants: unknown;
+  status: PersonaKnowledgeStatus;
+  conflict_group_id: string | null;
+  confirmed_by: string | null;
+  confirmed_at: Date | string | null;
+  revoked_at: Date | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+};
+
+type SpeechStyleItemRow = {
+  id: string;
+  persona_id: string;
+  category: string;
+  content: string;
+  example: string | null;
+  status: PersonaKnowledgeStatus;
+  conflict_group_id: string | null;
+  confirmed_by: string | null;
+  confirmed_at: Date | string | null;
+  revoked_at: Date | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
 };
 
 type MessageRow = {
@@ -90,6 +161,128 @@ type VoiceAuthorizationRow = {
 
 function toIsoString(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+}
+
+function toNullableIsoString(value: Date | string | null): string | null {
+  return value === null ? null : toIsoString(value);
+}
+
+const KNOWLEDGE_TABLES = {
+  fact: "persona_facts",
+  relationship_memory: "relationship_memories",
+  speech_style: "speech_style_items",
+} as const;
+
+const PERSONA_SOURCE_COLUMNS = `
+  id, persona_id, source_type, content_text, object_path, checksum_algorithm,
+  checksum, status, created_by, created_at, revoked_at
+`;
+const PERSONA_FACT_COLUMNS = `
+  id, persona_id, fact_type, fact_key, content, normalized_value, status,
+  conflict_group_id, confirmed_by, confirmed_at, revoked_at, created_at, updated_at
+`;
+const RELATIONSHIP_MEMORY_COLUMNS = `
+  id, persona_id, content, occurred_at, location, participants, status,
+  conflict_group_id, confirmed_by, confirmed_at, revoked_at, created_at, updated_at
+`;
+const SPEECH_STYLE_COLUMNS = `
+  id, persona_id, category, content, example, status, conflict_group_id,
+  confirmed_by, confirmed_at, revoked_at, created_at, updated_at
+`;
+
+function parseParticipants(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) && parsed.every((item) => typeof item === "string") ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function mapPersonaSource(row: PersonaSourceRow): PersonaSource {
+  return {
+    id: row.id,
+    personaId: row.persona_id,
+    sourceType: row.source_type,
+    contentText: row.content_text,
+    objectPath: row.object_path,
+    checksumAlgorithm: row.checksum_algorithm,
+    checksum: row.checksum,
+    status: row.status,
+    createdBy: row.created_by,
+    createdAt: toIsoString(row.created_at),
+    revokedAt: toNullableIsoString(row.revoked_at),
+  };
+}
+
+function mapPersonaFact(row: PersonaFactRow): PersonaFact {
+  return {
+    kind: "fact",
+    id: row.id,
+    personaId: row.persona_id,
+    factType: row.fact_type,
+    factKey: row.fact_key,
+    content: row.content,
+    normalizedValue: row.normalized_value,
+    status: row.status,
+    conflictGroupId: row.conflict_group_id,
+    confirmedBy: row.confirmed_by,
+    confirmedAt: toNullableIsoString(row.confirmed_at),
+    revokedAt: toNullableIsoString(row.revoked_at),
+    createdAt: toIsoString(row.created_at),
+    updatedAt: toIsoString(row.updated_at),
+  };
+}
+
+function mapRelationshipMemory(row: RelationshipMemoryRow): RelationshipMemory {
+  return {
+    kind: "relationship_memory",
+    id: row.id,
+    personaId: row.persona_id,
+    content: row.content,
+    occurredAt: toNullableIsoString(row.occurred_at),
+    location: row.location,
+    participants: parseParticipants(row.participants),
+    status: row.status,
+    conflictGroupId: row.conflict_group_id,
+    confirmedBy: row.confirmed_by,
+    confirmedAt: toNullableIsoString(row.confirmed_at),
+    revokedAt: toNullableIsoString(row.revoked_at),
+    createdAt: toIsoString(row.created_at),
+    updatedAt: toIsoString(row.updated_at),
+  };
+}
+
+function mapSpeechStyleItem(row: SpeechStyleItemRow): SpeechStyleItem {
+  return {
+    kind: "speech_style",
+    id: row.id,
+    personaId: row.persona_id,
+    category: row.category,
+    content: row.content,
+    example: row.example,
+    status: row.status,
+    conflictGroupId: row.conflict_group_id,
+    confirmedBy: row.confirmed_by,
+    confirmedAt: toNullableIsoString(row.confirmed_at),
+    revokedAt: toNullableIsoString(row.revoked_at),
+    createdAt: toIsoString(row.created_at),
+    updatedAt: toIsoString(row.updated_at),
+  };
+}
+
+function mapKnowledgeItem(kind: PersonaKnowledgeKind, row: Record<string, unknown>): PersonaKnowledgeItem {
+  if (kind === "fact") return mapPersonaFact(row as PersonaFactRow);
+  if (kind === "relationship_memory") return mapRelationshipMemory(row as RelationshipMemoryRow);
+  return mapSpeechStyleItem(row as SpeechStyleItemRow);
+}
+
+function columnsForKnowledgeKind(kind: PersonaKnowledgeKind): string {
+  if (kind === "fact") return PERSONA_FACT_COLUMNS;
+  if (kind === "relationship_memory") return RELATIONSHIP_MEMORY_COLUMNS;
+  return SPEECH_STYLE_COLUMNS;
 }
 
 function mapPersona(row: PersonaRow): Persona {
@@ -439,6 +632,278 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       return getCurrentVoiceAuthorizationForUser(voiceId, userId);
     },
 
+    async createPersonaKnowledgeCandidates(input: {
+      source: CreatePersonaSourceInput;
+      candidates: CreatePersonaKnowledgeCandidateInput[];
+    }): Promise<PersonaKnowledgeBundle> {
+      return sql.transaction(async (transaction) => {
+        for (const candidate of input.candidates) {
+          if (candidate.personaId !== input.source.personaId) throw new Error("persona_mismatch");
+          if (candidate.sourceId !== input.source.id) throw new Error("source_mismatch");
+        }
+        const sourceRows = await transaction.query<PersonaSourceRow>(
+          `INSERT INTO persona_sources
+             (id, persona_id, source_type, content_text, object_path, checksum_algorithm,
+              checksum, status, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           RETURNING ${PERSONA_SOURCE_COLUMNS}`,
+          [
+            input.source.id,
+            input.source.personaId,
+            input.source.sourceType,
+            input.source.contentText,
+            input.source.objectPath,
+            input.source.checksumAlgorithm,
+            input.source.checksum,
+            input.source.status,
+            input.source.createdBy,
+          ],
+        );
+        if (!sourceRows[0]) throw new Error("Failed to create persona source");
+        const facts: PersonaFact[] = [];
+        const memories: RelationshipMemory[] = [];
+        const styles: SpeechStyleItem[] = [];
+        for (const candidate of input.candidates) {
+          if (candidate.kind === "fact") {
+            const rows = await transaction.query<PersonaFactRow>(
+              `INSERT INTO persona_facts
+                 (id, persona_id, fact_type, fact_key, content, normalized_value, status)
+               VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+               RETURNING ${PERSONA_FACT_COLUMNS}`,
+              [
+                candidate.id, candidate.personaId, candidate.factType, candidate.factKey,
+                candidate.content, candidate.normalizedValue,
+              ],
+            );
+            if (!rows[0]) throw new Error("Failed to create persona fact");
+            facts.push(mapPersonaFact(rows[0]));
+          } else if (candidate.kind === "relationship_memory") {
+            const rows = await transaction.query<RelationshipMemoryRow>(
+              `INSERT INTO relationship_memories
+                 (id, persona_id, content, occurred_at, location, participants, embedding, status)
+               VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::vector, 'pending')
+               RETURNING ${RELATIONSHIP_MEMORY_COLUMNS}`,
+              [
+                candidate.id, candidate.personaId, candidate.content, candidate.occurredAt,
+                candidate.location, JSON.stringify(candidate.participants),
+                candidate.embedding ? serializeVector(candidate.embedding) : null,
+              ],
+            );
+            if (!rows[0]) throw new Error("Failed to create relationship memory");
+            memories.push(mapRelationshipMemory(rows[0]));
+          } else {
+            const rows = await transaction.query<SpeechStyleItemRow>(
+              `INSERT INTO speech_style_items
+                 (id, persona_id, category, content, example, status)
+               VALUES ($1, $2, $3, $4, $5, 'pending')
+               RETURNING ${SPEECH_STYLE_COLUMNS}`,
+              [candidate.id, candidate.personaId, candidate.category, candidate.content, candidate.example],
+            );
+            if (!rows[0]) throw new Error("Failed to create speech style item");
+            styles.push(mapSpeechStyleItem(rows[0]));
+          }
+          await transaction.query(
+            `INSERT INTO persona_item_sources
+               (item_kind, item_id, source_id, source_excerpt)
+             SELECT $1, $2, source.id, $4
+             FROM persona_sources source
+             WHERE source.id = $3 AND source.persona_id = $5`,
+            [
+              candidate.kind, candidate.id, candidate.sourceId, candidate.sourceExcerpt,
+              candidate.personaId,
+            ],
+          );
+        }
+        return {
+          sources: [mapPersonaSource(sourceRows[0])],
+          facts,
+          memories,
+          styles,
+        };
+      });
+    },
+
+    async listPersonaKnowledge(personaId: string): Promise<PersonaKnowledgeBundle> {
+      const [sources, facts, memories, styles] = await Promise.all([
+        sql.query<PersonaSourceRow>(
+          `SELECT ${PERSONA_SOURCE_COLUMNS} FROM persona_sources
+           WHERE persona_id = $1 ORDER BY created_at, id`,
+          [personaId],
+        ),
+        sql.query<PersonaFactRow>(
+          `SELECT ${PERSONA_FACT_COLUMNS} FROM persona_facts
+           WHERE persona_id = $1 ORDER BY created_at, id`,
+          [personaId],
+        ),
+        sql.query<RelationshipMemoryRow>(
+          `SELECT ${RELATIONSHIP_MEMORY_COLUMNS} FROM relationship_memories
+           WHERE persona_id = $1 ORDER BY created_at, id`,
+          [personaId],
+        ),
+        sql.query<SpeechStyleItemRow>(
+          `SELECT ${SPEECH_STYLE_COLUMNS} FROM speech_style_items
+           WHERE persona_id = $1 ORDER BY created_at, id`,
+          [personaId],
+        ),
+      ]);
+      return {
+        sources: sources.map(mapPersonaSource),
+        facts: facts.map(mapPersonaFact),
+        memories: memories.map(mapRelationshipMemory),
+        styles: styles.map(mapSpeechStyleItem),
+      };
+    },
+
+    async getPersonaKnowledgeItem(
+      kind: PersonaKnowledgeKind,
+      id: string,
+      personaId: string,
+    ): Promise<PersonaKnowledgeItem | null> {
+      const table = KNOWLEDGE_TABLES[kind];
+      const rows = await sql.query<Record<string, unknown>>(
+        `SELECT ${columnsForKnowledgeKind(kind)} FROM ${table}
+         WHERE id = $1 AND persona_id = $2`,
+        [id, personaId],
+      );
+      return rows[0] ? mapKnowledgeItem(kind, rows[0]) : null;
+    },
+
+    async findConfirmedFacts(
+      personaId: string,
+      factType: string,
+      factKey: string,
+    ): Promise<PersonaFact[]> {
+      const rows = await sql.query<PersonaFactRow>(
+        `SELECT ${PERSONA_FACT_COLUMNS} FROM persona_facts
+         WHERE persona_id = $1 AND fact_type = $2 AND fact_key = $3 AND status = 'confirmed'
+         ORDER BY created_at, id`,
+        [personaId, factType, factKey],
+      );
+      return rows.map(mapPersonaFact);
+    },
+
+    async updatePersonaKnowledgeCandidate(input): Promise<PersonaKnowledgeItem | null> {
+      const editableColumns: Record<PersonaKnowledgeKind, Record<string, string>> = {
+        fact: {
+          factType: "fact_type",
+          factKey: "fact_key",
+          content: "content",
+          normalizedValue: "normalized_value",
+        },
+        relationship_memory: {
+          content: "content",
+          occurredAt: "occurred_at",
+          location: "location",
+          participants: "participants",
+        },
+        speech_style: { category: "category", content: "content", example: "example" },
+      };
+      const allowed = editableColumns[input.kind];
+      const entries = Object.entries(input.patch).filter(([key]) => allowed[key]);
+      if (entries.length === 0) {
+        const table = KNOWLEDGE_TABLES[input.kind];
+        const rows = await sql.query<Record<string, unknown>>(
+          `SELECT ${columnsForKnowledgeKind(input.kind)} FROM ${table}
+           WHERE id = $1 AND persona_id = $2 AND status = $3`,
+          [input.id, input.personaId, input.expectedStatus],
+        );
+        return rows[0] ? mapKnowledgeItem(input.kind, rows[0]) : null;
+      }
+      const values: unknown[] = [input.id, input.personaId, input.expectedStatus];
+      const assignments = entries.map(([key, value]) => {
+        values.push(
+          input.kind === "relationship_memory" && key === "participants"
+            ? JSON.stringify(Array.isArray(value) ? value : [])
+            : value,
+        );
+        const cast = input.kind === "relationship_memory" && key === "participants" ? "::jsonb" : "";
+        return `${allowed[key]} = $${values.length}${cast}`;
+      });
+      const table = KNOWLEDGE_TABLES[input.kind];
+      const rows = await sql.query<Record<string, unknown>>(
+        `UPDATE ${table}
+         SET ${assignments.join(", ")}, status = 'pending', conflict_group_id = NULL,
+             confirmed_by = NULL, confirmed_at = NULL, revoked_at = NULL, updated_at = now()
+         WHERE id = $1 AND persona_id = $2 AND status = $3
+         RETURNING ${columnsForKnowledgeKind(input.kind)}`,
+        values,
+      );
+      return rows[0] ? mapKnowledgeItem(input.kind, rows[0]) : null;
+    },
+
+    async setPersonaKnowledgeStatuses(inputs): Promise<PersonaKnowledgeItem[]> {
+      return sql.transaction(async (transaction) => {
+        const changed: PersonaKnowledgeItem[] = [];
+        for (const input of inputs) {
+          const table = KNOWLEDGE_TABLES[input.kind];
+          const rows = await transaction.query<Record<string, unknown>>(
+            `UPDATE ${table}
+             SET status = $4,
+                 confirmed_by = CASE WHEN $4 = 'confirmed' THEN $5 ELSE NULL END,
+                 confirmed_at = CASE WHEN $4 = 'confirmed' THEN now() ELSE NULL END,
+                 conflict_group_id = $6,
+                 revoked_at = CASE WHEN $4 = 'revoked' THEN now() ELSE NULL END,
+                 updated_at = now()
+             WHERE id = $1 AND persona_id = $2 AND status = $3
+             RETURNING ${columnsForKnowledgeKind(input.kind)}`,
+            [
+              input.id, input.personaId, input.expectedStatus, input.nextStatus,
+              input.actorUserId, input.conflictGroupId,
+            ],
+          );
+          if (!rows[0]) throw new Error("knowledge_status_changed");
+          changed.push(mapKnowledgeItem(input.kind, rows[0]));
+        }
+        return changed;
+      });
+    },
+
+    async revokePersonaSource(sourceId, personaId, _actorUserId) {
+      return sql.transaction(async (transaction) => {
+        const sourceRows = await transaction.query<{ id: string }>(
+          `UPDATE persona_sources SET status = 'revoked', revoked_at = now()
+           WHERE id = $1 AND persona_id = $2 AND status <> 'revoked'
+           RETURNING id`,
+          [sourceId, personaId],
+        );
+        if (!sourceRows[0]) return { sourceRevoked: false, revokedItems: [] };
+        const links = await transaction.query<{
+          item_kind: PersonaKnowledgeKind;
+          item_id: string;
+        }>(
+          `SELECT links.item_kind, links.item_id
+           FROM persona_item_sources links
+           JOIN persona_sources source ON source.id = links.source_id
+           WHERE links.source_id = $1 AND source.persona_id = $2
+           ORDER BY links.item_kind, links.item_id`,
+          [sourceId, personaId],
+        );
+        const revokedItems: Array<{ kind: PersonaKnowledgeKind; id: string }> = [];
+        for (const link of links) {
+          const supportRows = await transaction.query<{ count: number | string }>(
+            `SELECT COUNT(*) AS count
+             FROM persona_item_sources links
+             JOIN persona_sources source ON source.id = links.source_id
+             WHERE links.item_kind = $1 AND links.item_id = $2 AND links.source_id <> $3
+               AND source.persona_id = $4 AND source.status = 'ready'`,
+            [link.item_kind, link.item_id, sourceId, personaId],
+          );
+          if (Number(supportRows[0]?.count || 0) > 0) continue;
+          const table = KNOWLEDGE_TABLES[link.item_kind];
+          const rows = await transaction.query<{ id: string }>(
+            `UPDATE ${table}
+             SET status = 'revoked', confirmed_by = NULL, confirmed_at = NULL,
+                 revoked_at = now(), updated_at = now()
+             WHERE id = $1 AND persona_id = $2 AND status <> 'revoked'
+             RETURNING id`,
+            [link.item_id, personaId],
+          );
+          if (rows[0]) revokedItems.push({ kind: link.item_kind, id: link.item_id });
+        }
+        return { sourceRevoked: true, revokedItems };
+      });
+    },
+
     async insertMemory(input: InsertMemoryInput): Promise<void> {
       await sql.query(
         `INSERT INTO memories (id, persona_id, content, embedding)
@@ -473,7 +938,8 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
     async loadMemoriesWithEmbeddings(personaId: string): Promise<MemoryEmbedding[]> {
       const rows = await sql.query<MemoryEmbeddingRow>(
         `SELECT id, content, embedding::text AS embedding
-         FROM memories WHERE persona_id = $1 AND embedding IS NOT NULL`,
+         FROM relationship_memories
+         WHERE persona_id = $1 AND status = 'confirmed' AND embedding IS NOT NULL`,
         [personaId],
       );
       return rows

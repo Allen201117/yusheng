@@ -1,5 +1,6 @@
 import {
   countPersonasUsingVoice,
+  createPersonaKnowledgeCandidates,
   createPersona,
   createUserByEmail,
   createVerificationCode,
@@ -7,18 +8,24 @@ import {
   getDb,
   getMemoryById,
   getPersonaForUser,
+  getPersonaKnowledgeItem,
   getUserByEmail,
   insertMemory,
   insertMessage,
   listMemories,
   listMessages,
   listPersonas,
+  listPersonaKnowledge,
   loadMemoriesWithEmbeddings,
+  findConfirmedFacts,
   getCurrentVoiceAuthorization,
   replaceVoiceAuthorization,
   revokeVoiceAuthorization,
+  revokePersonaSource,
+  setPersonaKnowledgeStatuses,
   setUserPassword,
   verifyCode,
+  updatePersonaKnowledgeCandidate,
 } from "../db";
 import {
   deleteVoiceForUser,
@@ -105,6 +112,23 @@ export function createLocalRepository(): AppRepository {
     },
     async revokeVoiceAuthorization(voiceId, userId) {
       return revokeVoiceAuthorization(voiceId, userId);
+    },
+    async createPersonaKnowledgeCandidates(input) {
+      return createPersonaKnowledgeCandidates(input);
+    },
+    async listPersonaKnowledge(personaId) { return listPersonaKnowledge(personaId); },
+    async getPersonaKnowledgeItem(kind, id, personaId) {
+      return getPersonaKnowledgeItem(kind, id, personaId);
+    },
+    async findConfirmedFacts(personaId, factType, factKey) {
+      return findConfirmedFacts(personaId, factType, factKey);
+    },
+    async updatePersonaKnowledgeCandidate(input) {
+      return updatePersonaKnowledgeCandidate(input);
+    },
+    async setPersonaKnowledgeStatuses(inputs) { return setPersonaKnowledgeStatuses(inputs); },
+    async revokePersonaSource(sourceId, personaId, actorUserId) {
+      return revokePersonaSource(sourceId, personaId, actorUserId);
     },
     async listMemories(personaId) { return listMemories(personaId); },
     async getMemoryById(id) { return getMemoryById(id); },

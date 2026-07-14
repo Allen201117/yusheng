@@ -289,6 +289,45 @@ export interface AppRepository {
     voiceId: string,
     userId: string,
   ): Promise<VoiceAuthorization | null>;
+  createPersonaKnowledgeCandidates(input: {
+    source: CreatePersonaSourceInput;
+    candidates: CreatePersonaKnowledgeCandidateInput[];
+  }): Promise<PersonaKnowledgeBundle>;
+  listPersonaKnowledge(personaId: string): Promise<PersonaKnowledgeBundle>;
+  getPersonaKnowledgeItem(
+    kind: PersonaKnowledgeKind,
+    id: string,
+    personaId: string,
+  ): Promise<PersonaKnowledgeItem | null>;
+  findConfirmedFacts(
+    personaId: string,
+    factType: string,
+    factKey: string,
+  ): Promise<PersonaFact[]>;
+  updatePersonaKnowledgeCandidate(input: {
+    kind: PersonaKnowledgeKind;
+    id: string;
+    personaId: string;
+    expectedStatus: "pending" | "conflicted";
+    patch: Record<string, string | string[] | null>;
+  }): Promise<PersonaKnowledgeItem | null>;
+  setPersonaKnowledgeStatuses(inputs: Array<{
+    kind: PersonaKnowledgeKind;
+    id: string;
+    personaId: string;
+    expectedStatus: PersonaKnowledgeStatus;
+    nextStatus: PersonaKnowledgeStatus;
+    actorUserId: string;
+    conflictGroupId: string | null;
+  }>): Promise<PersonaKnowledgeItem[]>;
+  revokePersonaSource(
+    sourceId: string,
+    personaId: string,
+    actorUserId: string,
+  ): Promise<{
+    sourceRevoked: boolean;
+    revokedItems: Array<{ kind: PersonaKnowledgeKind; id: string }>;
+  }>;
   listMemories(personaId: string): Promise<Memory[]>;
   getMemoryById(id: string): Promise<Pick<Memory, "id" | "personaId" | "content"> | null>;
   insertMemory(input: InsertMemoryInput): Promise<void>;

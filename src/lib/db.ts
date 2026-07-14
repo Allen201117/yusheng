@@ -11,6 +11,16 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs";
 import type {
+  CreatePersonaKnowledgeCandidateInput,
+  CreatePersonaSourceInput,
+  PersonaFact,
+  PersonaKnowledgeBundle,
+  PersonaKnowledgeItem,
+  PersonaKnowledgeKind,
+  PersonaKnowledgeStatus,
+  PersonaSource,
+  RelationshipMemory,
+  SpeechStyleItem,
   CreateVoiceAuthorizationInput,
   VoiceAuthorization,
 } from "./storage/types";
@@ -383,6 +393,365 @@ function rowToPersona(r: any): Persona {
   };
 }
 
+// ------- Persona Knowledge -------
+const KNOWLEDGE_TABLES = {
+  fact: "persona_facts",
+  relationship_memory: "relationship_memories",
+  speech_style: "speech_style_items",
+} as const;
+
+function parseParticipants(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) && parsed.every((item) => typeof item === "string") ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function rowToPersonaSource(row: any): PersonaSource {
+  return {
+    id: row.id,
+    personaId: row.persona_id,
+    sourceType: row.source_type,
+    contentText: row.content_text,
+    objectPath: row.object_path,
+    checksumAlgorithm: row.checksum_algorithm,
+    checksum: row.checksum,
+    status: row.status,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    revokedAt: row.revoked_at,
+  };
+}
+
+function rowToPersonaFact(row: any): PersonaFact {
+  return {
+    kind: "fact",
+    id: row.id,
+    personaId: row.persona_id,
+    factType: row.fact_type,
+    factKey: row.fact_key,
+    content: row.content,
+    normalizedValue: row.normalized_value,
+    status: row.status,
+    conflictGroupId: row.conflict_group_id,
+    confirmedBy: row.confirmed_by,
+    confirmedAt: row.confirmed_at,
+    revokedAt: row.revoked_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToRelationshipMemory(row: any): RelationshipMemory {
+  return {
+    kind: "relationship_memory",
+    id: row.id,
+    personaId: row.persona_id,
+    content: row.content,
+    occurredAt: row.occurred_at,
+    location: row.location,
+    participants: parseParticipants(row.participants),
+    status: row.status,
+    conflictGroupId: row.conflict_group_id,
+    confirmedBy: row.confirmed_by,
+    confirmedAt: row.confirmed_at,
+    revokedAt: row.revoked_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToSpeechStyleItem(row: any): SpeechStyleItem {
+  return {
+    kind: "speech_style",
+    id: row.id,
+    personaId: row.persona_id,
+    category: row.category,
+    content: row.content,
+    example: row.example,
+    status: row.status,
+    conflictGroupId: row.conflict_group_id,
+    confirmedBy: row.confirmed_by,
+    confirmedAt: row.confirmed_at,
+    revokedAt: row.revoked_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToPersonaKnowledgeItem(kind: PersonaKnowledgeKind, row: any): PersonaKnowledgeItem {
+  if (kind === "fact") return rowToPersonaFact(row);
+  if (kind === "relationship_memory") return rowToRelationshipMemory(row);
+  return rowToSpeechStyleItem(row);
+}
+
+export function listPersonaKnowledge(personaId: string): PersonaKnowledgeBundle {
+  const database = getDb();
+  return {
+    sources: (database.prepare(
+      "SELECT * FROM persona_sources WHERE persona_id = ? ORDER BY created_at, id",
+    ).all(personaId) as any[]).map(rowToPersonaSource),
+    facts: (database.prepare(
+      "SELECT * FROM persona_facts WHERE persona_id = ? ORDER BY created_at, id",
+    ).all(personaId) as any[]).map(rowToPersonaFact),
+    memories: (database.prepare(
+      "SELECT * FROM relationship_memories WHERE persona_id = ? ORDER BY created_at, id",
+    ).all(personaId) as any[]).map(rowToRelationshipMemory),
+    styles: (database.prepare(
+      "SELECT * FROM speech_style_items WHERE persona_id = ? ORDER BY created_at, id",
+    ).all(personaId) as any[]).map(rowToSpeechStyleItem),
+  };
+}
+
+export function getPersonaKnowledgeItem(
+  kind: PersonaKnowledgeKind,
+  id: string,
+  personaId: string,
+): PersonaKnowledgeItem | null {
+  const table = KNOWLEDGE_TABLES[kind];
+  const row = getDb().prepare(`SELECT * FROM ${table} WHERE id = ? AND persona_id = ?`).get(
+    id,
+    personaId,
+  ) as any;
+  return row ? rowToPersonaKnowledgeItem(kind, row) : null;
+}
+
+export function findConfirmedFacts(
+  personaId: string,
+  factType: string,
+  factKey: string,
+): PersonaFact[] {
+  return (getDb().prepare(
+    `SELECT * FROM persona_facts
+     WHERE persona_id = ? AND fact_type = ? AND fact_key = ? AND status = 'confirmed'
+     ORDER BY created_at, id`,
+  ).all(personaId, factType, factKey) as any[]).map(rowToPersonaFact);
+}
+
+export function createPersonaKnowledgeCandidates(input: {
+  source: CreatePersonaSourceInput;
+  candidates: CreatePersonaKnowledgeCandidateInput[];
+}): PersonaKnowledgeBundle {
+  const database = getDb();
+  return database.transaction(() => {
+    for (const candidate of input.candidates) {
+      if (candidate.personaId !== input.source.personaId) throw new Error("persona_mismatch");
+      if (candidate.sourceId !== input.source.id) throw new Error("source_mismatch");
+    }
+    const now = new Date().toISOString();
+    database.prepare(
+      `INSERT INTO persona_sources
+         (id, persona_id, source_type, content_text, object_path, checksum_algorithm,
+          checksum, status, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      input.source.id,
+      input.source.personaId,
+      input.source.sourceType,
+      input.source.contentText,
+      input.source.objectPath,
+      input.source.checksumAlgorithm,
+      input.source.checksum,
+      input.source.status,
+      input.source.createdBy,
+      now,
+    );
+    const facts: PersonaFact[] = [];
+    const memories: RelationshipMemory[] = [];
+    const styles: SpeechStyleItem[] = [];
+    const link = database.prepare(
+      `INSERT INTO persona_item_sources
+         (item_kind, item_id, source_id, source_excerpt, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    );
+    for (const candidate of input.candidates) {
+      if (candidate.kind === "fact") {
+        database.prepare(
+          `INSERT INTO persona_facts
+             (id, persona_id, fact_type, fact_key, content, normalized_value, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+        ).run(
+          candidate.id, candidate.personaId, candidate.factType, candidate.factKey,
+          candidate.content, candidate.normalizedValue, now, now,
+        );
+        facts.push(getPersonaKnowledgeItem("fact", candidate.id, candidate.personaId) as PersonaFact);
+      } else if (candidate.kind === "relationship_memory") {
+        const embedding = candidate.embedding
+          ? Buffer.from(candidate.embedding.buffer, candidate.embedding.byteOffset, candidate.embedding.byteLength)
+          : null;
+        database.prepare(
+          `INSERT INTO relationship_memories
+             (id, persona_id, content, occurred_at, location, participants, embedding,
+              status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+        ).run(
+          candidate.id, candidate.personaId, candidate.content, candidate.occurredAt,
+          candidate.location, JSON.stringify(candidate.participants), embedding, now, now,
+        );
+        memories.push(getPersonaKnowledgeItem(
+          "relationship_memory",
+          candidate.id,
+          candidate.personaId,
+        ) as RelationshipMemory);
+      } else {
+        database.prepare(
+          `INSERT INTO speech_style_items
+             (id, persona_id, category, content, example, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
+        ).run(
+          candidate.id, candidate.personaId, candidate.category, candidate.content,
+          candidate.example, now, now,
+        );
+        styles.push(getPersonaKnowledgeItem(
+          "speech_style",
+          candidate.id,
+          candidate.personaId,
+        ) as SpeechStyleItem);
+      }
+      link.run(candidate.kind, candidate.id, candidate.sourceId, candidate.sourceExcerpt, now);
+    }
+    const source = database.prepare(
+      "SELECT * FROM persona_sources WHERE id = ? AND persona_id = ?",
+    ).get(input.source.id, input.source.personaId) as any;
+    return { sources: [rowToPersonaSource(source)], facts, memories, styles };
+  })();
+}
+
+const EDITABLE_COLUMNS = {
+  fact: {
+    factType: "fact_type",
+    factKey: "fact_key",
+    content: "content",
+    normalizedValue: "normalized_value",
+  },
+  relationship_memory: {
+    content: "content",
+    occurredAt: "occurred_at",
+    location: "location",
+    participants: "participants",
+  },
+  speech_style: {
+    category: "category",
+    content: "content",
+    example: "example",
+  },
+} as const;
+
+export function updatePersonaKnowledgeCandidate(input: {
+  kind: PersonaKnowledgeKind;
+  id: string;
+  personaId: string;
+  expectedStatus: "pending" | "conflicted";
+  patch: Record<string, string | string[] | null>;
+}): PersonaKnowledgeItem | null {
+  const allowed = EDITABLE_COLUMNS[input.kind] as Record<string, string>;
+  const entries = Object.entries(input.patch).filter(([key]) => allowed[key]);
+  if (entries.length === 0) {
+    const table = KNOWLEDGE_TABLES[input.kind];
+    const row = getDb().prepare(
+      `SELECT * FROM ${table} WHERE id = ? AND persona_id = ? AND status = ?`,
+    ).get(input.id, input.personaId, input.expectedStatus) as any;
+    return row ? rowToPersonaKnowledgeItem(input.kind, row) : null;
+  }
+  const values = entries.map(([key, value]) =>
+    input.kind === "relationship_memory" && key === "participants"
+      ? JSON.stringify(Array.isArray(value) ? value : [])
+      : value,
+  );
+  const assignments = entries.map(([key], index) => `${allowed[key]} = ?`).join(", ");
+  const table = KNOWLEDGE_TABLES[input.kind];
+  const now = new Date().toISOString();
+  const result = getDb().prepare(
+    `UPDATE ${table}
+     SET ${assignments}, status = 'pending', conflict_group_id = NULL,
+         confirmed_by = NULL, confirmed_at = NULL, revoked_at = NULL, updated_at = ?
+     WHERE id = ? AND persona_id = ? AND status = ?`,
+  ).run(...values, now, input.id, input.personaId, input.expectedStatus);
+  if (result.changes === 0) return null;
+  return getPersonaKnowledgeItem(input.kind, input.id, input.personaId);
+}
+
+export function setPersonaKnowledgeStatuses(inputs: Array<{
+  kind: PersonaKnowledgeKind;
+  id: string;
+  personaId: string;
+  expectedStatus: PersonaKnowledgeStatus;
+  nextStatus: PersonaKnowledgeStatus;
+  actorUserId: string;
+  conflictGroupId: string | null;
+}>): PersonaKnowledgeItem[] {
+  const database = getDb();
+  return database.transaction(() => {
+    const changed: PersonaKnowledgeItem[] = [];
+    for (const input of inputs) {
+      const table = KNOWLEDGE_TABLES[input.kind];
+      const now = new Date().toISOString();
+      const confirmedBy = input.nextStatus === "confirmed" ? input.actorUserId : null;
+      const confirmedAt = input.nextStatus === "confirmed" ? now : null;
+      const revokedAt = input.nextStatus === "revoked" ? now : null;
+      const result = database.prepare(
+        `UPDATE ${table}
+         SET status = ?, conflict_group_id = ?, confirmed_by = ?, confirmed_at = ?,
+             revoked_at = ?, updated_at = ?
+         WHERE id = ? AND persona_id = ? AND status = ?`,
+      ).run(
+        input.nextStatus, input.conflictGroupId, confirmedBy, confirmedAt, revokedAt, now,
+        input.id, input.personaId, input.expectedStatus,
+      );
+      if (result.changes === 0) throw new Error("knowledge_status_changed");
+      changed.push(getPersonaKnowledgeItem(input.kind, input.id, input.personaId)!);
+    }
+    return changed;
+  })();
+}
+
+export function revokePersonaSource(
+  sourceId: string,
+  personaId: string,
+  _actorUserId: string,
+): { sourceRevoked: boolean; revokedItems: Array<{ kind: PersonaKnowledgeKind; id: string }> } {
+  const database = getDb();
+  return database.transaction(() => {
+    const now = new Date().toISOString();
+    const source = database.prepare(
+      `UPDATE persona_sources SET status = 'revoked', revoked_at = ?
+       WHERE id = ? AND persona_id = ? AND status <> 'revoked'
+       RETURNING id`,
+    ).get(now, sourceId, personaId) as { id: string } | undefined;
+    if (!source) return { sourceRevoked: false, revokedItems: [] };
+    const links = database.prepare(
+      `SELECT links.item_kind, links.item_id
+       FROM persona_item_sources links
+       JOIN persona_sources source ON source.id = links.source_id
+       WHERE links.source_id = ? AND source.persona_id = ?
+       ORDER BY links.item_kind, links.item_id`,
+    ).all(sourceId, personaId) as Array<{ item_kind: PersonaKnowledgeKind; item_id: string }>;
+    const revokedItems: Array<{ kind: PersonaKnowledgeKind; id: string }> = [];
+    for (const link of links) {
+      const support = database.prepare(
+        `SELECT COUNT(*) AS count
+         FROM persona_item_sources links
+         JOIN persona_sources source ON source.id = links.source_id
+         WHERE links.item_kind = ? AND links.item_id = ? AND links.source_id <> ?
+           AND source.persona_id = ? AND source.status = 'ready'`,
+      ).get(link.item_kind, link.item_id, sourceId, personaId) as { count: number };
+      if (support.count > 0) continue;
+      const table = KNOWLEDGE_TABLES[link.item_kind];
+      const changed = database.prepare(
+        `UPDATE ${table}
+         SET status = 'revoked', confirmed_by = NULL, confirmed_at = NULL,
+             revoked_at = ?, updated_at = ?
+         WHERE id = ? AND persona_id = ? AND status <> 'revoked'`,
+      ).run(now, now, link.item_id, personaId);
+      if (changed.changes > 0) revokedItems.push({ kind: link.item_kind, id: link.item_id });
+    }
+    return { sourceRevoked: true, revokedItems };
+  })();
+}
+
 // ------- Memory -------
 export type MemoryRow = {
   id: string;
@@ -439,7 +808,10 @@ export function loadMemoriesWithEmbeddings(
 ): { id: string; content: string; embedding: Float32Array }[] {
   const db = getDb();
   const rows = db
-    .prepare(`SELECT id, content, embedding FROM memories WHERE persona_id = ?`)
+    .prepare(
+      `SELECT id, content, embedding FROM relationship_memories
+       WHERE persona_id = ? AND status = 'confirmed' AND embedding IS NOT NULL`,
+    )
     .all(personaId) as any[];
   return rows
     .filter((r) => r.embedding)
