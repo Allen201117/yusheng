@@ -198,6 +198,23 @@ describe("grounded evidence ranking", () => {
 });
 
 describe("style budget", () => {
+  function totalStyleText(styles: Array<{
+    id: string;
+    category: string;
+    content: string;
+    example: string | null;
+  }>): number {
+    return styles.reduce(
+      (sum, style) =>
+        sum +
+        style.id.length +
+        style.category.length +
+        style.content.length +
+        (style.example?.length ?? 0),
+      0,
+    );
+  }
+
   it("returns at most twenty styles within an exact 8000-character text budget", () => {
     const styles = Array.from({ length: 21 }, (_, index) => ({
       id: `style-${String(index).padStart(2, "0")}`,
@@ -210,15 +227,30 @@ describe("style budget", () => {
       queryEmbedding: Float32Array.from([1, 0]),
       knowledge: { evidence: [], styles },
     });
-    const total = context.styles.reduce(
-      (sum, style) => sum + style.content.length + (style.example?.length ?? 0),
-      0,
-    );
+    const total = totalStyleText(context.styles);
 
     assert.equal(context.styles.length, 18);
     assert.equal(total, 8_000);
-    assert.equal(context.styles.at(-1)?.content.length, 300);
-    assert.equal(context.styles.at(-1)?.example?.length, 50);
+    assert.ok((context.styles.at(-1)?.content.length ?? 0) > 0);
+  });
+
+  it("budgets long ids and categories because every returned string enters the prompt", () => {
+    const styles = Array.from({ length: 20 }, (_, index) => ({
+      id: `style-${String(index).padStart(2, "0")}`,
+      category: "类".repeat(128),
+      content: "内".repeat(390),
+      example: null,
+    }));
+
+    const context = selectGroundedContext({
+      queryEmbedding: Float32Array.from([1, 0]),
+      knowledge: { evidence: [], styles },
+    });
+
+    assert.ok(context.styles.length <= 20);
+    assert.ok(totalStyleText(context.styles) <= 8_000);
+    assert.equal(styles[0].category.length, 128);
+    assert.equal(styles[0].content.length, 390);
   });
 
   it("does not return empty styles and does not mutate any input objects", () => {

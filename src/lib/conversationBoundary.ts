@@ -24,19 +24,57 @@ const COMMITMENT_REPLY =
 const MAJOR_DECISION_REPLY =
   "AI 不能代替本人为卖房、婚姻、大额资金、医疗或法律事项作决定。请结合可核实的信息，与当前相关的真人和合格专业人士共同判断。";
 
-const ACTIVE_DANGER_PATTERNS = [
-  /(?:正在|现在|此刻).{0,8}(?:打我|殴打我|攻击我|掐我|勒我|追杀我|跟踪我|威胁我)/u,
-  /(?:有人|他|她).{0,8}(?:持刀|拿刀|用刀).{0,8}(?:威胁我|追我|砍我|堵我|攻击我)/u,
-  /(?:我)?(?:正在|现在)?被(?:困|锁|堵).{0,10}(?:出不去|无法离开|房间|屋里|车里)/u,
+const DANGER_ACTION_PATTERNS = [
+  /(?:打我|殴打我|攻击我|掐我|勒我|追杀我|跟踪我|威胁我)/u,
+  /(?:持刀|拿刀|用刀|被人拿刀).{0,8}(?:架在(?:我)?脖子上|捅我|刺我|砍我|威胁我|追我|攻击我|堵在(?:我家)?门口)/u,
+  /(?:我)?被(?:困|锁|堵).{0,10}(?:出不去|无法离开|房间|屋里|车里)/u,
   /(?:威胁要杀我|扬言要杀我|堵在门口不让我走)/u,
 ];
 
 const MEDICAL_EMERGENCY_PATTERNS = [
   /(?:胸口|胸部).{0,6}(?:剧痛|疼得厉害).{0,8}(?:喘不上气|无法呼吸|呼吸困难)/u,
   /(?:喘不上气|无法呼吸|呼吸困难).{0,8}(?:胸口|胸部).{0,6}(?:剧痛|疼得厉害)/u,
-  /(?:现在|刚刚|突然).{0,8}(?:失去意识|昏迷|叫不醒)/u,
+  /(?:失去意识|昏迷|叫不醒)/u,
   /(?:大出血|血止不住|流血不止)/u,
 ];
+
+const PAST_DANGER_PATTERNS = [
+  /(?:以前|曾经|当时|那时|小时候|去世前|临终前|过去|很多年前)/u,
+  /被(?:困|锁|堵).{0,20}(?:的时候|时)(?:[，,。]|$)/u,
+];
+
+function hasDangerPattern(text: string): boolean {
+  return (
+    DANGER_ACTION_PATTERNS.some((pattern) => pattern.test(text)) ||
+    MEDICAL_EMERGENCY_PATTERNS.some((pattern) => pattern.test(text))
+  );
+}
+
+function hasCurrentDangerSignal(text: string): boolean {
+  const withoutReflection = text.replace(
+    /现在(?:想起来|想起|回想(?:起来)?|回忆(?:起来|起)?|说起)/gu,
+    "回忆",
+  );
+  if (/^(?:救命|快救我)/u.test(withoutReflection)) return true;
+
+  for (const match of withoutReflection.matchAll(
+    /(?:正在|此刻|刚刚|眼下|现在|仍(?:在)?|还在)/gu,
+  )) {
+    const suffix = withoutReflection.slice(match.index);
+    if (hasDangerPattern(suffix) || /(?:出不去|无法离开)/u.test(suffix)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isCurrentRealWorldDanger(text: string): boolean {
+  if (!hasDangerPattern(text)) return false;
+
+  const isPastNarrative = PAST_DANGER_PATTERNS.some((pattern) => pattern.test(text));
+  return !isPastNarrative || hasCurrentDangerSignal(text);
+}
 
 const REAL_WILL_PATTERNS = [
   /(?:遗愿|临终遗言)/u,
@@ -105,10 +143,7 @@ export function detectConversationBoundary(
     return { kind: "self_harm", reply: SAFETY_REPLY };
   }
 
-  if (
-    ACTIVE_DANGER_PATTERNS.some((pattern) => pattern.test(compact)) ||
-    MEDICAL_EMERGENCY_PATTERNS.some((pattern) => pattern.test(compact))
-  ) {
+  if (isCurrentRealWorldDanger(compact)) {
     return { kind: "real_world_danger", reply: REAL_WORLD_DANGER_REPLY };
   }
 

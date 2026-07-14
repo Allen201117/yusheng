@@ -30,6 +30,41 @@ describe("detectConversationBoundary", () => {
     );
   });
 
+  it("detects explicit current knife attacks without treating every knife mention as danger", () => {
+    for (const text of [
+      "救命，他拿刀架在我脖子上",
+      "我现在被人拿刀架在脖子上",
+      "他正在拿刀捅我",
+      "他正在拿刀刺我",
+      "他正在拿刀砍我",
+    ]) {
+      assert.equal(
+        detectConversationBoundary(text, ["妈妈"])?.kind,
+        "real_world_danger",
+        text,
+      );
+    }
+  });
+
+  it("excludes past trauma and deceased medical history unless danger is current", () => {
+    for (const text of [
+      "妈妈去世前大出血，后来没救回来",
+      "他以前持刀威胁我，现在想起来还害怕",
+      "他以前持刀威胁我，现在想起来还在害怕",
+      "我被困在房间里时，妈妈一直陪我说话",
+      "小时候我被困在储物间，后来爸爸找到了我",
+      "小时候我被困在房间出不去，后来有人找到了我",
+      "当时我胸口剧痛喘不上气，后来去了医院",
+    ]) {
+      assert.equal(detectConversationBoundary(text, ["妈妈"]), null, text);
+    }
+
+    assert.equal(
+      detectConversationBoundary("以前威胁过我，但他现在拿刀堵在门口", ["妈妈"])?.kind,
+      "real_world_danger",
+    );
+  });
+
   it("detects requests to make major decisions for the person", () => {
     for (const text of [
       "你替妈妈决定要不要卖房",

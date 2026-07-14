@@ -35,12 +35,17 @@ function selectStyles(styles: ConversationStyle[]): ConversationStyle[] {
   for (const style of styles) {
     if (selected.length >= MAX_STYLES || remainingChars === 0) break;
 
+    if (!style.content && !style.example) continue;
+
+    const fixedChars = style.id.length + style.category.length;
+    if (remainingChars <= fixedChars) break;
+    remainingChars -= fixedChars;
+
     const content = style.content.slice(0, remainingChars);
     remainingChars -= content.length;
     const example = style.example?.slice(0, remainingChars) || null;
     remainingChars -= example?.length ?? 0;
 
-    if (!content && !example) continue;
     selected.push({ ...style, content, example });
   }
 
