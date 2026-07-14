@@ -31,7 +31,15 @@
 - 用户手工调用 `/api/memory` 录入的内容视为明确确认；AI 后续提取的候选内容只能先进入 `pending`，必须经用户确认。
 - 旧版 `memories` 会幂等复制成来源、关系记忆和证据关联。旧表本阶段保留，便于回查和回滚，不能提前删除。
 - 删除来源会立刻撤销所有已没有其他 `ready` 来源支撑的派生内容，并返回受影响内容的类型和 ID，供调用方审计。
-- 当前只是知识底座完成。grounded/陪伴两种对话模式、消息级证据、还原度反馈指标和真实用户验证还没有完成。
+- 对话只能使用 confirmed 事实/关系记忆作为 evidence；confirmed 说话风格单独注入提示词，不能证明人物事实。
+
+## Grounded 对话运行边界
+
+- 有可靠 evidence 时走 `grounded`；没有相关证据时走 `companionship` + `no_relevant_evidence`；知识读取、向量或证据绑定失败时走 `companionship` + `retrieval_failed`。陪伴模式不带人物事实或关系记忆。
+- 每条完成的 `grounded` 助手消息会复制本轮选中的 evidence ID 到消息证据表。之后来源被撤销也不删这份生成时快照。
+- 未知遗愿、代表承诺、重大决策、本人/复活/另一个世界、自伤、现实暴力或医疗急症、声音未获有效授权，都走固定 `boundary` 回复。这些路径不调用自由生成模型，也不输出可交给 TTS 的 sentence 事件。
+- 对话历史只是临时上下文，不是 evidence；用户本轮的主张也不能变成 evidence。
+- 确定性行为探针、播放队列失败隔离、同一 voiceId/声音源重试已纳入本地回归。`npm run probe:grounded` 另外调用真实模型验证虚构样本，JSON 报告不包含 API key 或请求 headers。
 
 生产环境必须同时配置：
 
@@ -124,7 +132,9 @@ NODE_ENV=production STORAGE_BACKEND=local \
 - 授权记录、撤回和受控预置 API 已有后端；只有健在本人会自动 approved，亲友与逝者均待人工审核。已有授权记录一旦为 pending/revoked 就禁止 TTS；开关关闭时只兼容“完全没有授权记录”的旧声音。当前没有功能客户端，Production 不得设置 `VOICE_AUTH_ENFORCEMENT=enabled`。
 - SiliconFlow 用户预置音色需供应商账号完成实名认证；当前尚无真实成功证据。
 - 健在第三人授权证据核验、逝者场景人工审核、删除完成凭证和用户可见的 AI 合成标识仍未完成。
-- 三层人物知识和 confirmed-only 检索已经落地，但 AI 候选提取、grounded/陪伴模式、消息级证据和还原度反馈尚未落地。
+- 三层人物知识、confirmed-only 检索、grounded/companionship/boundary 路由和消息级 evidence 已落地。AI 候选提取、浏览器播放 telemetry（真实请求/音频就绪/播放时间点）、有效还原反馈和真实用户验证尚未落地。
+- 真实模型虚构数据探针与确定性单测分开记录，两者都不能替代认识声音主人的人评价“是不是像”。
+- 本地测试、类型检查和构建通过只证明当前代码库门禁，不授权推送、Preview 或 Production 发布。
 - 自伤检测仍是关键词规则，不能当作完整安全系统。
 
 ## 不得破坏的约束

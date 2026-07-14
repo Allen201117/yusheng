@@ -14,7 +14,8 @@
     "db:migrate": "node --import tsx scripts/apply-migrations.ts",
     "db:migrate:dry": "node --import tsx scripts/apply-migrations.ts --dry-run",
     "data:migrate:dry": "node --import tsx scripts/migrate-local-data.ts --dry-run",
-    "data:migrate": "node --import tsx scripts/migrate-local-data.ts"
+    "data:migrate": "node --import tsx scripts/migrate-local-data.ts",
+    "probe:grounded": "node --import tsx scripts/probe-grounded-behavior.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

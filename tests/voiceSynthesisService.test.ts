@@ -112,3 +112,44 @@ it("does not double-call the provider for a general outage", async () => {
   assert.equal(attempts, 1);
   assert.deepEqual(f.calls, ["meta"]);
 });
+
+it("retries a sentence with the same voice and resolved source", async () => {
+  const requestedVoices: Array<{ voiceId: string; userId: string }> = [];
+  const providerSources: string[] = [];
+  let attempts = 0;
+  const store = {
+    async getMeta(voiceId: string, userId: string) {
+      requestedVoices.push({ voiceId, userId });
+      return meta;
+    },
+  } as unknown as VoiceObjectStore;
+  const repository = {} as AppRepository;
+  const synthesize = async (input: { presetVoiceId?: string }) => {
+    attempts += 1;
+    providerSources.push(input.presetVoiceId ?? "dynamic");
+    if (attempts === 1) {
+      throw Object.assign(new Error("temporary outage"), { status: 503 });
+    }
+    return Buffer.from("retried audio");
+  };
+  const sentence = {
+    voiceId: "voice-1",
+    userId: "user-1",
+    text: "这是同一句话",
+    store,
+    repository,
+    synthesize,
+  };
+
+  await assert.rejects(synthesizeStoredVoice(sentence), /temporary outage/);
+  const retried = await synthesizeStoredVoice(sentence);
+
+  assert.equal(retried.audio.toString(), "retried audio");
+  assert.equal(retried.source, "preset");
+  assert.deepEqual(requestedVoices, [
+    { voiceId: "voice-1", userId: "user-1" },
+    { voiceId: "voice-1", userId: "user-1" },
+  ]);
+  assert.deepEqual(providerSources, [meta.providerVoiceId, meta.providerVoiceId]);
+  assert.equal(requestedVoices.some(({ voiceId }) => voiceId !== "voice-1"), false);
+});

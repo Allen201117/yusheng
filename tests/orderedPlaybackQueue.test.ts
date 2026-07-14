@@ -35,3 +35,23 @@ it("drops prepared audio from a reset conversation", async () => {
   await queue.whenIdle();
   assert.deepEqual(played, ["current"]);
 });
+
+it("continues in order after one preparation rejects and reports that sentence once", async () => {
+  const played: string[] = [];
+  const errors: unknown[] = [];
+  const queue = new OrderedPlaybackQueue<string>(
+    async (value) => { played.push(value); },
+    (error) => { errors.push(error); },
+  );
+  const failed = Promise.reject(new Error("first sentence failed"));
+  const second = deferred<string>();
+
+  queue.enqueue(failed);
+  queue.enqueue(second.promise);
+  second.resolve("second sentence");
+  await queue.whenIdle();
+
+  assert.deepEqual(played, ["second sentence"]);
+  assert.equal(errors.length, 1);
+  assert.match(String(errors[0]), /first sentence failed/);
+});

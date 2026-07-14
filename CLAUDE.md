@@ -28,6 +28,7 @@ npm run build
 npm run db:migrate:dry
 npm run db:migrate
 npm run data:migrate:dry -- --data-dir ./data
+npm run probe:grounded
 ```
 
 ## 存储边界
@@ -46,6 +47,10 @@ npm run data:migrate:dry -- --data-dir ./data
 - 旧版 `memories` 会幂等复制为来源、关系记忆和证据关联；本阶段不删除旧表。
 - 删除知识来源时，没有其他 `ready` 来源支撑的派生内容必须立即撤销，并返回受影响内容的类型和 ID。
 - 事实需要证据；表达方式可以模仿，但生成内容不得被表述为声音主人的真实意志。
+- 对话中的事实与关系记忆必须来自本轮选中的 confirmed evidence；说话风格单独取 confirmed 内容，不能当作事实证据。
+- 有可靠 evidence 时进入 `grounded`；无相关证据或检索失败时进入 `companionship`，不得把历史对话中的说法当事实。
+- 身份/复活、未知遗愿、代表承诺、重大决策、自伤和现实危险走固定 `boundary` 回复，不调用自由生成模型，不产生可语音播放句子。
+- 每条完成的 `grounded` 助手消息都要持久化本轮 evidence ID，便于之后追溯。
 
 ## 目录重点
 
@@ -86,7 +91,9 @@ docs/handoff.md                      上线与交接契约
 - 真实 Preview 持久化、跨用户隔离、Blob 删除和重部署后的读回必须有直接证据，不能用本地测试代替。
 - Vercel Sensitive 变量在 `env pull` 中会被脱敏为空，不能据此判断缺少 Key。Preview `SILICONFLOW_API_KEY` 已重新写入为 Sensitive；是否可用必须由新 deployment 的真实请求证明。
 - 授权依据、告知版本和撤回已落库；健在第三人的证据核验、逝者场景人工审核、删除完成凭证与用户可见的 AI 合成标识仍未完成。
-- grounded/陪伴对话模式、消息级证据、还原度反馈指标和真实用户验证仍未完成。
+- grounded/companionship/boundary 对话路由和消息级证据已有后端实现与确定性测试。浏览器真实播放时间点、有效还原反馈、认识声音主人的真实用户验证和可用 Preview 仍未完成。
+- `npm run probe:grounded` 是与确定性单测分开的虚构数据真实模型探针；它不能替代认识声音主人的人来判断是否“像”。
+- 本地测试、类型检查和构建全绿不等于授权推送、Preview 或 Production 发布。
 
 ## 禁止事项
 

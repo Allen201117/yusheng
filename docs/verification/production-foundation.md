@@ -4,15 +4,21 @@ Updated: 2026-07-14 (Asia/Shanghai)
 
 ## Local evidence
 
-- `npm test`: 215 passed, 0 failed after adding three-layer persona knowledge, atomic candidate review, confirmed-only retrieval, legacy memory compatibility and cross-owner migration guards.
+- Grounded focused regression bundle: 148 passed, 0 failed.
+- `npm test`: 291 passed, 0 failed after adding grounded routing/evidence, boundary, playback failure isolation and same-voice retry probes.
 - `npm run typecheck`: passed.
-- `npm run build`: passed on Next.js 15.5.20.
+- `npm run build`: passed on Next.js 15.5.20 and includes `/api/chat`.
 - `git diff --check`: passed.
 - Production local-storage guard: `NODE_ENV=production STORAGE_BACKEND=local` fails with `Production requires STORAGE_BACKEND=cloud`.
 - Provider preset local evidence: ready presets avoid Blob reads; stale preset URI errors mark the preset failed and retry dynamic cloning once; general provider outages do not double-call; deleting voices cannot start new synthesis.
 - Persona knowledge local evidence: facts, relationship memories and speech styles are stored separately; only `confirmed` items are retrievable; manual `/api/memory` writes are explicit user confirmations; AI candidates remain `pending`; source revocation immediately revokes unsupported derived items and reports their references.
 - Legacy memory local evidence: old rows are copied idempotently into source + relationship memory + evidence link records, while the old table remains intact in this phase. Cross-owner persona/voice conflicts and mismatched deterministic IDs abort instead of linking unrelated data.
-- Not locally complete: grounded/companionship modes, message evidence, restoration feedback metrics and real user validation.
+- Grounded conversation local evidence: confirmed facts/memories are ranked separately from confirmed styles; known facts carry their evidence IDs; contradictory user claims and history-only claims do not become evidence; no evidence and retrieval failure degrade to companionship; boundary paths use fixed replies with zero free-model calls and no sentence events; completed grounded messages persist selection-time evidence IDs.
+- Playback local evidence: a failed first sentence preparation reports exactly one error and does not block the next prepared sentence; retrying a sentence reuses the same `voiceId` and resolved source instead of switching to another persona voice.
+- Deterministic probes verify routing and evidence only. They do not prove subjective voice resemblance, emotional authenticity or real-user success.
+- `npm run probe:grounded` on 2026-07-14 returned `provider_not_configured` (exit 2). The four-case synthetic real-model behavior remains unverified in this shell; this is recorded as missing evidence, not a pass.
+- Not locally complete: browser playback telemetry, effective-restoration feedback, people who know the voice owner, and a usable Preview environment.
+- Local tests, typecheck and build do not authorize a push, Preview deployment or Production promotion.
 
 ## Vercel project and Git deployment
 
