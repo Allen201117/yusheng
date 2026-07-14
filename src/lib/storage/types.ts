@@ -1,3 +1,5 @@
+import type { SpeechEmotion } from "../speechPlanning";
+
 export type User = {
   id: string;
   email: string;
@@ -392,6 +394,8 @@ export type ConversationSessionStatus = "active" | "rated" | "expired";
 
 export type TtsAttemptStatus = "started" | "completed" | "failed";
 
+export type VoiceSource = "preset" | "dynamic";
+
 export type PlaybackEventType =
   | "audio_ready"
   | "play_started"
@@ -437,7 +441,7 @@ export type ConversationSentence = {
   personaId: string;
   sentenceIndex: number;
   text: string;
-  emotion: string;
+  emotion: SpeechEmotion;
   intensity: number;
   speed: number;
   pauseAfterMs: number;
@@ -454,7 +458,7 @@ export type TtsAttempt = {
   voiceId: string;
   attemptNo: number;
   status: TtsAttemptStatus;
-  voiceSource: string | null;
+  voiceSource: VoiceSource | null;
   providerVoiceId: string | null;
   ttsModel: string;
   ttsConfigVersion: string;

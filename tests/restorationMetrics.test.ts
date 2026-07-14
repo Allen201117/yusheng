@@ -4,7 +4,28 @@ import {
   isEffectiveRestorationFeedback,
   summarizeRestorationFeedback,
 } from "../src/lib/restorationMetrics";
-import type { RestorationMetricRow } from "../src/lib/storage/types";
+import type { SpeechEmotion } from "../src/lib/speechPlanning";
+import type {
+  ConversationSentence,
+  RestorationMetricRow,
+  TtsAttempt,
+  VoiceSource,
+} from "../src/lib/storage/types";
+
+type Equal<Left, Right> =
+  (<Value>() => Value extends Left ? 1 : 2) extends
+    (<Value>() => Value extends Right ? 1 : 2)
+    ? true
+    : false;
+type Assert<Condition extends true> = Condition;
+
+type ConversationSentenceEmotionIsExact = Assert<
+  Equal<ConversationSentence["emotion"], SpeechEmotion>
+>;
+type TtsAttemptVoiceSourceIsExact = Assert<
+  Equal<TtsAttempt["voiceSource"], VoiceSource | null>
+>;
+type VoiceSourceIsBounded = Assert<Equal<VoiceSource, "preset" | "dynamic">>;
 
 const effectiveScores = {
   voiceSimilarity: 4,
