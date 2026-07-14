@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import { embed } from "@/lib/embedding";
 import { requireAuth } from "@/lib/guard";
+import { logger } from "@/lib/logger";
 import { isMemoryPostBody, parseMemoryContents } from "@/lib/memoryRoute";
 import { getRepository } from "@/lib/storage/repository";
 import { sha256Hex } from "@/lib/storage/checksum";
@@ -76,10 +77,13 @@ export async function POST(req: NextRequest) {
     const inserted = inputs.map(({ id, content }) => ({ id, content }));
     return NextResponse.json({ ok: true, inserted });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 502 },
-    );
+    logger.error("memory_insert_failed", {
+      personaId,
+      userId: auth.userId,
+      count: contents.length,
+      errorName: err instanceof Error ? err.name : "UnknownError",
+    });
+    return NextResponse.json({ error: "记忆保存失败，请稍后重试" }, { status: 502 });
   }
 }
 

@@ -75,6 +75,11 @@ it("manual memory ingestion creates server-owned confirmation audit fields", asy
   assert.match(source, /repository\.insertMemories\(inputs\)/);
   assert.doesNotMatch(source, /repository\.insertMemory\(/);
   assert.match(source, /@\/lib\/memoryRoute/);
+  assert.match(source, /logger\.error\(["']memory_insert_failed["']/);
+  assert.match(source, /errorName:\s*err instanceof Error \? err\.name : ["']UnknownError["']/);
+  assert.doesNotMatch(source, /err\.message|String\(err\)/);
+  assert.match(source, /error:\s*["']记忆保存失败，请稍后重试["']/);
+  assert.doesNotMatch(source, /NextResponse\.json\(\s*\{\s*error:\s*err instanceof Error/);
   assert.match(source, /status:\s*409/);
 });
 
