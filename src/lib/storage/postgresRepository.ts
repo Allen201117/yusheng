@@ -1445,25 +1445,81 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
         );
         if (personas.length !== 1) throw new Error("conversation_session_owner_mismatch");
 
+        const authorizations = await transaction.query<{ id: string }>(
+          `SELECT id FROM voice_authorizations
+           WHERE id = $1 AND voice_id = $2 AND user_id = $3
+             AND speaker_status = $4 AND status = 'approved'
+           FOR UPDATE`,
+          [
+            input.voiceAuthorizationId,
+            input.voiceId,
+            input.evaluatorUserId,
+            input.cohort,
+          ],
+        );
+        if (authorizations.length !== 1) {
+          throw new Error("conversation_session_authorization_denied");
+        }
+
         await transaction.query<{ id: string }>(
           `UPDATE conversation_sessions
            SET status = 'expired'
            WHERE persona_id = $1 AND evaluator_user_id = $2
-             AND status = 'active' AND last_activity_at <= $3
+             AND status = 'active'
+             AND (
+               last_activity_at <= $3 OR voice_id <> $4
+               OR voice_authorization_id <> $5 OR cohort <> $6
+             )
            RETURNING id`,
-          [input.personaId, input.evaluatorUserId, input.staleBefore],
+          [
+            input.personaId,
+            input.evaluatorUserId,
+            input.staleBefore,
+            input.voiceId,
+            input.voiceAuthorizationId,
+            input.cohort,
+          ],
         );
 
         const active = await transaction.query<ConversationSessionRow>(
           `SELECT id, persona_id, evaluator_user_id, voice_id, voice_authorization_id,
                   cohort, status, started_at, last_activity_at, rated_at
            FROM conversation_sessions
-           WHERE persona_id = $1 AND evaluator_user_id = $2 AND status = 'active'
+           WHERE persona_id = $1 AND evaluator_user_id = $2
+             AND voice_id = $3 AND voice_authorization_id = $4 AND cohort = $5
+             AND status = 'active'
            LIMIT 1
            FOR UPDATE`,
-          [input.personaId, input.evaluatorUserId],
+          [
+            input.personaId,
+            input.evaluatorUserId,
+            input.voiceId,
+            input.voiceAuthorizationId,
+            input.cohort,
+          ],
         );
-        if (active[0]) return mapConversationSession(active[0]);
+        if (active[0]) {
+          const touched = await transaction.query<ConversationSessionRow>(
+            `UPDATE conversation_sessions
+             SET last_activity_at = $7
+             WHERE id = $1 AND persona_id = $2 AND evaluator_user_id = $3
+               AND voice_id = $4 AND voice_authorization_id = $5 AND cohort = $6
+               AND status = 'active'
+             RETURNING id, persona_id, evaluator_user_id, voice_id, voice_authorization_id,
+                       cohort, status, started_at, last_activity_at, rated_at`,
+            [
+              active[0].id,
+              input.personaId,
+              input.evaluatorUserId,
+              input.voiceId,
+              input.voiceAuthorizationId,
+              input.cohort,
+              input.now,
+            ],
+          );
+          if (touched.length !== 1) throw new Error("conversation_session_status_changed");
+          return mapConversationSession(touched[0]);
+        }
 
         const created = await transaction.query<ConversationSessionRow>(
           `INSERT INTO conversation_sessions
@@ -1491,8 +1547,14 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       return sql.transaction(async (transaction) => {
         if (input.sessionId !== null) {
           const sessions = await transaction.query<{ id: string }>(
-            `SELECT id FROM conversation_sessions
-             WHERE id = $1 AND persona_id = $2 AND status = 'active'
+            `SELECT sessions.id FROM conversation_sessions sessions
+             JOIN voice_authorizations authorization
+               ON authorization.id = sessions.voice_authorization_id
+              AND authorization.voice_id = sessions.voice_id
+              AND authorization.user_id = sessions.evaluator_user_id
+              AND authorization.speaker_status = sessions.cohort
+              AND authorization.status = 'approved'
+             WHERE sessions.id = $1 AND sessions.persona_id = $2 AND sessions.status = 'active'
              FOR UPDATE`,
             [input.sessionId, input.personaId],
           );

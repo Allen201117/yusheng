@@ -1460,19 +1460,69 @@ export function getOrStartConversationSession(input: {
     ).get(input.personaId, input.evaluatorUserId, input.voiceId);
     if (!persona) throw new Error("conversation_session_owner_mismatch");
 
+    const authorization = database.prepare(
+      `SELECT id FROM voice_authorizations
+       WHERE id = ? AND voice_id = ? AND user_id = ?
+         AND speaker_status = ? AND status = 'approved'`,
+    ).get(
+      input.voiceAuthorizationId,
+      input.voiceId,
+      input.evaluatorUserId,
+      input.cohort,
+    );
+    if (!authorization) throw new Error("conversation_session_authorization_denied");
+
     database.prepare(
       `UPDATE conversation_sessions
        SET status = 'expired'
        WHERE persona_id = ? AND evaluator_user_id = ?
-         AND status = 'active' AND last_activity_at <= ?`,
-    ).run(input.personaId, input.evaluatorUserId, input.staleBefore);
+         AND status = 'active'
+         AND (
+           last_activity_at <= ? OR voice_id <> ?
+           OR voice_authorization_id <> ? OR cohort <> ?
+         )`,
+    ).run(
+      input.personaId,
+      input.evaluatorUserId,
+      input.staleBefore,
+      input.voiceId,
+      input.voiceAuthorizationId,
+      input.cohort,
+    );
 
     const active = database.prepare(
       `SELECT * FROM conversation_sessions
-       WHERE persona_id = ? AND evaluator_user_id = ? AND status = 'active'
+       WHERE persona_id = ? AND evaluator_user_id = ?
+         AND voice_id = ? AND voice_authorization_id = ? AND cohort = ?
+         AND status = 'active'
        LIMIT 1`,
-    ).get(input.personaId, input.evaluatorUserId);
-    if (active) return rowToConversationSession(active);
+    ).get(
+      input.personaId,
+      input.evaluatorUserId,
+      input.voiceId,
+      input.voiceAuthorizationId,
+      input.cohort,
+    ) as { id: string } | undefined;
+    if (active) {
+      const touched = database.prepare(
+        `UPDATE conversation_sessions
+         SET last_activity_at = ?
+         WHERE id = ? AND persona_id = ? AND evaluator_user_id = ?
+           AND voice_id = ? AND voice_authorization_id = ? AND cohort = ?
+           AND status = 'active'
+         RETURNING *`,
+      ).get(
+        input.now,
+        active.id,
+        input.personaId,
+        input.evaluatorUserId,
+        input.voiceId,
+        input.voiceAuthorizationId,
+        input.cohort,
+      );
+      if (!touched) throw new Error("conversation_session_status_changed");
+      return rowToConversationSession(touched);
+    }
 
     const created = database.prepare(
       `INSERT INTO conversation_sessions
@@ -1510,6 +1560,14 @@ export function startConversationTurn(input: {
         `UPDATE conversation_sessions
          SET last_activity_at = ?
          WHERE id = ? AND persona_id = ? AND status = 'active'
+           AND EXISTS (
+             SELECT 1 FROM voice_authorizations authorization
+             WHERE authorization.id = conversation_sessions.voice_authorization_id
+               AND authorization.voice_id = conversation_sessions.voice_id
+               AND authorization.user_id = conversation_sessions.evaluator_user_id
+               AND authorization.speaker_status = conversation_sessions.cohort
+               AND authorization.status = 'approved'
+           )
          RETURNING id`,
       ).get(now, input.sessionId, input.personaId);
       if (!session) throw new Error("conversation_turn_session_mismatch");

@@ -281,16 +281,29 @@ it("atomically reuses fresh sessions, expires stale sessions, and isolates owner
   assert.equal(reused.cohort, "living");
 
   const replacement = await repository.getOrStartConversationSession({
+    proposedSessionId: "session-still-unused",
+    personaId: "persona-1",
+    evaluatorUserId: "user-1",
+    voiceId: "voice-1",
+    voiceAuthorizationId: "auth-1",
+    cohort: "living",
+    now: "2026-07-14T10:31:00.000Z",
+    staleBefore: "2026-07-14T10:01:00.000Z",
+  });
+  assert.equal(replacement.id, first.id);
+  assert.equal(replacement.lastActivityAt, "2026-07-14T10:31:00.000Z");
+
+  const expiredReplacement = await repository.getOrStartConversationSession({
     proposedSessionId: "session-replacement",
     personaId: "persona-1",
     evaluatorUserId: "user-1",
     voiceId: "voice-1",
     voiceAuthorizationId: "auth-1",
     cohort: "living",
-    now: "2026-07-14T10:30:00.000Z",
-    staleBefore: "2026-07-14T10:00:00.000Z",
+    now: "2026-07-14T11:01:00.000Z",
+    staleBefore: "2026-07-14T10:31:00.000Z",
   });
-  assert.equal(replacement.id, "session-replacement");
+  assert.equal(expiredReplacement.id, "session-replacement");
   assert.equal(
     (database.prepare("SELECT status FROM conversation_sessions WHERE id = ?")
       .get(first.id) as { status: string }).status,
@@ -299,7 +312,7 @@ it("atomically reuses fresh sessions, expires stale sessions, and isolates owner
   assert.equal(
     (database.prepare("SELECT last_activity_at FROM conversation_sessions WHERE id = ?")
       .get(first.id) as { last_activity_at: string }).last_activity_at,
-    "2026-07-14T10:00:00.000Z",
+    "2026-07-14T10:31:00.000Z",
   );
 
   await assert.rejects(repository.getOrStartConversationSession({
@@ -325,6 +338,111 @@ it("atomically reuses fresh sessions, expires stale sessions, and isolates owner
   });
   assert.equal(otherOwner.id, "session-other-owner");
   assert.equal(otherOwner.cohort, "deceased");
+});
+
+it("rotates sessions with exact approved authorization snapshots and rejects revocation", async () => {
+  const first = await repository.getOrStartConversationSession({
+    proposedSessionId: "session-auth-1",
+    personaId: "persona-1",
+    evaluatorUserId: "user-1",
+    voiceId: "voice-1",
+    voiceAuthorizationId: "auth-1",
+    cohort: "living",
+    now: "2026-07-14T10:00:00.000Z",
+    staleBefore: "2026-07-14T09:30:00.000Z",
+  });
+  database.prepare("UPDATE voice_authorizations SET status = 'revoked' WHERE id = 'auth-1'").run();
+  database.prepare(
+    `INSERT INTO voice_authorizations
+       (id, voice_id, user_id, speaker_status, basis, status, notice_version,
+        separate_consent_confirmed, third_party_processing_confirmed,
+        synthetic_disclosure_confirmed, attested_at, created_at)
+     VALUES ('auth-1b', 'voice-1', 'user-1', 'living', 'self', 'approved', 'notice-v1',
+             1, 1, 1, ?, ?)`,
+  ).run(NOW, NOW);
+  const rotated = await repository.getOrStartConversationSession({
+    proposedSessionId: "session-auth-1b",
+    personaId: "persona-1",
+    evaluatorUserId: "user-1",
+    voiceId: "voice-1",
+    voiceAuthorizationId: "auth-1b",
+    cohort: "living",
+    now: "2026-07-14T10:05:00.000Z",
+    staleBefore: "2026-07-14T09:35:00.000Z",
+  });
+  assert.equal(rotated.id, "session-auth-1b");
+  assert.equal(rotated.voiceAuthorizationId, "auth-1b");
+  assert.equal(
+    (database.prepare("SELECT status FROM conversation_sessions WHERE id = ?")
+      .get(first.id) as { status: string }).status,
+    "expired",
+  );
+
+  database.prepare("UPDATE voice_authorizations SET status = 'revoked' WHERE id = 'auth-1b'").run();
+  database.prepare(
+    `INSERT INTO voice_authorizations
+       (id, voice_id, user_id, speaker_status, basis, status, notice_version,
+        separate_consent_confirmed, third_party_processing_confirmed,
+        synthetic_disclosure_confirmed, attested_at, created_at)
+     VALUES ('auth-deceased', 'voice-1', 'user-1', 'deceased', 'close_relative_request',
+             'approved', 'notice-v1', 1, 1, 1, ?, ?)`,
+  ).run(NOW, NOW);
+  const cohortRotated = await repository.getOrStartConversationSession({
+    proposedSessionId: "session-deceased",
+    personaId: "persona-1",
+    evaluatorUserId: "user-1",
+    voiceId: "voice-1",
+    voiceAuthorizationId: "auth-deceased",
+    cohort: "deceased",
+    now: "2026-07-14T10:10:00.000Z",
+    staleBefore: "2026-07-14T09:40:00.000Z",
+  });
+  assert.equal(cohortRotated.id, "session-deceased");
+  assert.equal(cohortRotated.cohort, "deceased");
+  assert.equal(
+    (database.prepare("SELECT status FROM conversation_sessions WHERE id = ?")
+      .get(rotated.id) as { status: string }).status,
+    "expired",
+  );
+
+  database.prepare("UPDATE voice_authorizations SET status = 'revoked' WHERE id = 'auth-deceased'").run();
+  await assert.rejects(repository.getOrStartConversationSession({
+    proposedSessionId: "session-revoked",
+    personaId: "persona-1",
+    evaluatorUserId: "user-1",
+    voiceId: "voice-1",
+    voiceAuthorizationId: "auth-deceased",
+    cohort: "deceased",
+    now: "2026-07-14T10:15:00.000Z",
+    staleBefore: "2026-07-14T09:45:00.000Z",
+  }), /conversation_session_authorization_denied/);
+  assert.equal(
+    (database.prepare("SELECT status FROM conversation_sessions WHERE id = ?")
+      .get(cohortRotated.id) as { status: string }).status,
+    "active",
+  );
+  await assert.rejects(repository.startConversationTurn({
+    turnId: "turn-after-revocation",
+    sessionId: cohortRotated.id,
+    personaId: "persona-1",
+    userMessageId: "message-after-revocation",
+    content: "不应保存",
+  }), /conversation_turn_session_mismatch/);
+  assert.equal(
+    database.prepare("SELECT id FROM messages WHERE id = ?").get("message-after-revocation"),
+    undefined,
+  );
+
+  await assert.rejects(repository.getOrStartConversationSession({
+    proposedSessionId: "session-wrong-cohort",
+    personaId: "persona-2",
+    evaluatorUserId: "user-2",
+    voiceId: "voice-2",
+    voiceAuthorizationId: "auth-2",
+    cohort: "living",
+    now: NOW,
+    staleBefore: "2026-07-14T09:30:00.000Z",
+  }), /conversation_session_authorization_denied/);
 });
 
 it("serializes concurrent session starts to one active session", async () => {

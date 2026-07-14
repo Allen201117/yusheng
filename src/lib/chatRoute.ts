@@ -307,6 +307,38 @@ function unpersistedEmergencyStream(input: {
   }));
 }
 
+function unpersistedDeniedAuthorizationStream(input: {
+  boundary: BoundaryPlan;
+  turnId: string;
+}): NextResponse {
+  const encoder = new TextEncoder();
+  return sseResponse(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encodeEvent(encoder, {
+        meta: {
+          turnId: input.turnId,
+          sessionId: null,
+          mode: "boundary",
+          boundaryKind: input.boundary.kind,
+          degradationReason: null,
+          speechAllowed: false,
+          evidence: [],
+          retrievedMemories: [],
+        },
+      }));
+      controller.enqueue(encodeEvent(encoder, { token: input.boundary.reply }));
+      controller.enqueue(encodeEvent(encoder, {
+        done: true,
+        boundary: true,
+        safety: true,
+        speechAllowed: false,
+        persisted: false,
+      }));
+      controller.close();
+    },
+  }));
+}
+
 export function createChatHandlers(overrides: Partial<ChatRouteDependencies> = {}) {
   const deps = { ...defaults, ...overrides };
 
@@ -440,6 +472,10 @@ export function createChatHandlers(overrides: Partial<ChatRouteDependencies> = {
           return jsonError("对话会话创建失败，请稍后重试", 500, "CHAT_SESSION_START_FAILED");
         }
       }
+    }
+
+    if (boundary?.kind === "voice_authorization_denied") {
+      return unpersistedDeniedAuthorizationStream({ boundary, turnId });
     }
 
     const userMessageId = deps.randomUUID();

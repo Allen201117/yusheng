@@ -188,6 +188,9 @@ it("locks the owner-scoped persona before atomically reusing an active restorati
     if (text.includes("FROM personas") && text.includes("FOR UPDATE")) {
       return [{ id: "persona-1" }];
     }
+    if (text.includes("FROM voice_authorizations") && text.includes("FOR UPDATE")) {
+      return [{ id: "auth-1" }];
+    }
     if (text.includes("UPDATE conversation_sessions") && text.includes("status = 'expired'")) {
       return [];
     }
@@ -201,8 +204,15 @@ it("locks the owner-scoped persona before atomically reusing an active restorati
         cohort: "living",
         status: "active",
         started_at: now,
-        last_activity_at: now,
+        last_activity_at: "2026-07-14T09:50:00.000Z",
         rated_at: null,
+      }];
+    }
+    if (text.includes("UPDATE conversation_sessions") && text.includes("last_activity_at =")) {
+      return [{
+        id: "session-existing", persona_id: "persona-1", evaluator_user_id: "user-1",
+        voice_id: "voice-1", voice_authorization_id: "auth-1", cohort: "living",
+        status: "active", started_at: now, last_activity_at: now, rated_at: null,
       }];
     }
     throw new Error(`unexpected query: ${text}`);
@@ -221,6 +231,7 @@ it("locks the owner-scoped persona before atomically reusing an active restorati
 
   assert.equal(session.id, "session-existing");
   assert.equal(session.cohort, "living");
+  assert.equal(session.lastActivityAt, now);
   assert.equal(fake.transactions, 1);
   const personaLock = fake.calls.findIndex((call) =>
     call.text.includes("FROM personas") && call.text.includes("FOR UPDATE"));
@@ -228,12 +239,22 @@ it("locks the owner-scoped persona before atomically reusing an active restorati
     call.text.includes("UPDATE conversation_sessions") && call.text.includes("status = 'expired'"));
   const activeSelect = fake.calls.findIndex((call) =>
     call.text.includes("FROM conversation_sessions") && call.text.includes("status = 'active'"));
-  assert.ok(personaLock >= 0 && personaLock < expiry && expiry < activeSelect);
+  const authorizationLock = fake.calls.findIndex((call) =>
+    call.text.includes("FROM voice_authorizations") && call.text.includes("FOR UPDATE"));
+  const touch = fake.calls.findIndex((call) =>
+    call.text.includes("UPDATE conversation_sessions") && call.text.includes("last_activity_at ="));
+  assert.ok(
+    personaLock >= 0 && personaLock < authorizationLock
+      && authorizationLock < expiry && expiry < activeSelect && activeSelect < touch,
+  );
   assert.match(fake.calls[personaLock].text, /id = \$1 AND user_id = \$2 AND voice_id = \$3/);
+  assert.match(fake.calls[authorizationLock].text, /status = 'approved'/);
+  assert.match(fake.calls[authorizationLock].text, /speaker_status = \$4/);
   assert.match(fake.calls[expiry].text, /last_activity_at <= \$3/);
+  assert.match(fake.calls[expiry].text, /voice_authorization_id <> \$5/);
   assert.doesNotMatch(fake.calls[expiry].text, /SET[\s\S]*last_activity_at\s*=/);
   assert.deepEqual(fake.calls[expiry].params, [
-    "persona-1", "user-1", "2026-07-14T09:30:00.000Z",
+    "persona-1", "user-1", "2026-07-14T09:30:00.000Z", "voice-1", "auth-1", "living",
   ]);
 });
 
@@ -241,6 +262,7 @@ it("creates a new Postgres session with immutable voice authorization and cohort
   const now = "2026-07-14T10:00:00.000Z";
   const fake = createFakeSql((text, params) => {
     if (text.includes("FROM personas") && text.includes("FOR UPDATE")) return [{ id: "persona-2" }];
+    if (text.includes("FROM voice_authorizations") && text.includes("FOR UPDATE")) return [{ id: "auth-2" }];
     if (text.includes("UPDATE conversation_sessions") && text.includes("status = 'expired'")) return [];
     if (text.includes("FROM conversation_sessions") && text.includes("status = 'active'")) return [];
     if (text.includes("INSERT INTO conversation_sessions")) return [{
@@ -284,6 +306,27 @@ it("creates a new Postgres session with immutable voice authorization and cohort
   assert.deepEqual(insert.params, [
     "session-new", "persona-2", "user-2", "voice-2", "auth-2", "deceased", now,
   ]);
+});
+
+it("rejects revoked or mismatched authorization before mutating Postgres sessions", async () => {
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM personas") && text.includes("FOR UPDATE")) return [{ id: "persona-1" }];
+    if (text.includes("FROM voice_authorizations") && text.includes("FOR UPDATE")) return [];
+    throw new Error(`unexpected query: ${text}`);
+  });
+  const repo = createPostgresRepository(fake.executor);
+  await assert.rejects(repo.getOrStartConversationSession({
+    proposedSessionId: "session-denied",
+    personaId: "persona-1",
+    evaluatorUserId: "user-1",
+    voiceId: "voice-1",
+    voiceAuthorizationId: "auth-revoked",
+    cohort: "deceased",
+    now: "2026-07-14T10:00:00.000Z",
+    staleBefore: "2026-07-14T09:30:00.000Z",
+  }), /conversation_session_authorization_denied/);
+  assert.equal(fake.calls.some((call) =>
+    call.text.includes("UPDATE conversation_sessions") || call.text.includes("INSERT INTO conversation_sessions")), false);
 });
 
 it("rejects a turn/session persona mismatch before persisting its user message", async () => {
@@ -1251,6 +1294,10 @@ it("starts, binds, and completes a grounded turn in transactions with stable loc
     call.text.includes("INSERT INTO messages") && call.params[0] === "user-message-1")!;
   assert.match(userInsert.text, /'user'/);
   assert.deepEqual(userInsert.params, ["user-message-1", "persona-1", "她喜欢喝什么？"]);
+  const sessionLock = fake.calls.find((call) =>
+    call.text.includes("FROM conversation_sessions sessions") && call.text.includes("FOR UPDATE"))!;
+  assert.match(sessionLock.text, /JOIN voice_authorizations authorization/);
+  assert.match(sessionLock.text, /authorization\.status = 'approved'/);
   const assistantInsert = fake.calls.find((call) =>
     call.text.includes("INSERT INTO messages") && call.params[0] === "assistant-1")!;
   assert.match(assistantInsert.text, /'assistant'/);
