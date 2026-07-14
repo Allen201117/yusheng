@@ -205,6 +205,101 @@ export type Message = {
 
 export type InsertMessageInput = Omit<Message, "createdAt">;
 
+export type ConversationMode = "grounded" | "companionship" | "boundary";
+
+export type ConversationBoundaryKind =
+  | "self_harm"
+  | "real_world_danger"
+  | "voice_authorization_denied"
+  | "identity"
+  | "real_will"
+  | "commitment"
+  | "major_decision";
+
+export type ConversationDegradationReason =
+  | "no_relevant_evidence"
+  | "retrieval_failed"
+  | "embedding_backfill_partial"
+  | "model_failed"
+  | "assistant_persistence_failed";
+
+export type ConversationTurnStatus =
+  | "started"
+  | "completed"
+  | "generation_failed"
+  | "assistant_persistence_failed";
+
+export type GroundingEvidenceKind = "fact" | "relationship_memory";
+
+export type ConversationEvidence =
+  | {
+      kind: "fact";
+      id: string;
+      content: string;
+      embedding: Float32Array | null;
+      factType: string;
+      factKey: string;
+    }
+  | {
+      kind: "relationship_memory";
+      id: string;
+      content: string;
+      embedding: Float32Array | null;
+      occurredAt: string | null;
+      location: string | null;
+      participants: string[];
+    };
+
+export type ConversationStyle = {
+  id: string;
+  category: string;
+  content: string;
+  example: string | null;
+};
+
+export type ConfirmedConversationKnowledge = {
+  evidence: ConversationEvidence[];
+  styles: ConversationStyle[];
+};
+
+export type ConversationEmbeddingUpdate = {
+  kind: GroundingEvidenceKind;
+  id: string;
+  embedding: Float32Array;
+};
+
+export type MessageEvidence = {
+  assistantMessageId: string;
+  personaId: string;
+  kind: GroundingEvidenceKind;
+  itemId: string;
+  createdAt: string;
+};
+
+export type ConversationTurnEvidence = {
+  turnId: string;
+  personaId: string;
+  kind: GroundingEvidenceKind;
+  itemId: string;
+  createdAt: string;
+};
+
+export type ConversationTurn = {
+  id: string;
+  personaId: string;
+  userMessageId: string;
+  assistantMessageId: string | null;
+  mode: ConversationMode | null;
+  status: ConversationTurnStatus;
+  boundaryKind: ConversationBoundaryKind | null;
+  degradationReason: ConversationDegradationReason | null;
+  retrievalMs: number | null;
+  firstSentenceMs: number | null;
+  totalMs: number | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ProviderVoiceStatus =
   | "not_created"
   | "pending"
