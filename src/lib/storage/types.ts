@@ -123,6 +123,30 @@ export type SpeechStyleItem = {
 
 export type PersonaKnowledgeItem = PersonaFact | RelationshipMemory | SpeechStyleItem;
 
+export type PersonaKnowledgeReviewInput = {
+  personaId: string;
+  actorUserId: string;
+  kind: PersonaKnowledgeKind;
+  id: string;
+  action: "confirm" | "reject" | "revoke";
+  edits?: Record<string, string | string[] | null>;
+};
+
+export type PersonaKnowledgeStatusChange = {
+  kind: PersonaKnowledgeKind;
+  id: string;
+  personaId: string;
+  expectedStatus: PersonaKnowledgeStatus;
+  nextStatus: PersonaKnowledgeStatus;
+  actorUserId: string;
+  conflictGroupId: string | null;
+};
+
+export type PersonaKnowledgeReviewResult = {
+  item: PersonaKnowledgeItem;
+  conflicts: PersonaFact[];
+};
+
 export type PersonaKnowledgeBundle = {
   sources: PersonaSource[];
   facts: PersonaFact[];
@@ -311,15 +335,12 @@ export interface AppRepository {
     expectedStatus: "pending" | "conflicted";
     patch: Record<string, string | string[] | null>;
   }): Promise<PersonaKnowledgeItem | null>;
-  setPersonaKnowledgeStatuses(inputs: Array<{
-    kind: PersonaKnowledgeKind;
-    id: string;
-    personaId: string;
-    expectedStatus: PersonaKnowledgeStatus;
-    nextStatus: PersonaKnowledgeStatus;
-    actorUserId: string;
-    conflictGroupId: string | null;
-  }>): Promise<PersonaKnowledgeItem[]>;
+  setPersonaKnowledgeStatuses(
+    inputs: PersonaKnowledgeStatusChange[],
+  ): Promise<PersonaKnowledgeItem[]>;
+  reviewPersonaKnowledgeAtomically(
+    input: PersonaKnowledgeReviewInput,
+  ): Promise<PersonaKnowledgeReviewResult>;
   revokePersonaSource(
     sourceId: string,
     personaId: string,

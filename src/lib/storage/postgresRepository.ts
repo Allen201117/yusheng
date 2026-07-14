@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { normalizePersonaKnowledgeText } from "../personaKnowledge";
+import {
+  buildPersonaKnowledgeReviewResult,
+  planPersonaKnowledgeReview,
+  requirePersonaKnowledgeEditsAllowed,
+} from "../personaKnowledgeService";
 import type { SqlExecutor } from "./postgres";
 import type {
   AppRepository,
@@ -18,7 +23,10 @@ import type {
   PersonaKnowledgeBundle,
   PersonaKnowledgeItem,
   PersonaKnowledgeKind,
+  PersonaKnowledgeReviewInput,
+  PersonaKnowledgeReviewResult,
   PersonaKnowledgeStatus,
+  PersonaKnowledgeStatusChange,
   PersonaSource,
   RelationshipMemory,
   SpeechStyleItem,
@@ -284,6 +292,132 @@ function columnsForKnowledgeKind(kind: PersonaKnowledgeKind): string {
   if (kind === "fact") return PERSONA_FACT_COLUMNS;
   if (kind === "relationship_memory") return RELATIONSHIP_MEMORY_COLUMNS;
   return SPEECH_STYLE_COLUMNS;
+}
+
+const EDITABLE_KNOWLEDGE_COLUMNS: Record<
+  PersonaKnowledgeKind,
+  Record<string, string>
+> = {
+  fact: {
+    factType: "fact_type",
+    factKey: "fact_key",
+    content: "content",
+    normalizedValue: "normalized_value",
+  },
+  relationship_memory: {
+    content: "content",
+    occurredAt: "occurred_at",
+    location: "location",
+    participants: "participants",
+  },
+  speech_style: { category: "category", content: "content", example: "example" },
+};
+
+async function getPersonaKnowledgeItemWith(
+  executor: SqlExecutor,
+  kind: PersonaKnowledgeKind,
+  id: string,
+  personaId: string,
+): Promise<PersonaKnowledgeItem | null> {
+  const table = KNOWLEDGE_TABLES[kind];
+  const rows = await executor.query<Record<string, unknown>>(
+    `SELECT ${columnsForKnowledgeKind(kind)} FROM ${table}
+     WHERE id = $1 AND persona_id = $2`,
+    [id, personaId],
+  );
+  return rows[0] ? mapKnowledgeItem(kind, rows[0]) : null;
+}
+
+async function findConfirmedFactsWith(
+  executor: SqlExecutor,
+  personaId: string,
+  factType: string,
+  factKey: string,
+): Promise<PersonaFact[]> {
+  const rows = await executor.query<PersonaFactRow>(
+    `SELECT ${PERSONA_FACT_COLUMNS} FROM persona_facts
+     WHERE persona_id = $1 AND status = 'confirmed'
+     ORDER BY created_at, id`,
+    [personaId],
+  );
+  const normalizedFactType = normalizePersonaKnowledgeText(factType);
+  const normalizedFactKey = normalizePersonaKnowledgeText(factKey);
+  return rows
+    .map(mapPersonaFact)
+    .filter((fact) =>
+      normalizePersonaKnowledgeText(fact.factType) === normalizedFactType
+      && normalizePersonaKnowledgeText(fact.factKey) === normalizedFactKey);
+}
+
+async function updatePersonaKnowledgeCandidateWith(
+  executor: SqlExecutor,
+  input: {
+    kind: PersonaKnowledgeKind;
+    id: string;
+    personaId: string;
+    expectedStatus: "pending" | "conflicted";
+    patch: Record<string, string | string[] | null>;
+  },
+): Promise<PersonaKnowledgeItem | null> {
+  const allowed = EDITABLE_KNOWLEDGE_COLUMNS[input.kind];
+  const entries = Object.entries(input.patch).filter(([key]) => allowed[key]);
+  if (entries.length === 0) {
+    const table = KNOWLEDGE_TABLES[input.kind];
+    const rows = await executor.query<Record<string, unknown>>(
+      `SELECT ${columnsForKnowledgeKind(input.kind)} FROM ${table}
+       WHERE id = $1 AND persona_id = $2 AND status = $3`,
+      [input.id, input.personaId, input.expectedStatus],
+    );
+    return rows[0] ? mapKnowledgeItem(input.kind, rows[0]) : null;
+  }
+  const values: unknown[] = [input.id, input.personaId, input.expectedStatus];
+  const assignments = entries.map(([key, value]) => {
+    values.push(
+      input.kind === "relationship_memory" && key === "participants"
+        ? JSON.stringify(Array.isArray(value) ? value : [])
+        : value,
+    );
+    const cast = input.kind === "relationship_memory" && key === "participants" ? "::jsonb" : "";
+    return `${allowed[key]} = $${values.length}${cast}`;
+  });
+  const table = KNOWLEDGE_TABLES[input.kind];
+  const rows = await executor.query<Record<string, unknown>>(
+    `UPDATE ${table}
+     SET ${assignments.join(", ")}, status = 'pending', conflict_group_id = NULL,
+         confirmed_by = NULL, confirmed_at = NULL, revoked_at = NULL, updated_at = now()
+     WHERE id = $1 AND persona_id = $2 AND status = $3
+     RETURNING ${columnsForKnowledgeKind(input.kind)}`,
+    values,
+  );
+  return rows[0] ? mapKnowledgeItem(input.kind, rows[0]) : null;
+}
+
+async function setPersonaKnowledgeStatusesWith(
+  executor: SqlExecutor,
+  inputs: PersonaKnowledgeStatusChange[],
+): Promise<PersonaKnowledgeItem[]> {
+  const changed: PersonaKnowledgeItem[] = [];
+  for (const input of inputs) {
+    const table = KNOWLEDGE_TABLES[input.kind];
+    const rows = await executor.query<Record<string, unknown>>(
+      `UPDATE ${table}
+       SET status = $4,
+           confirmed_by = CASE WHEN $4 = 'confirmed' THEN $5 ELSE NULL END,
+           confirmed_at = CASE WHEN $4 = 'confirmed' THEN now() ELSE NULL END,
+           conflict_group_id = $6,
+           revoked_at = CASE WHEN $4 = 'revoked' THEN now() ELSE NULL END,
+           updated_at = now()
+       WHERE id = $1 AND persona_id = $2 AND status = $3
+       RETURNING ${columnsForKnowledgeKind(input.kind)}`,
+      [
+        input.id, input.personaId, input.expectedStatus, input.nextStatus,
+        input.actorUserId, input.conflictGroupId,
+      ],
+    );
+    if (!rows[0]) throw new Error("knowledge_status_changed");
+    changed.push(mapKnowledgeItem(input.kind, rows[0]));
+  }
+  return changed;
 }
 
 function mapPersona(row: PersonaRow): Persona {
@@ -762,13 +896,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       id: string,
       personaId: string,
     ): Promise<PersonaKnowledgeItem | null> {
-      const table = KNOWLEDGE_TABLES[kind];
-      const rows = await sql.query<Record<string, unknown>>(
-        `SELECT ${columnsForKnowledgeKind(kind)} FROM ${table}
-         WHERE id = $1 AND persona_id = $2`,
-        [id, personaId],
-      );
-      return rows[0] ? mapKnowledgeItem(kind, rows[0]) : null;
+      return getPersonaKnowledgeItemWith(sql, kind, id, personaId);
     },
 
     async findConfirmedFacts(
@@ -776,94 +904,63 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       factType: string,
       factKey: string,
     ): Promise<PersonaFact[]> {
-      const rows = await sql.query<PersonaFactRow>(
-        `SELECT ${PERSONA_FACT_COLUMNS} FROM persona_facts
-         WHERE persona_id = $1 AND status = 'confirmed'
-         ORDER BY created_at, id`,
-        [personaId],
-      );
-      const normalizedFactType = normalizePersonaKnowledgeText(factType);
-      const normalizedFactKey = normalizePersonaKnowledgeText(factKey);
-      return rows
-        .map(mapPersonaFact)
-        .filter((fact) =>
-          normalizePersonaKnowledgeText(fact.factType) === normalizedFactType
-          && normalizePersonaKnowledgeText(fact.factKey) === normalizedFactKey);
+      return findConfirmedFactsWith(sql, personaId, factType, factKey);
     },
 
     async updatePersonaKnowledgeCandidate(input): Promise<PersonaKnowledgeItem | null> {
-      const editableColumns: Record<PersonaKnowledgeKind, Record<string, string>> = {
-        fact: {
-          factType: "fact_type",
-          factKey: "fact_key",
-          content: "content",
-          normalizedValue: "normalized_value",
-        },
-        relationship_memory: {
-          content: "content",
-          occurredAt: "occurred_at",
-          location: "location",
-          participants: "participants",
-        },
-        speech_style: { category: "category", content: "content", example: "example" },
-      };
-      const allowed = editableColumns[input.kind];
-      const entries = Object.entries(input.patch).filter(([key]) => allowed[key]);
-      if (entries.length === 0) {
-        const table = KNOWLEDGE_TABLES[input.kind];
-        const rows = await sql.query<Record<string, unknown>>(
-          `SELECT ${columnsForKnowledgeKind(input.kind)} FROM ${table}
-           WHERE id = $1 AND persona_id = $2 AND status = $3`,
-          [input.id, input.personaId, input.expectedStatus],
-        );
-        return rows[0] ? mapKnowledgeItem(input.kind, rows[0]) : null;
-      }
-      const values: unknown[] = [input.id, input.personaId, input.expectedStatus];
-      const assignments = entries.map(([key, value]) => {
-        values.push(
-          input.kind === "relationship_memory" && key === "participants"
-            ? JSON.stringify(Array.isArray(value) ? value : [])
-            : value,
-        );
-        const cast = input.kind === "relationship_memory" && key === "participants" ? "::jsonb" : "";
-        return `${allowed[key]} = $${values.length}${cast}`;
-      });
-      const table = KNOWLEDGE_TABLES[input.kind];
-      const rows = await sql.query<Record<string, unknown>>(
-        `UPDATE ${table}
-         SET ${assignments.join(", ")}, status = 'pending', conflict_group_id = NULL,
-             confirmed_by = NULL, confirmed_at = NULL, revoked_at = NULL, updated_at = now()
-         WHERE id = $1 AND persona_id = $2 AND status = $3
-         RETURNING ${columnsForKnowledgeKind(input.kind)}`,
-        values,
-      );
-      return rows[0] ? mapKnowledgeItem(input.kind, rows[0]) : null;
+      return updatePersonaKnowledgeCandidateWith(sql, input);
     },
 
     async setPersonaKnowledgeStatuses(inputs): Promise<PersonaKnowledgeItem[]> {
+      return sql.transaction((transaction) => setPersonaKnowledgeStatusesWith(transaction, inputs));
+    },
+
+    async reviewPersonaKnowledgeAtomically(
+      input: PersonaKnowledgeReviewInput,
+    ): Promise<PersonaKnowledgeReviewResult> {
       return sql.transaction(async (transaction) => {
-        const changed: PersonaKnowledgeItem[] = [];
-        for (const input of inputs) {
-          const table = KNOWLEDGE_TABLES[input.kind];
-          const rows = await transaction.query<Record<string, unknown>>(
-            `UPDATE ${table}
-             SET status = $4,
-                 confirmed_by = CASE WHEN $4 = 'confirmed' THEN $5 ELSE NULL END,
-                 confirmed_at = CASE WHEN $4 = 'confirmed' THEN now() ELSE NULL END,
-                 conflict_group_id = $6,
-                 revoked_at = CASE WHEN $4 = 'revoked' THEN now() ELSE NULL END,
-                 updated_at = now()
-             WHERE id = $1 AND persona_id = $2 AND status = $3
-             RETURNING ${columnsForKnowledgeKind(input.kind)}`,
-            [
-              input.id, input.personaId, input.expectedStatus, input.nextStatus,
-              input.actorUserId, input.conflictGroupId,
-            ],
-          );
-          if (!rows[0]) throw new Error("knowledge_status_changed");
-          changed.push(mapKnowledgeItem(input.kind, rows[0]));
+        await transaction.query(
+          "SELECT pg_advisory_xact_lock(hashtext('persona-knowledge-review'), hashtext($1))",
+          [input.personaId],
+        );
+        let item = await getPersonaKnowledgeItemWith(
+          transaction,
+          input.kind,
+          input.id,
+          input.personaId,
+        );
+        if (!item) throw new Error("knowledge_not_found");
+
+        if (input.edits !== undefined) {
+          requirePersonaKnowledgeEditsAllowed(item, input.action);
+          const updated = await updatePersonaKnowledgeCandidateWith(transaction, {
+            kind: item.kind,
+            id: item.id,
+            personaId: item.personaId,
+            expectedStatus: item.status as "pending" | "conflicted",
+            patch: input.edits,
+          });
+          if (!updated) throw new Error("knowledge_status_changed");
+          item = updated;
         }
-        return changed;
+
+        const confirmedFacts = input.action === "confirm" && item.kind === "fact"
+          ? await findConfirmedFactsWith(
+            transaction,
+            item.personaId,
+            item.factType,
+            item.factKey,
+          )
+          : [];
+        const plan = planPersonaKnowledgeReview({
+          item,
+          confirmedFacts,
+          actorUserId: input.actorUserId,
+          action: input.action,
+          conflictGroupId: randomUUID(),
+        });
+        const changed = await setPersonaKnowledgeStatusesWith(transaction, plan.statusChanges);
+        return buildPersonaKnowledgeReviewResult(item, plan, changed);
       });
     },
 

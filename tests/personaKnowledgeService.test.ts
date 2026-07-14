@@ -1,25 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { reviewPersonaKnowledge } from "../src/lib/personaKnowledgeService";
+import {
+  buildPersonaKnowledgeReviewResult,
+  planPersonaKnowledgeReview,
+  reviewPersonaKnowledge,
+} from "../src/lib/personaKnowledgeService";
 import type {
   AppRepository,
   PersonaFact,
   PersonaKnowledgeItem,
-  PersonaKnowledgeKind,
-  PersonaKnowledgeStatus,
   SpeechStyleItem,
 } from "../src/lib/storage/types";
-
-type StatusChange = {
-  kind: PersonaKnowledgeKind;
-  id: string;
-  personaId: string;
-  expectedStatus: PersonaKnowledgeStatus;
-  nextStatus: PersonaKnowledgeStatus;
-  actorUserId: string;
-  conflictGroupId: string | null;
-};
 
 function fact(input: Partial<PersonaFact> & Pick<PersonaFact, "id" | "status">): PersonaFact {
   return {
@@ -56,270 +48,156 @@ function style(input: Partial<SpeechStyleItem> & Pick<SpeechStyleItem, "id" | "s
   };
 }
 
-function createFakeRepository(initialItems: PersonaKnowledgeItem[], options?: { failCas?: boolean }) {
-  const items = new Map(initialItems.map((item) => [`${item.kind}:${item.id}`, structuredClone(item)]));
-  const statusBatches: StatusChange[][] = [];
-
-  const repository = {
-    async getPersonaKnowledgeItem(kind: PersonaKnowledgeKind, id: string, personaId: string) {
-      const item = items.get(`${kind}:${id}`);
-      return item?.personaId === personaId ? structuredClone(item) : null;
-    },
-    async findConfirmedFacts(personaId: string, factType: string, factKey: string) {
-      return [...items.values()]
-        .filter((item): item is PersonaFact => item.kind === "fact")
-        .filter((item) => item.personaId === personaId
-          && item.factType === factType
-          && item.factKey === factKey
-          && item.status === "confirmed")
-        .map((item) => structuredClone(item));
-    },
-    async updatePersonaKnowledgeCandidate(input: {
-      kind: PersonaKnowledgeKind;
-      id: string;
-      personaId: string;
-      expectedStatus: "pending" | "conflicted";
-      patch: Record<string, string | string[] | null>;
-    }) {
-      const key = `${input.kind}:${input.id}`;
-      const current = items.get(key);
-      if (!current || current.personaId !== input.personaId || current.status !== input.expectedStatus) {
-        return null;
-      }
-      const updated = { ...current, ...input.patch } as PersonaKnowledgeItem;
-      items.set(key, updated);
-      return structuredClone(updated);
-    },
-    async setPersonaKnowledgeStatuses(inputs: StatusChange[]) {
-      statusBatches.push(structuredClone(inputs));
-      if (options?.failCas) {
-        throw new Error("knowledge_status_changed");
-      }
-      for (const input of inputs) {
-        const current = items.get(`${input.kind}:${input.id}`);
-        if (!current || current.personaId !== input.personaId || current.status !== input.expectedStatus) {
-          throw new Error("knowledge_status_changed");
-        }
-      }
-      return inputs.map((input) => {
-        const key = `${input.kind}:${input.id}`;
-        const current = items.get(key)!;
-        const updated = {
-          ...current,
-          status: input.nextStatus,
-          conflictGroupId: input.conflictGroupId,
-          confirmedBy: input.nextStatus === "confirmed" ? input.actorUserId : current.confirmedBy,
-        } as PersonaKnowledgeItem;
-        items.set(key, updated);
-        return structuredClone(updated);
-      });
-    },
-  } as unknown as AppRepository;
-
-  return { repository, items, statusBatches };
+function applyPlan(
+  items: PersonaKnowledgeItem[],
+  plan: ReturnType<typeof planPersonaKnowledgeReview>,
+): PersonaKnowledgeItem[] {
+  return plan.statusChanges.map((change) => {
+    const current = items.find((item) => item.kind === change.kind && item.id === change.id)!;
+    return {
+      ...current,
+      status: change.nextStatus,
+      conflictGroupId: change.conflictGroupId,
+    } as PersonaKnowledgeItem;
+  });
 }
 
-test("confirms a pending speech-style item", async () => {
-  const fake = createFakeRepository([style({ id: "style-1", status: "pending" })]);
+test("a conflicting review groups the candidate and every same-key confirmed fact", () => {
+  const candidate = fact({ id: "fact-new", status: "pending", normalizedValue: "茶" });
+  const oldTea = fact({ id: "fact-tea", status: "confirmed", normalizedValue: "茶" });
+  const oldCoffee = fact({ id: "fact-coffee", status: "confirmed", normalizedValue: "咖啡" });
+
+  const plan = planPersonaKnowledgeReview({
+    item: candidate,
+    confirmedFacts: [oldTea, oldCoffee],
+    actorUserId: "user-1",
+    action: "confirm",
+    conflictGroupId: "conflict-1",
+  });
+
+  assert.deepEqual(plan.statusChanges.map((change) => change.id), [
+    "fact-tea",
+    "fact-coffee",
+    "fact-new",
+  ]);
+  assert.ok(plan.statusChanges.every((change) => change.nextStatus === "conflicted"));
+  assert.ok(plan.statusChanges.every((change) => change.conflictGroupId === "conflict-1"));
+  assert.deepEqual(plan.conflictIds, ["fact-tea", "fact-coffee"]);
+});
+
+test("all same-value facts stay confirmed and only the candidate is confirmed", () => {
+  const candidate = fact({ id: "fact-new", status: "pending", normalizedValue: "  茶 " });
+  const oldTea = fact({ id: "fact-tea", status: "confirmed", normalizedValue: "茶" });
+
+  const plan = planPersonaKnowledgeReview({
+    item: candidate,
+    confirmedFacts: [oldTea],
+    actorUserId: "user-1",
+    action: "confirm",
+    conflictGroupId: "unused",
+  });
+
+  assert.deepEqual(plan.statusChanges, [{
+    kind: "fact",
+    id: "fact-new",
+    personaId: "persona-1",
+    expectedStatus: "pending",
+    nextStatus: "confirmed",
+    actorUserId: "user-1",
+    conflictGroupId: null,
+  }]);
+  assert.deepEqual(plan.conflictIds, []);
+});
+
+test("plans valid reject and revoke transitions and rejects terminal revival", () => {
+  const rejectedPlan = planPersonaKnowledgeReview({
+    item: style({ id: "style-pending", status: "pending" }),
+    confirmedFacts: [],
+    actorUserId: "user-1",
+    action: "reject",
+    conflictGroupId: "unused",
+  });
+  assert.equal(rejectedPlan.statusChanges[0].nextStatus, "rejected");
+
+  const revokedPlan = planPersonaKnowledgeReview({
+    item: style({ id: "style-confirmed", status: "confirmed" }),
+    confirmedFacts: [],
+    actorUserId: "user-1",
+    action: "revoke",
+    conflictGroupId: "unused",
+  });
+  assert.equal(revokedPlan.statusChanges[0].nextStatus, "revoked");
+
+  assert.throws(() => planPersonaKnowledgeReview({
+    item: style({ id: "style-rejected", status: "rejected" }),
+    confirmedFacts: [],
+    actorUserId: "user-1",
+    action: "confirm",
+    conflictGroupId: "unused",
+  }), /invalid_transition:rejected:confirmed/);
+});
+
+test("strictly maps a complete repository status result", () => {
+  const candidate = fact({ id: "fact-new", status: "pending", normalizedValue: "咖啡" });
+  const old = fact({ id: "fact-old", status: "confirmed", normalizedValue: "茶" });
+  const plan = planPersonaKnowledgeReview({
+    item: candidate,
+    confirmedFacts: [old],
+    actorUserId: "user-1",
+    action: "confirm",
+    conflictGroupId: "conflict-1",
+  });
+  const changed = applyPlan([candidate, old], plan);
+
+  const result = buildPersonaKnowledgeReviewResult(candidate, plan, changed);
+  assert.equal(result.item.id, "fact-new");
+  assert.deepEqual(result.conflicts.map((item) => item.id), ["fact-old"]);
+
+  assert.throws(
+    () => buildPersonaKnowledgeReviewResult(candidate, plan, changed.slice(0, 1)),
+    /invalid_knowledge_review_result/,
+  );
+  assert.throws(
+    () => buildPersonaKnowledgeReviewResult(candidate, plan, [
+      ...changed,
+      fact({ id: "fact-extra", status: "conflicted", conflictGroupId: "conflict-1" }),
+    ]),
+    /invalid_knowledge_review_result/,
+  );
+});
+
+test("service delegates the whole review to one atomic repository call", async () => {
+  const expected = { item: style({ id: "style-1", status: "confirmed" }), conflicts: [] };
+  const calls: unknown[] = [];
+  const repository = new Proxy({
+    async reviewPersonaKnowledgeAtomically(input: unknown) {
+      calls.push(input);
+      return expected;
+    },
+  }, {
+    get(target, property, receiver) {
+      if (!(property in target)) throw new Error(`unexpected_repository_call:${String(property)}`);
+      return Reflect.get(target, property, receiver);
+    },
+  }) as unknown as AppRepository;
 
   const result = await reviewPersonaKnowledge({
-    repository: fake.repository,
+    repository,
     personaId: "persona-1",
     actorUserId: "user-1",
     kind: "speech_style",
     id: "style-1",
     action: "confirm",
+    edits: {},
   });
 
-  assert.equal(result.item.status, "confirmed");
-  assert.deepEqual(result.conflicts, []);
-  assert.equal(fake.statusBatches.length, 1);
-});
-
-test("marks a conflicting fact candidate and old confirmed facts conflicted atomically", async () => {
-  const candidate = fact({ id: "fact-new", status: "pending", content: "喜欢咖啡", normalizedValue: "咖啡" });
-  const old = fact({ id: "fact-old", status: "confirmed", content: "喜欢茶", normalizedValue: "茶" });
-  const fake = createFakeRepository([candidate, old]);
-
-  const result = await reviewPersonaKnowledge({
-    repository: fake.repository,
-    personaId: "persona-1",
-    actorUserId: "user-1",
-    kind: "fact",
-    id: "fact-new",
-    action: "confirm",
-  });
-
-  assert.equal(fake.statusBatches.length, 1);
-  assert.equal(fake.statusBatches[0].length, 2);
-  assert.equal(result.item.id, "fact-new");
-  assert.equal(result.item.status, "conflicted");
-  assert.equal(result.conflicts.length, 1);
-  assert.equal(result.conflicts[0].id, "fact-old");
-  assert.equal(result.conflicts[0].status, "conflicted");
-  assert.ok(result.item.conflictGroupId);
-  assert.equal(result.conflicts[0].conflictGroupId, result.item.conflictGroupId);
-});
-
-test("edits a fact to the same value before confirming without disturbing the old fact", async () => {
-  const candidate = fact({ id: "fact-new", status: "pending", content: "喜欢咖啡", normalizedValue: "咖啡" });
-  const old = fact({ id: "fact-old", status: "confirmed", content: "喜欢茶", normalizedValue: "茶" });
-  const fake = createFakeRepository([candidate, old]);
-
-  const result = await reviewPersonaKnowledge({
-    repository: fake.repository,
-    personaId: "persona-1",
-    actorUserId: "user-1",
-    kind: "fact",
-    id: "fact-new",
-    action: "confirm",
-    edits: { content: "喜欢茶", normalizedValue: "  茶 " },
-  });
-
-  assert.equal(result.item.status, "confirmed");
-  assert.deepEqual(result.conflicts, []);
-  assert.equal(fake.items.get("fact:fact-old")?.status, "confirmed");
-  assert.equal(fake.statusBatches[0].length, 1);
-});
-
-test("returns knowledge_not_found when the persona does not own the item", async () => {
-  const fake = createFakeRepository([style({ id: "style-1", status: "pending" })]);
-
-  await assert.rejects(
-    reviewPersonaKnowledge({
-      repository: fake.repository,
-      personaId: "persona-wrong",
-      actorUserId: "user-1",
-      kind: "speech_style",
-      id: "style-1",
-      action: "confirm",
-    }),
-    /knowledge_not_found/,
-  );
-});
-
-test("rejects pending items and revokes confirmed items through valid transitions", async () => {
-  const rejectedFake = createFakeRepository([style({ id: "style-reject", status: "pending" })]);
-  const rejected = await reviewPersonaKnowledge({
-    repository: rejectedFake.repository,
+  assert.equal(result, expected);
+  assert.deepEqual(calls, [{
     personaId: "persona-1",
     actorUserId: "user-1",
     kind: "speech_style",
-    id: "style-reject",
-    action: "reject",
-  });
-  assert.equal(rejected.item.status, "rejected");
-  assert.deepEqual(rejected.conflicts, []);
-
-  const revokedFake = createFakeRepository([style({ id: "style-revoke", status: "confirmed" })]);
-  const revoked = await reviewPersonaKnowledge({
-    repository: revokedFake.repository,
-    personaId: "persona-1",
-    actorUserId: "user-1",
-    kind: "speech_style",
-    id: "style-revoke",
-    action: "revoke",
-  });
-  assert.equal(revoked.item.status, "revoked");
-  assert.deepEqual(revoked.conflicts, []);
-});
-
-test("terminal rejected and revoked items cannot be confirmed or revived with edits", async () => {
-  for (const status of ["rejected", "revoked"] as const) {
-    const fake = createFakeRepository([style({ id: `style-${status}`, status })]);
-    await assert.rejects(
-      reviewPersonaKnowledge({
-        repository: fake.repository,
-        personaId: "persona-1",
-        actorUserId: "user-1",
-        kind: "speech_style",
-        id: `style-${status}`,
-        action: "confirm",
-      }),
-      new RegExp(`invalid_transition:${status}:confirmed`),
-    );
-    await assert.rejects(
-      reviewPersonaKnowledge({
-        repository: fake.repository,
-        personaId: "persona-1",
-        actorUserId: "user-1",
-        kind: "speech_style",
-        id: `style-${status}`,
-        action: "confirm",
-        edits: {},
-      }),
-      new RegExp(`invalid_transition:${status}:confirmed`),
-    );
-  }
-});
-
-test("propagates an atomic CAS failure without returning a partial result", async () => {
-  const fake = createFakeRepository([
-    fact({ id: "fact-new", status: "pending", normalizedValue: "咖啡" }),
-    fact({ id: "fact-old", status: "confirmed", normalizedValue: "茶" }),
-  ], { failCas: true });
-
-  await assert.rejects(
-    reviewPersonaKnowledge({
-      repository: fake.repository,
-      personaId: "persona-1",
-      actorUserId: "user-1",
-      kind: "fact",
-      id: "fact-new",
-      action: "confirm",
-    }),
-    /knowledge_status_changed/,
-  );
-  assert.equal(fake.statusBatches.length, 1);
-  assert.equal(fake.items.get("fact:fact-new")?.status, "pending");
-  assert.equal(fake.items.get("fact:fact-old")?.status, "confirmed");
-});
-
-test("does not flag facts with a different key or the same normalized value", async () => {
-  const cases: Array<{ candidate: PersonaFact; old: PersonaFact }> = [
-    {
-      candidate: fact({ id: "new-key", status: "pending", factKey: "favorite food", normalizedValue: "咖啡" }),
-      old: fact({ id: "old-key", status: "confirmed", normalizedValue: "茶" }),
-    },
-    {
-      candidate: fact({ id: "new-same", status: "pending", normalizedValue: " 茶 " }),
-      old: fact({ id: "old-same", status: "confirmed", normalizedValue: "茶" }),
-    },
-  ];
-
-  for (const { candidate, old } of cases) {
-    const fake = createFakeRepository([candidate, old]);
-    const result = await reviewPersonaKnowledge({
-      repository: fake.repository,
-      personaId: "persona-1",
-      actorUserId: "user-1",
-      kind: "fact",
-      id: candidate.id,
-      action: "confirm",
-    });
-    assert.equal(result.item.status, "confirmed");
-    assert.deepEqual(result.conflicts, []);
-    assert.equal(fake.items.get(`fact:${old.id}`)?.status, "confirmed");
-  }
-});
-
-test("turns an edit CAS miss into knowledge_status_changed", async () => {
-  const item = style({ id: "style-1", status: "pending" });
-  const repository = {
-    async getPersonaKnowledgeItem() { return item; },
-    async updatePersonaKnowledgeCandidate() { return null; },
-  } as unknown as AppRepository;
-
-  await assert.rejects(
-    reviewPersonaKnowledge({
-      repository,
-      personaId: "persona-1",
-      actorUserId: "user-1",
-      kind: "speech_style",
-      id: "style-1",
-      action: "confirm",
-      edits: { content: "别急" },
-    }),
-    /knowledge_status_changed/,
-  );
+    id: "style-1",
+    action: "confirm",
+    edits: {},
+  }]);
 });

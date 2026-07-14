@@ -11,6 +11,11 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs";
 import { normalizePersonaKnowledgeText } from "./personaKnowledge";
+import {
+  buildPersonaKnowledgeReviewResult,
+  planPersonaKnowledgeReview,
+  requirePersonaKnowledgeEditsAllowed,
+} from "./personaKnowledgeService";
 import type {
   CreatePersonaKnowledgeCandidateInput,
   CreatePersonaSourceInput,
@@ -18,7 +23,9 @@ import type {
   PersonaKnowledgeBundle,
   PersonaKnowledgeItem,
   PersonaKnowledgeKind,
-  PersonaKnowledgeStatus,
+  PersonaKnowledgeReviewInput,
+  PersonaKnowledgeReviewResult,
+  PersonaKnowledgeStatusChange,
   PersonaSource,
   RelationshipMemory,
   SpeechStyleItem,
@@ -507,27 +514,37 @@ export function listPersonaKnowledge(personaId: string): PersonaKnowledgeBundle 
   };
 }
 
-export function getPersonaKnowledgeItem(
+function getPersonaKnowledgeItemWithDb(
+  database: Database.Database,
   kind: PersonaKnowledgeKind,
   id: string,
   personaId: string,
 ): PersonaKnowledgeItem | null {
   const table = KNOWLEDGE_TABLES[kind];
-  const row = getDb().prepare(`SELECT * FROM ${table} WHERE id = ? AND persona_id = ?`).get(
+  const row = database.prepare(`SELECT * FROM ${table} WHERE id = ? AND persona_id = ?`).get(
     id,
     personaId,
   ) as any;
   return row ? rowToPersonaKnowledgeItem(kind, row) : null;
 }
 
-export function findConfirmedFacts(
+export function getPersonaKnowledgeItem(
+  kind: PersonaKnowledgeKind,
+  id: string,
+  personaId: string,
+): PersonaKnowledgeItem | null {
+  return getPersonaKnowledgeItemWithDb(getDb(), kind, id, personaId);
+}
+
+function findConfirmedFactsWithDb(
+  database: Database.Database,
   personaId: string,
   factType: string,
   factKey: string,
 ): PersonaFact[] {
   const normalizedFactType = normalizePersonaKnowledgeText(factType);
   const normalizedFactKey = normalizePersonaKnowledgeText(factKey);
-  return (getDb().prepare(
+  return (database.prepare(
     `SELECT * FROM persona_facts
      WHERE persona_id = ? AND status = 'confirmed'
      ORDER BY created_at, id`,
@@ -536,6 +553,14 @@ export function findConfirmedFacts(
     .filter((fact) =>
       normalizePersonaKnowledgeText(fact.factType) === normalizedFactType
       && normalizePersonaKnowledgeText(fact.factKey) === normalizedFactKey);
+}
+
+export function findConfirmedFacts(
+  personaId: string,
+  factType: string,
+  factKey: string,
+): PersonaFact[] {
+  return findConfirmedFactsWithDb(getDb(), personaId, factType, factKey);
 }
 
 export function createPersonaKnowledgeCandidates(input: {
@@ -647,18 +672,21 @@ const EDITABLE_COLUMNS = {
   },
 } as const;
 
-export function updatePersonaKnowledgeCandidate(input: {
-  kind: PersonaKnowledgeKind;
-  id: string;
-  personaId: string;
-  expectedStatus: "pending" | "conflicted";
-  patch: Record<string, string | string[] | null>;
-}): PersonaKnowledgeItem | null {
+function updatePersonaKnowledgeCandidateWithDb(
+  database: Database.Database,
+  input: {
+    kind: PersonaKnowledgeKind;
+    id: string;
+    personaId: string;
+    expectedStatus: "pending" | "conflicted";
+    patch: Record<string, string | string[] | null>;
+  },
+): PersonaKnowledgeItem | null {
   const allowed = EDITABLE_COLUMNS[input.kind] as Record<string, string>;
   const entries = Object.entries(input.patch).filter(([key]) => allowed[key]);
   if (entries.length === 0) {
     const table = KNOWLEDGE_TABLES[input.kind];
-    const row = getDb().prepare(
+    const row = database.prepare(
       `SELECT * FROM ${table} WHERE id = ? AND persona_id = ? AND status = ?`,
     ).get(input.id, input.personaId, input.expectedStatus) as any;
     return row ? rowToPersonaKnowledgeItem(input.kind, row) : null;
@@ -671,48 +699,96 @@ export function updatePersonaKnowledgeCandidate(input: {
   const assignments = entries.map(([key], index) => `${allowed[key]} = ?`).join(", ");
   const table = KNOWLEDGE_TABLES[input.kind];
   const now = new Date().toISOString();
-  const result = getDb().prepare(
+  const result = database.prepare(
     `UPDATE ${table}
      SET ${assignments}, status = 'pending', conflict_group_id = NULL,
          confirmed_by = NULL, confirmed_at = NULL, revoked_at = NULL, updated_at = ?
      WHERE id = ? AND persona_id = ? AND status = ?`,
   ).run(...values, now, input.id, input.personaId, input.expectedStatus);
   if (result.changes === 0) return null;
-  return getPersonaKnowledgeItem(input.kind, input.id, input.personaId);
+  return getPersonaKnowledgeItemWithDb(database, input.kind, input.id, input.personaId);
 }
 
-export function setPersonaKnowledgeStatuses(inputs: Array<{
+export function updatePersonaKnowledgeCandidate(input: {
   kind: PersonaKnowledgeKind;
   id: string;
   personaId: string;
-  expectedStatus: PersonaKnowledgeStatus;
-  nextStatus: PersonaKnowledgeStatus;
-  actorUserId: string;
-  conflictGroupId: string | null;
-}>): PersonaKnowledgeItem[] {
+  expectedStatus: "pending" | "conflicted";
+  patch: Record<string, string | string[] | null>;
+}): PersonaKnowledgeItem | null {
+  return updatePersonaKnowledgeCandidateWithDb(getDb(), input);
+}
+
+function setPersonaKnowledgeStatusesWithDb(
+  database: Database.Database,
+  inputs: PersonaKnowledgeStatusChange[],
+): PersonaKnowledgeItem[] {
+  const changed: PersonaKnowledgeItem[] = [];
+  for (const input of inputs) {
+    const table = KNOWLEDGE_TABLES[input.kind];
+    const now = new Date().toISOString();
+    const confirmedBy = input.nextStatus === "confirmed" ? input.actorUserId : null;
+    const confirmedAt = input.nextStatus === "confirmed" ? now : null;
+    const revokedAt = input.nextStatus === "revoked" ? now : null;
+    const result = database.prepare(
+      `UPDATE ${table}
+       SET status = ?, conflict_group_id = ?, confirmed_by = ?, confirmed_at = ?,
+           revoked_at = ?, updated_at = ?
+       WHERE id = ? AND persona_id = ? AND status = ?`,
+    ).run(
+      input.nextStatus, input.conflictGroupId, confirmedBy, confirmedAt, revokedAt, now,
+      input.id, input.personaId, input.expectedStatus,
+    );
+    if (result.changes === 0) throw new Error("knowledge_status_changed");
+    const item = getPersonaKnowledgeItemWithDb(database, input.kind, input.id, input.personaId);
+    if (!item) throw new Error("invalid_knowledge_review_result");
+    changed.push(item);
+  }
+  return changed;
+}
+
+export function setPersonaKnowledgeStatuses(
+  inputs: PersonaKnowledgeStatusChange[],
+): PersonaKnowledgeItem[] {
   const database = getDb();
-  return database.transaction(() => {
-    const changed: PersonaKnowledgeItem[] = [];
-    for (const input of inputs) {
-      const table = KNOWLEDGE_TABLES[input.kind];
-      const now = new Date().toISOString();
-      const confirmedBy = input.nextStatus === "confirmed" ? input.actorUserId : null;
-      const confirmedAt = input.nextStatus === "confirmed" ? now : null;
-      const revokedAt = input.nextStatus === "revoked" ? now : null;
-      const result = database.prepare(
-        `UPDATE ${table}
-         SET status = ?, conflict_group_id = ?, confirmed_by = ?, confirmed_at = ?,
-             revoked_at = ?, updated_at = ?
-         WHERE id = ? AND persona_id = ? AND status = ?`,
-      ).run(
-        input.nextStatus, input.conflictGroupId, confirmedBy, confirmedAt, revokedAt, now,
-        input.id, input.personaId, input.expectedStatus,
-      );
-      if (result.changes === 0) throw new Error("knowledge_status_changed");
-      changed.push(getPersonaKnowledgeItem(input.kind, input.id, input.personaId)!);
+  return database.transaction(() => setPersonaKnowledgeStatusesWithDb(database, inputs))();
+}
+
+export function reviewPersonaKnowledgeAtomically(
+  input: PersonaKnowledgeReviewInput,
+): PersonaKnowledgeReviewResult {
+  const database = getDb();
+  const review = database.transaction(() => {
+    let item = getPersonaKnowledgeItemWithDb(database, input.kind, input.id, input.personaId);
+    if (!item) throw new Error("knowledge_not_found");
+
+    if (input.edits !== undefined) {
+      requirePersonaKnowledgeEditsAllowed(item, input.action);
+      const updated = updatePersonaKnowledgeCandidateWithDb(database, {
+        kind: item.kind,
+        id: item.id,
+        personaId: item.personaId,
+        expectedStatus: item.status as "pending" | "conflicted",
+        patch: input.edits,
+      });
+      if (!updated) throw new Error("knowledge_status_changed");
+      item = updated;
     }
-    return changed;
-  })();
+
+    const confirmedFacts = input.action === "confirm" && item.kind === "fact"
+      ? findConfirmedFactsWithDb(database, item.personaId, item.factType, item.factKey)
+      : [];
+    const plan = planPersonaKnowledgeReview({
+      item,
+      confirmedFacts,
+      actorUserId: input.actorUserId,
+      action: input.action,
+      conflictGroupId: randomUUID(),
+    });
+    const changed = setPersonaKnowledgeStatusesWithDb(database, plan.statusChanges);
+    return buildPersonaKnowledgeReviewResult(item, plan, changed);
+  });
+  return review.immediate();
 }
 
 export function revokePersonaSource(

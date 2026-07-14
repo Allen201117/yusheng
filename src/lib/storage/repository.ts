@@ -20,6 +20,7 @@ import {
   findConfirmedFacts,
   getCurrentVoiceAuthorization,
   replaceVoiceAuthorization,
+  reviewPersonaKnowledgeAtomically,
   revokeVoiceAuthorization,
   revokePersonaSource,
   setPersonaKnowledgeStatuses,
@@ -127,6 +128,9 @@ export function createLocalRepository(): AppRepository {
       return updatePersonaKnowledgeCandidate(input);
     },
     async setPersonaKnowledgeStatuses(inputs) { return setPersonaKnowledgeStatuses(inputs); },
+    async reviewPersonaKnowledgeAtomically(input) {
+      return reviewPersonaKnowledgeAtomically(input);
+    },
     async revokePersonaSource(sourceId, personaId, actorUserId) {
       return revokePersonaSource(sourceId, personaId, actorUserId);
     },

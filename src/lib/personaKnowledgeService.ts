@@ -1,19 +1,22 @@
-import { randomUUID } from "node:crypto";
-
 import { factsConflict, requireKnowledgeTransition } from "./personaKnowledge";
 import type {
   AppRepository,
   PersonaFact,
   PersonaKnowledgeItem,
-  PersonaKnowledgeKind,
+  PersonaKnowledgeReviewInput,
+  PersonaKnowledgeReviewResult,
   PersonaKnowledgeStatus,
+  PersonaKnowledgeStatusChange,
 } from "./storage/types";
 
-type ReviewAction = "confirm" | "reject" | "revoke";
+export type PersonaKnowledgeReviewPlan = {
+  statusChanges: PersonaKnowledgeStatusChange[];
+  conflictIds: string[];
+};
 
-type StatusChange = Parameters<AppRepository["setPersonaKnowledgeStatuses"]>[0][number];
-
-function statusForAction(action: ReviewAction): PersonaKnowledgeStatus {
+function statusForAction(
+  action: PersonaKnowledgeReviewInput["action"],
+): PersonaKnowledgeStatus {
   if (action === "confirm") return "confirmed";
   if (action === "reject") return "rejected";
   return "revoked";
@@ -24,7 +27,7 @@ function statusChange(
   nextStatus: PersonaKnowledgeStatus,
   actorUserId: string,
   conflictGroupId: string | null = null,
-): StatusChange {
+): PersonaKnowledgeStatusChange {
   requireKnowledgeTransition(item.status, nextStatus);
   return {
     kind: item.kind,
@@ -37,82 +40,105 @@ function statusChange(
   };
 }
 
-export async function reviewPersonaKnowledge(input: {
-  repository: AppRepository;
-  personaId: string;
+export function requirePersonaKnowledgeEditsAllowed(
+  item: PersonaKnowledgeItem,
+  action: PersonaKnowledgeReviewInput["action"],
+): void {
+  if (item.status === "pending" || item.status === "conflicted") return;
+  requireKnowledgeTransition(item.status, statusForAction(action));
+  throw new Error(`invalid_transition:${item.status}:pending`);
+}
+
+export function planPersonaKnowledgeReview(input: {
+  item: PersonaKnowledgeItem;
+  confirmedFacts: PersonaFact[];
   actorUserId: string;
-  kind: PersonaKnowledgeKind;
-  id: string;
-  action: ReviewAction;
-  edits?: Record<string, string | string[] | null>;
-}): Promise<{ item: PersonaKnowledgeItem; conflicts: PersonaFact[] }> {
-  let item = await input.repository.getPersonaKnowledgeItem(
-    input.kind,
-    input.id,
-    input.personaId,
-  );
-  if (!item) {
-    throw new Error("knowledge_not_found");
-  }
-
-  if (input.edits !== undefined) {
-    if (item.status !== "pending" && item.status !== "conflicted") {
-      requireKnowledgeTransition(item.status, statusForAction(input.action));
-      throw new Error(`invalid_transition:${item.status}:pending`);
-    }
-    const updated = await input.repository.updatePersonaKnowledgeCandidate({
-      kind: item.kind,
-      id: item.id,
-      personaId: item.personaId,
-      expectedStatus: item.status,
-      patch: input.edits,
-    });
-    if (!updated) {
-      throw new Error("knowledge_status_changed");
-    }
-    item = updated;
-  }
-
+  action: PersonaKnowledgeReviewInput["action"];
+  conflictGroupId: string;
+}): PersonaKnowledgeReviewPlan {
   const nextStatus = statusForAction(input.action);
-  if (input.action !== "confirm" || item.kind !== "fact") {
-    const changed = await input.repository.setPersonaKnowledgeStatuses([
-      statusChange(item, nextStatus, input.actorUserId),
-    ]);
-    return { item: changed[0], conflicts: [] };
+  if (input.action !== "confirm" || input.item.kind !== "fact") {
+    return {
+      statusChanges: [statusChange(input.item, nextStatus, input.actorUserId)],
+      conflictIds: [],
+    };
   }
 
-  requireKnowledgeTransition(item.status, "confirmed");
-  const confirmedFacts = await input.repository.findConfirmedFacts(
-    item.personaId,
-    item.factType,
-    item.factKey,
-  );
-  const conflicts = confirmedFacts.filter((fact) => factsConflict(item, fact));
-
-  if (conflicts.length === 0) {
-    const changed = await input.repository.setPersonaKnowledgeStatuses([
-      statusChange(item, "confirmed", input.actorUserId),
-    ]);
-    return { item: changed[0], conflicts: [] };
+  requireKnowledgeTransition(input.item.status, "confirmed");
+  const factItem = input.item;
+  const hasConflict = input.confirmedFacts.some((fact) => factsConflict(factItem, fact));
+  if (!hasConflict) {
+    return {
+      statusChanges: [statusChange(input.item, "confirmed", input.actorUserId)],
+      conflictIds: [],
+    };
   }
 
-  const conflictGroupId = randomUUID();
-  const batch = [
-    ...conflicts.map((fact) => statusChange(
-      fact,
-      "conflicted",
-      input.actorUserId,
-      conflictGroupId,
-    )),
-    statusChange(item, "conflicted", input.actorUserId, conflictGroupId),
-  ];
-  const changed = await input.repository.setPersonaKnowledgeStatuses(batch);
-  const changedItem = changed.find((candidate) => (
-    candidate.kind === item.kind && candidate.id === item.id
-  ))!;
-  const changedConflicts = changed.filter((candidate): candidate is PersonaFact => (
-    candidate.kind === "fact" && candidate.id !== item.id
-  ));
+  return {
+    statusChanges: [
+      ...input.confirmedFacts.map((fact) => statusChange(
+        fact,
+        "conflicted",
+        input.actorUserId,
+        input.conflictGroupId,
+      )),
+      statusChange(input.item, "conflicted", input.actorUserId, input.conflictGroupId),
+    ],
+    conflictIds: input.confirmedFacts.map((fact) => fact.id),
+  };
+}
 
-  return { item: changedItem, conflicts: changedConflicts };
+function itemKey(item: Pick<PersonaKnowledgeItem, "kind" | "id" | "personaId">): string {
+  return `${item.personaId}\u0000${item.kind}\u0000${item.id}`;
+}
+
+export function buildPersonaKnowledgeReviewResult(
+  reviewedItem: PersonaKnowledgeItem,
+  plan: PersonaKnowledgeReviewPlan,
+  changedItems: PersonaKnowledgeItem[],
+): PersonaKnowledgeReviewResult {
+  if (changedItems.length !== plan.statusChanges.length) {
+    throw new Error("invalid_knowledge_review_result");
+  }
+
+  const expected = new Map<string, PersonaKnowledgeStatusChange>();
+  for (const change of plan.statusChanges) {
+    const key = itemKey(change);
+    if (expected.has(key)) throw new Error("invalid_knowledge_review_result");
+    expected.set(key, change);
+  }
+  const actual = new Map<string, PersonaKnowledgeItem>();
+  for (const item of changedItems) {
+    const key = itemKey(item);
+    const change = expected.get(key);
+    if (
+      !change
+      || actual.has(key)
+      || item.status !== change.nextStatus
+      || item.conflictGroupId !== change.conflictGroupId
+    ) {
+      throw new Error("invalid_knowledge_review_result");
+    }
+    actual.set(key, item);
+  }
+  if (actual.size !== expected.size) throw new Error("invalid_knowledge_review_result");
+
+  const item = actual.get(itemKey(reviewedItem));
+  if (!item) throw new Error("invalid_knowledge_review_result");
+  const conflicts = plan.conflictIds.map((id) => actual.get(itemKey({
+    kind: "fact",
+    id,
+    personaId: reviewedItem.personaId,
+  }))).filter((candidate): candidate is PersonaFact => candidate?.kind === "fact");
+  if (conflicts.length !== plan.conflictIds.length) {
+    throw new Error("invalid_knowledge_review_result");
+  }
+  return { item, conflicts };
+}
+
+export async function reviewPersonaKnowledge(
+  input: PersonaKnowledgeReviewInput & { repository: AppRepository },
+): Promise<PersonaKnowledgeReviewResult> {
+  const { repository, ...review } = input;
+  return repository.reviewPersonaKnowledgeAtomically(review);
 }

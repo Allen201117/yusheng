@@ -253,3 +253,109 @@ it("persists persona knowledge atomically with scoped edits, status changes, and
   const embedded = dbModule.loadMemoriesWithEmbeddings("persona-1");
   assert.ok(embedded.every((item) => item.id !== "memory-1"));
 });
+
+it("serializes fact reviews and applies edits with the decision", () => {
+  const now = "2026-07-14T03:00:00.000Z";
+  const insert = database.prepare(
+    `INSERT INTO persona_facts
+       (id, persona_id, fact_type, fact_key, content, normalized_value, status, created_at, updated_at)
+     VALUES (?, 'persona-1', 'preference', 'atomic drink', ?, ?, 'pending', ?, ?)`,
+  );
+  insert.run("fact-atomic-tea", "喜欢茶", "茶", now, now);
+  insert.run("fact-atomic-coffee", "喜欢咖啡", "咖啡", now, now);
+
+  const first = dbModule.reviewPersonaKnowledgeAtomically({
+    personaId: "persona-1",
+    actorUserId: "user-1",
+    kind: "fact",
+    id: "fact-atomic-tea",
+    action: "confirm",
+  });
+  assert.equal(first.item.status, "confirmed");
+
+  const second = dbModule.reviewPersonaKnowledgeAtomically({
+    personaId: "persona-1",
+    actorUserId: "user-1",
+    kind: "fact",
+    id: "fact-atomic-coffee",
+    action: "confirm",
+  });
+  assert.equal(second.item.status, "conflicted");
+  assert.deepEqual(second.conflicts.map((item) => item.id), ["fact-atomic-tea"]);
+  assert.equal(second.conflicts[0].conflictGroupId, second.item.conflictGroupId);
+  const statuses = database.prepare(
+    "SELECT id, status FROM persona_facts WHERE id IN (?, ?) ORDER BY id",
+  ).all("fact-atomic-coffee", "fact-atomic-tea") as Array<{ id: string; status: string }>;
+  assert.deepEqual(statuses.map((row) => row.status), ["conflicted", "conflicted"]);
+
+  insert.run("fact-atomic-edited", "喜欢咖啡", "咖啡", now, now);
+  const edited = dbModule.reviewPersonaKnowledgeAtomically({
+    personaId: "persona-1",
+    actorUserId: "user-1",
+    kind: "fact",
+    id: "fact-atomic-edited",
+    action: "confirm",
+    edits: { content: "喜欢茶", normalizedValue: "茶" },
+  });
+  assert.equal(edited.item.status, "confirmed");
+  assert.equal(edited.item.content, "喜欢茶");
+});
+
+it("rolls back edits when the status decision fails", () => {
+  const now = "2026-07-14T04:00:00.000Z";
+  database.prepare(
+    `INSERT INTO persona_facts
+       (id, persona_id, fact_type, fact_key, content, normalized_value, status, created_at, updated_at)
+     VALUES ('fact-rollback', 'persona-1', 'preference', 'rollback drink',
+             '原内容', '原值', 'pending', ?, ?)`,
+  ).run(now, now);
+  database.exec(
+    `CREATE TEMP TRIGGER fail_fact_review_status
+     BEFORE UPDATE OF status ON persona_facts
+     WHEN OLD.id = 'fact-rollback' AND NEW.status = 'confirmed'
+     BEGIN
+       SELECT RAISE(ABORT, 'forced status failure');
+     END`,
+  );
+
+  try {
+    assert.throws(() => dbModule.reviewPersonaKnowledgeAtomically({
+      personaId: "persona-1",
+      actorUserId: "user-1",
+      kind: "fact",
+      id: "fact-rollback",
+      action: "confirm",
+      edits: { content: "改后内容", normalizedValue: "改后值" },
+    }), /forced status failure/);
+  } finally {
+    database.exec("DROP TRIGGER IF EXISTS fail_fact_review_status");
+  }
+
+  const row = database.prepare(
+    "SELECT content, normalized_value, status FROM persona_facts WHERE id = ?",
+  ).get("fact-rollback") as { content: string; normalized_value: string; status: string };
+  assert.deepEqual(row, { content: "原内容", normalized_value: "原值", status: "pending" });
+});
+
+it("does not edit a terminal item", () => {
+  const now = "2026-07-14T05:00:00.000Z";
+  database.prepare(
+    `INSERT INTO persona_facts
+       (id, persona_id, fact_type, fact_key, content, normalized_value, status, created_at, updated_at)
+     VALUES ('fact-terminal', 'persona-1', 'preference', 'terminal drink',
+             '不能改', '原值', 'rejected', ?, ?)`,
+  ).run(now, now);
+
+  assert.throws(() => dbModule.reviewPersonaKnowledgeAtomically({
+    personaId: "persona-1",
+    actorUserId: "user-1",
+    kind: "fact",
+    id: "fact-terminal",
+    action: "confirm",
+    edits: { content: "试图复活", normalizedValue: "新值" },
+  }), /invalid_transition:rejected:confirmed/);
+  const row = database.prepare(
+    "SELECT content, normalized_value, status FROM persona_facts WHERE id = ?",
+  ).get("fact-terminal") as { content: string; normalized_value: string; status: string };
+  assert.deepEqual(row, { content: "不能改", normalized_value: "原值", status: "rejected" });
+});

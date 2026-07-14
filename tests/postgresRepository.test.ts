@@ -516,6 +516,98 @@ it("finds confirmed facts with normalized type and key", async () => {
   assert.deepEqual(fake.calls[0].params, ["persona-1"]);
 });
 
+it("reviews persona knowledge under one transaction-scoped persona lock", async () => {
+  const now = "2026-07-14T00:00:00.000Z";
+  const transactionCalls: Array<{ text: string; params: unknown[] }> = [];
+  let transactions = 0;
+  const pendingRow = {
+    id: "fact-new", persona_id: "persona-1", fact_type: "preference",
+    fact_key: "favorite drink", content: "喜欢咖啡", normalized_value: "咖啡",
+    status: "pending", conflict_group_id: null, confirmed_by: null, confirmed_at: null,
+    revoked_at: null, created_at: now, updated_at: now,
+  };
+  const confirmedRow = {
+    ...pendingRow,
+    id: "fact-old",
+    content: "喜欢茶",
+    normalized_value: "茶",
+    status: "confirmed",
+    confirmed_by: "user-1",
+    confirmed_at: now,
+  };
+  const transactionExecutor: SqlExecutor = {
+    async query<T extends Record<string, unknown>>(text: string, params: unknown[] = []) {
+      transactionCalls.push({ text, params });
+      if (text.includes("pg_advisory_xact_lock")) return [] as T[];
+      if (text.includes("FROM persona_facts") && text.includes("WHERE id = $1")) {
+        return [pendingRow] as unknown as T[];
+      }
+      if (text.includes("FROM persona_facts") && text.includes("status = 'confirmed'")) {
+        return [confirmedRow] as unknown as T[];
+      }
+      if (text.includes("UPDATE persona_facts") && text.includes("status = 'pending'")) {
+        return [{
+          ...pendingRow,
+          content: params[3],
+          normalized_value: params[4],
+        }] as unknown as T[];
+      }
+      if (text.includes("UPDATE persona_facts")) {
+        const source = params[0] === "fact-old" ? confirmedRow : pendingRow;
+        return [{
+          ...source,
+          status: params[3],
+          confirmed_by: params[3] === "confirmed" ? params[4] : null,
+          confirmed_at: params[3] === "confirmed" ? now : null,
+          conflict_group_id: params[5],
+          updated_at: now,
+        }] as unknown as T[];
+      }
+      throw new Error(`unexpected transaction query: ${text}`);
+    },
+    async transaction() {
+      throw new Error("nested_transaction");
+    },
+  };
+  const executor: SqlExecutor = {
+    async query() {
+      throw new Error("review escaped transaction");
+    },
+    async transaction<T>(work: (transaction: SqlExecutor) => Promise<T>) {
+      transactions += 1;
+      return work(transactionExecutor);
+    },
+  };
+  const repo = createPostgresRepository(executor);
+
+  const result = await repo.reviewPersonaKnowledgeAtomically({
+    personaId: "persona-1",
+    actorUserId: "user-1",
+    kind: "fact",
+    id: "fact-new",
+    action: "confirm",
+    edits: { content: "改后喜欢咖啡", normalizedValue: "咖啡" },
+  });
+
+  assert.equal(transactions, 1);
+  assert.match(transactionCalls[0].text, /pg_advisory_xact_lock/);
+  assert.deepEqual(transactionCalls[0].params, ["persona-1"]);
+  const itemReadIndex = transactionCalls.findIndex((call) =>
+    call.text.includes("FROM persona_facts") && call.text.includes("WHERE id = $1"));
+  assert.ok(itemReadIndex > 0);
+  const editIndex = transactionCalls.findIndex((call) =>
+    call.text.includes("UPDATE persona_facts") && call.text.includes("status = 'pending'"));
+  const conflictReadIndex = transactionCalls.findIndex((call) =>
+    call.text.includes("FROM persona_facts") && call.text.includes("status = 'confirmed'"));
+  const statusIndex = transactionCalls.findIndex((call) =>
+    call.text.includes("UPDATE persona_facts") && call.text.includes("status = $4"));
+  assert.ok(itemReadIndex < editIndex && editIndex < conflictReadIndex && conflictReadIndex < statusIndex);
+  assert.equal(result.item.id, "fact-new");
+  assert.equal(result.item.status, "conflicted");
+  assert.deepEqual(result.conflicts.map((item) => item.id), ["fact-old"]);
+  assert.equal(result.conflicts[0].conflictGroupId, result.item.conflictGroupId);
+});
+
 it("uses confirmed relationship memories and compare-and-set status updates", async () => {
   const now = "2026-07-14T00:00:00.000Z";
   const fake = createFakeSql((text, params) => {
