@@ -85,6 +85,30 @@ it("adds owner-scoped auditable voice authorization records", async () => {
   assert.match(sql, /WHERE status IN \('pending_review', 'approved'\)/);
 });
 
+it("adds persona knowledge tables and idempotently copies legacy memories", async () => {
+  const sql = await readFile(
+    new URL("../migrations/004_persona_knowledge.sql", import.meta.url),
+    "utf8",
+  );
+
+  for (const table of [
+    "persona_sources",
+    "persona_facts",
+    "relationship_memories",
+    "speech_style_items",
+    "persona_item_sources",
+  ]) {
+    assert.match(sql, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}`));
+  }
+  assert.match(
+    sql,
+    /status text NOT NULL CHECK \(status IN \('pending', 'confirmed', 'rejected', 'conflicted', 'revoked'\)\)/,
+  );
+  assert.match(sql, /INSERT INTO relationship_memories[\s\S]*SELECT[\s\S]*FROM memories/);
+  assert.match(sql, /ON CONFLICT \(id\) DO NOTHING/);
+  assert.match(sql, /WHERE status = 'confirmed'/);
+});
+
 it("applies a pending migration and records it in one transaction", async () => {
   const queries: Array<{ text: string; params: unknown[] }> = [];
   let transactions = 0;

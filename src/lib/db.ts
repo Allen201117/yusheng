@@ -28,6 +28,7 @@ export function getDb(): Database.Database {
   _db.pragma("foreign_keys = ON");
   initSchema(_db);
   migrateUserColumn(_db);
+  migrateLegacyPersonaKnowledge(_db);
   return _db;
 }
 
@@ -102,6 +103,91 @@ function initSchema(db: Database.Database) {
       WHERE status IN ('pending_review','approved');
     CREATE INDEX IF NOT EXISTS idx_voice_authorizations_owner_created
       ON voice_authorizations(user_id, voice_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS persona_sources (
+      id                 TEXT PRIMARY KEY,
+      persona_id         TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+      source_type        TEXT NOT NULL CHECK (source_type IN ('manual_text','chat_export','audio_transcript','text_document','legacy_import')),
+      content_text       TEXT,
+      object_path        TEXT,
+      checksum_algorithm TEXT NOT NULL CHECK (checksum_algorithm IN ('sha256','legacy_id')),
+      checksum           TEXT NOT NULL,
+      status             TEXT NOT NULL CHECK (status IN ('ready','failed','revoked')),
+      created_by         TEXT NOT NULL,
+      created_at         TEXT NOT NULL,
+      revoked_at         TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS persona_facts (
+      id                TEXT PRIMARY KEY,
+      persona_id        TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+      fact_type         TEXT NOT NULL,
+      fact_key          TEXT NOT NULL,
+      content           TEXT NOT NULL,
+      normalized_value  TEXT NOT NULL,
+      status            TEXT NOT NULL CHECK (status IN ('pending','confirmed','rejected','conflicted','revoked')),
+      conflict_group_id TEXT,
+      confirmed_by      TEXT,
+      confirmed_at      TEXT,
+      revoked_at        TEXT,
+      created_at        TEXT NOT NULL,
+      updated_at        TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS relationship_memories (
+      id                TEXT PRIMARY KEY,
+      persona_id        TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+      content           TEXT NOT NULL,
+      occurred_at       TEXT,
+      location          TEXT,
+      participants      TEXT NOT NULL DEFAULT '[]',
+      embedding         BLOB,
+      status            TEXT NOT NULL CHECK (status IN ('pending','confirmed','rejected','conflicted','revoked')),
+      conflict_group_id TEXT,
+      confirmed_by      TEXT,
+      confirmed_at      TEXT,
+      revoked_at        TEXT,
+      created_at        TEXT NOT NULL,
+      updated_at        TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS speech_style_items (
+      id                TEXT PRIMARY KEY,
+      persona_id        TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+      category          TEXT NOT NULL,
+      content           TEXT NOT NULL,
+      example           TEXT,
+      status            TEXT NOT NULL CHECK (status IN ('pending','confirmed','rejected','conflicted','revoked')),
+      conflict_group_id TEXT,
+      confirmed_by      TEXT,
+      confirmed_at      TEXT,
+      revoked_at        TEXT,
+      created_at        TEXT NOT NULL,
+      updated_at        TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS persona_item_sources (
+      item_kind     TEXT NOT NULL CHECK (item_kind IN ('fact','relationship_memory','speech_style')),
+      item_id       TEXT NOT NULL,
+      source_id     TEXT NOT NULL REFERENCES persona_sources(id) ON DELETE CASCADE,
+      source_excerpt TEXT NOT NULL DEFAULT '',
+      created_at    TEXT NOT NULL,
+      PRIMARY KEY (item_kind, item_id, source_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_persona_sources_persona
+      ON persona_sources(persona_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_persona_facts_confirmed
+      ON persona_facts(persona_id, fact_type, fact_key)
+      WHERE status = 'confirmed';
+    CREATE INDEX IF NOT EXISTS idx_relationship_memories_confirmed
+      ON relationship_memories(persona_id, created_at DESC)
+      WHERE status = 'confirmed';
+    CREATE INDEX IF NOT EXISTS idx_speech_style_items_confirmed
+      ON speech_style_items(persona_id, category, created_at DESC)
+      WHERE status = 'confirmed';
+    CREATE INDEX IF NOT EXISTS idx_persona_item_sources_source
+      ON persona_item_sources(source_id);
   `);
 }
 
@@ -111,6 +197,55 @@ function migrateUserColumn(db: Database.Database) {
   if (!cols.some((c) => c.name === "user_id")) {
     db.exec(`ALTER TABLE personas ADD COLUMN user_id TEXT NOT NULL DEFAULT '__legacy__'`);
   }
+}
+
+export function migrateLegacyPersonaKnowledge(db: Database.Database) {
+  db.transaction(() => {
+    db.prepare(
+      `INSERT OR IGNORE INTO persona_sources
+         (id, persona_id, source_type, checksum_algorithm, checksum, status, created_by, created_at)
+       SELECT
+         'legacy-memory-source:' || p.id,
+         p.id,
+         'legacy_import',
+         'legacy_id',
+         'legacy-memory-source:' || p.id,
+         'ready',
+         p.user_id,
+         p.created_at
+       FROM personas p
+       WHERE EXISTS (
+         SELECT 1 FROM memories m WHERE m.persona_id = p.id
+       )`,
+    ).run();
+
+    db.prepare(
+      `INSERT OR IGNORE INTO relationship_memories
+         (id, persona_id, content, embedding, status, confirmed_at, created_at, updated_at)
+       SELECT
+         m.id,
+         m.persona_id,
+         m.content,
+         m.embedding,
+         'confirmed',
+         m.created_at,
+         m.created_at,
+         m.created_at
+       FROM memories m`,
+    ).run();
+
+    db.prepare(
+      `INSERT OR IGNORE INTO persona_item_sources
+         (item_kind, item_id, source_id, source_excerpt, created_at)
+       SELECT
+         'relationship_memory',
+         m.id,
+         'legacy-memory-source:' || m.persona_id,
+         m.content,
+         m.created_at
+       FROM memories m`,
+    ).run();
+  })();
 }
 
 // ------- User -------
