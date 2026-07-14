@@ -38,6 +38,135 @@ export type InsertMemoryInput = {
   embedding: Float32Array;
 };
 
+export type PersonaKnowledgeStatus =
+  | "pending"
+  | "confirmed"
+  | "rejected"
+  | "conflicted"
+  | "revoked";
+
+export type PersonaKnowledgeKind =
+  | "fact"
+  | "relationship_memory"
+  | "speech_style";
+
+export type PersonaSourceType =
+  | "manual_text"
+  | "chat_export"
+  | "audio_transcript"
+  | "text_document"
+  | "legacy_import";
+
+export type PersonaSource = {
+  id: string;
+  personaId: string;
+  sourceType: PersonaSourceType;
+  contentText: string | null;
+  objectPath: string | null;
+  checksumAlgorithm: "sha256" | "legacy_id";
+  checksum: string;
+  status: "ready" | "failed" | "revoked";
+  createdBy: string;
+  createdAt: string;
+  revokedAt: string | null;
+};
+
+export type PersonaFact = {
+  kind: "fact";
+  id: string;
+  personaId: string;
+  factType: string;
+  factKey: string;
+  content: string;
+  normalizedValue: string;
+  status: PersonaKnowledgeStatus;
+  conflictGroupId: string | null;
+  confirmedBy: string | null;
+  confirmedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RelationshipMemory = {
+  kind: "relationship_memory";
+  id: string;
+  personaId: string;
+  content: string;
+  occurredAt: string | null;
+  location: string | null;
+  participants: string[];
+  status: PersonaKnowledgeStatus;
+  conflictGroupId: string | null;
+  confirmedBy: string | null;
+  confirmedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SpeechStyleItem = {
+  kind: "speech_style";
+  id: string;
+  personaId: string;
+  category: string;
+  content: string;
+  example: string | null;
+  status: PersonaKnowledgeStatus;
+  conflictGroupId: string | null;
+  confirmedBy: string | null;
+  confirmedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PersonaKnowledgeItem = PersonaFact | RelationshipMemory | SpeechStyleItem;
+
+export type PersonaKnowledgeBundle = {
+  sources: PersonaSource[];
+  facts: PersonaFact[];
+  memories: RelationshipMemory[];
+  styles: SpeechStyleItem[];
+};
+
+export type CreatePersonaSourceInput = Omit<PersonaSource, "createdAt" | "revokedAt">;
+
+export type CreatePersonaKnowledgeCandidateInput =
+  | {
+      kind: "fact";
+      id: string;
+      personaId: string;
+      factType: string;
+      factKey: string;
+      content: string;
+      normalizedValue: string;
+      sourceId: string;
+      sourceExcerpt: string;
+    }
+  | {
+      kind: "relationship_memory";
+      id: string;
+      personaId: string;
+      content: string;
+      occurredAt: string | null;
+      location: string | null;
+      participants: string[];
+      embedding: Float32Array | null;
+      sourceId: string;
+      sourceExcerpt: string;
+    }
+  | {
+      kind: "speech_style";
+      id: string;
+      personaId: string;
+      category: string;
+      content: string;
+      example: string | null;
+      sourceId: string;
+      sourceExcerpt: string;
+    };
+
 export type Message = {
   id: string;
   personaId: string;
