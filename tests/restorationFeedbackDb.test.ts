@@ -9,6 +9,7 @@ let dataDir = "";
 let previousDataDir: string | undefined;
 let database: Database.Database;
 let dbModule: typeof import("../src/lib/db");
+let repository: import("../src/lib/storage/types").AppRepository;
 
 const NOW = "2026-07-14T10:00:00.000Z";
 
@@ -18,6 +19,8 @@ before(async () => {
   process.env.DATA_DIR = dataDir;
   dbModule = await import("../src/lib/db");
   database = dbModule.getDb();
+  const repositoryModule = await import("../src/lib/storage/repository");
+  repository = repositoryModule.createLocalRepository();
 });
 
 after(async () => {
@@ -250,6 +253,108 @@ it("binds the session cohort to the authorization speaker status", () => {
     /FOREIGN KEY constraint failed|conversation_session_authorization_mismatch/,
   );
   insertSession("session-cohort-match", "persona-1", "user-1", "voice-1", "auth-1", "living", "rated");
+});
+
+it("atomically reuses fresh sessions, expires stale sessions, and isolates owners", async () => {
+  const first = await repository.getOrStartConversationSession({
+    proposedSessionId: "session-first",
+    personaId: "persona-1",
+    evaluatorUserId: "user-1",
+    voiceId: "voice-1",
+    voiceAuthorizationId: "auth-1",
+    cohort: "living",
+    now: "2026-07-14T10:00:00.000Z",
+    staleBefore: "2026-07-14T09:30:00.000Z",
+  });
+  const reused = await repository.getOrStartConversationSession({
+    proposedSessionId: "session-unused",
+    personaId: "persona-1",
+    evaluatorUserId: "user-1",
+    voiceId: "voice-1",
+    voiceAuthorizationId: "auth-1",
+    cohort: "living",
+    now: "2026-07-14T10:29:00.000Z",
+    staleBefore: "2026-07-14T09:59:00.000Z",
+  });
+  assert.equal(reused.id, first.id);
+  assert.equal(reused.voiceAuthorizationId, "auth-1");
+  assert.equal(reused.cohort, "living");
+
+  const replacement = await repository.getOrStartConversationSession({
+    proposedSessionId: "session-replacement",
+    personaId: "persona-1",
+    evaluatorUserId: "user-1",
+    voiceId: "voice-1",
+    voiceAuthorizationId: "auth-1",
+    cohort: "living",
+    now: "2026-07-14T10:31:00.000Z",
+    staleBefore: "2026-07-14T10:01:00.000Z",
+  });
+  assert.equal(replacement.id, "session-replacement");
+  assert.equal(
+    (database.prepare("SELECT status FROM conversation_sessions WHERE id = ?")
+      .get(first.id) as { status: string }).status,
+    "expired",
+  );
+
+  await assert.rejects(repository.getOrStartConversationSession({
+    proposedSessionId: "session-owner-mismatch",
+    personaId: "persona-1",
+    evaluatorUserId: "user-2",
+    voiceId: "voice-1",
+    voiceAuthorizationId: "auth-1",
+    cohort: "living",
+    now: NOW,
+    staleBefore: "2026-07-14T09:30:00.000Z",
+  }), /conversation_session_owner_mismatch/);
+
+  const otherOwner = await repository.getOrStartConversationSession({
+    proposedSessionId: "session-other-owner",
+    personaId: "persona-2",
+    evaluatorUserId: "user-2",
+    voiceId: "voice-2",
+    voiceAuthorizationId: "auth-2",
+    cohort: "deceased",
+    now: NOW,
+    staleBefore: "2026-07-14T09:30:00.000Z",
+  });
+  assert.equal(otherOwner.id, "session-other-owner");
+  assert.equal(otherOwner.cohort, "deceased");
+});
+
+it("serializes concurrent session starts to one active session", async () => {
+  const input = {
+    personaId: "persona-1",
+    evaluatorUserId: "user-1",
+    voiceId: "voice-1",
+    voiceAuthorizationId: "auth-1",
+    cohort: "living" as const,
+    now: NOW,
+    staleBefore: "2026-07-14T09:30:00.000Z",
+  };
+  const [first, second] = await Promise.all([
+    repository.getOrStartConversationSession({ ...input, proposedSessionId: "session-concurrent-a" }),
+    repository.getOrStartConversationSession({ ...input, proposedSessionId: "session-concurrent-b" }),
+  ]);
+  assert.equal(first.id, second.id);
+  assert.equal(
+    (database.prepare("SELECT COUNT(*) AS count FROM conversation_sessions WHERE status = 'active'")
+      .get() as { count: number }).count,
+    1,
+  );
+});
+
+it("rolls back a turn when its session belongs to another persona", async () => {
+  insertSession();
+  await assert.rejects(repository.startConversationTurn({
+    turnId: "turn-mismatch",
+    sessionId: "session-1",
+    personaId: "persona-2",
+    userMessageId: "message-mismatch",
+    content: "不应保存",
+  }), /conversation_turn_session_mismatch/);
+  assert.equal(database.prepare("SELECT id FROM messages WHERE id = ?").get("message-mismatch"), undefined);
+  assert.equal(database.prepare("SELECT id FROM conversation_turns WHERE id = ?").get("turn-mismatch"), undefined);
 });
 
 it("keeps legacy turn session links nullable", () => {

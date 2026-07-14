@@ -11,6 +11,7 @@ import type {
   AppRepository,
   ConfirmedConversationKnowledge,
   ConversationEmbeddingUpdate,
+  ConversationSession,
   ConversationTurn,
   ConversationTurnEvidence,
   CreatePersonaKnowledgeCandidateInput,
@@ -144,6 +145,7 @@ type MessageRow = {
 
 type ConversationTurnRow = {
   id: string;
+  session_id: string | null;
   persona_id: string;
   user_message_id: string;
   assistant_message_id: string | null;
@@ -156,6 +158,19 @@ type ConversationTurnRow = {
   total_ms: number | string | null;
   created_at: Date | string;
   updated_at: Date | string;
+};
+
+type ConversationSessionRow = {
+  id: string;
+  persona_id: string;
+  evaluator_user_id: string;
+  voice_id: string;
+  voice_authorization_id: string;
+  cohort: ConversationSession["cohort"];
+  status: ConversationSession["status"];
+  started_at: Date | string;
+  last_activity_at: Date | string;
+  rated_at: Date | string | null;
 };
 
 type ConversationTurnEvidenceRow = {
@@ -620,7 +635,7 @@ function isValidConversationVector(value: Float32Array): boolean {
 }
 
 const CONVERSATION_TURN_COLUMNS = `
-  id, persona_id, user_message_id, assistant_message_id, mode, status,
+  id, session_id, persona_id, user_message_id, assistant_message_id, mode, status,
   boundary_kind, degradation_reason, retrieval_ms, first_sentence_ms, total_ms,
   created_at, updated_at
 `;
@@ -628,6 +643,7 @@ const CONVERSATION_TURN_COLUMNS = `
 function mapConversationTurn(row: ConversationTurnRow): ConversationTurn {
   return {
     id: row.id,
+    sessionId: row.session_id,
     personaId: row.persona_id,
     userMessageId: row.user_message_id,
     assistantMessageId: row.assistant_message_id,
@@ -640,6 +656,21 @@ function mapConversationTurn(row: ConversationTurnRow): ConversationTurn {
     totalMs: row.total_ms === null ? null : Number(row.total_ms),
     createdAt: toIsoString(row.created_at),
     updatedAt: toIsoString(row.updated_at),
+  };
+}
+
+function mapConversationSession(row: ConversationSessionRow): ConversationSession {
+  return {
+    id: row.id,
+    personaId: row.persona_id,
+    evaluatorUserId: row.evaluator_user_id,
+    voiceId: row.voice_id,
+    voiceAuthorizationId: row.voice_authorization_id,
+    cohort: row.cohort,
+    status: row.status,
+    startedAt: toIsoString(row.started_at),
+    lastActivityAt: toIsoString(row.last_activity_at),
+    ratedAt: row.rated_at === null ? null : toIsoString(row.rated_at),
   };
 }
 
@@ -1404,8 +1435,77 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       });
     },
 
+    async getOrStartConversationSession(input): Promise<ConversationSession> {
+      return sql.transaction(async (transaction) => {
+        const personas = await transaction.query<{ id: string }>(
+          `SELECT id FROM personas
+           WHERE id = $1 AND user_id = $2 AND voice_id = $3
+           FOR UPDATE`,
+          [input.personaId, input.evaluatorUserId, input.voiceId],
+        );
+        if (personas.length !== 1) throw new Error("conversation_session_owner_mismatch");
+
+        await transaction.query<{ id: string }>(
+          `UPDATE conversation_sessions
+           SET status = 'expired', last_activity_at = $3
+           WHERE persona_id = $1 AND evaluator_user_id = $2
+             AND status = 'active' AND last_activity_at < $4
+           RETURNING id`,
+          [input.personaId, input.evaluatorUserId, input.now, input.staleBefore],
+        );
+
+        const active = await transaction.query<ConversationSessionRow>(
+          `SELECT id, persona_id, evaluator_user_id, voice_id, voice_authorization_id,
+                  cohort, status, started_at, last_activity_at, rated_at
+           FROM conversation_sessions
+           WHERE persona_id = $1 AND evaluator_user_id = $2 AND status = 'active'
+           LIMIT 1
+           FOR UPDATE`,
+          [input.personaId, input.evaluatorUserId],
+        );
+        if (active[0]) return mapConversationSession(active[0]);
+
+        const created = await transaction.query<ConversationSessionRow>(
+          `INSERT INTO conversation_sessions
+             (id, persona_id, evaluator_user_id, voice_id, voice_authorization_id,
+              cohort, status, started_at, last_activity_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $7)
+           RETURNING id, persona_id, evaluator_user_id, voice_id, voice_authorization_id,
+                     cohort, status, started_at, last_activity_at, rated_at`,
+          [
+            input.proposedSessionId,
+            input.personaId,
+            input.evaluatorUserId,
+            input.voiceId,
+            input.voiceAuthorizationId,
+            input.cohort,
+            input.now,
+          ],
+        );
+        if (created.length !== 1) throw new Error("conversation_session_start_failed");
+        return mapConversationSession(created[0]);
+      });
+    },
+
     async startConversationTurn(input): Promise<ConversationTurn> {
       return sql.transaction(async (transaction) => {
+        if (input.sessionId !== null) {
+          const sessions = await transaction.query<{ id: string }>(
+            `SELECT id FROM conversation_sessions
+             WHERE id = $1 AND persona_id = $2 AND status = 'active'
+             FOR UPDATE`,
+            [input.sessionId, input.personaId],
+          );
+          if (sessions.length !== 1) throw new Error("conversation_turn_session_mismatch");
+          const touched = await transaction.query<{ id: string }>(
+            `UPDATE conversation_sessions
+             SET last_activity_at = now()
+             WHERE id = $1 AND persona_id = $2 AND status = 'active'
+             RETURNING id`,
+            [input.sessionId, input.personaId],
+          );
+          if (touched.length !== 1) throw new Error("conversation_turn_session_mismatch");
+        }
         const messages = await transaction.query<{ id: string }>(
           `INSERT INTO messages (id, persona_id, role, content)
            VALUES ($1, $2, 'user', $3)
@@ -1414,10 +1514,10 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
         );
         if (messages.length !== 1) throw new Error("conversation_user_message_persistence_failed");
         const turns = await transaction.query<ConversationTurnRow>(
-          `INSERT INTO conversation_turns (id, persona_id, user_message_id, status)
-           VALUES ($1, $2, $3, 'started')
+          `INSERT INTO conversation_turns (id, persona_id, user_message_id, session_id, status)
+           VALUES ($1, $2, $3, $4, 'started')
            RETURNING ${CONVERSATION_TURN_COLUMNS}`,
-          [input.turnId, input.personaId, input.userMessageId],
+          [input.turnId, input.personaId, input.userMessageId, input.sessionId],
         );
         if (turns.length !== 1) throw new Error("conversation_turn_start_failed");
         return mapConversationTurn(turns[0]);

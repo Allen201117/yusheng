@@ -25,6 +25,7 @@ import {
   loadConfirmedConversationKnowledge,
   findConfirmedFacts,
   getCurrentVoiceAuthorization,
+  getOrStartConversationSession,
   replaceVoiceAuthorization,
   reviewPersonaKnowledgeAtomically,
   revokeVoiceAuthorization,
@@ -155,6 +156,9 @@ export function createLocalRepository(): AppRepository {
     },
     async storeConfirmedConversationEmbeddings(personaId, updates) {
       storeConfirmedConversationEmbeddings(personaId, updates);
+    },
+    async getOrStartConversationSession(input) {
+      return getOrStartConversationSession(input);
     },
     async startConversationTurn(input) { return startConversationTurn(input); },
     async bindConversationTurnEvidence(input) {

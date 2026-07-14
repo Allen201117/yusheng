@@ -20,6 +20,7 @@ import {
 import type {
   ConfirmedConversationKnowledge,
   ConversationEmbeddingUpdate,
+  ConversationSession,
   ConversationTurn,
   ConversationTurnEvidence,
   CreatePersonaKnowledgeCandidateInput,
@@ -1328,6 +1329,7 @@ function sqliteIso(value: string): string {
 function rowToConversationTurn(row: any): ConversationTurn {
   return {
     id: row.id,
+    sessionId: row.session_id ?? null,
     personaId: row.persona_id,
     userMessageId: row.user_message_id,
     assistantMessageId: row.assistant_message_id,
@@ -1340,6 +1342,21 @@ function rowToConversationTurn(row: any): ConversationTurn {
     totalMs: row.total_ms,
     createdAt: sqliteIso(row.created_at),
     updatedAt: sqliteIso(row.updated_at),
+  };
+}
+
+function rowToConversationSession(row: any): ConversationSession {
+  return {
+    id: row.id,
+    personaId: row.persona_id,
+    evaluatorUserId: row.evaluator_user_id,
+    voiceId: row.voice_id,
+    voiceAuthorizationId: row.voice_authorization_id,
+    cohort: row.cohort,
+    status: row.status,
+    startedAt: sqliteIso(row.started_at),
+    lastActivityAt: sqliteIso(row.last_activity_at),
+    ratedAt: row.rated_at === null ? null : sqliteIso(row.rated_at),
   };
 }
 
@@ -1425,8 +1442,62 @@ export function storeConfirmedConversationEmbeddings(
   })();
 }
 
+export function getOrStartConversationSession(input: {
+  proposedSessionId: string;
+  personaId: string;
+  evaluatorUserId: string;
+  voiceId: string;
+  voiceAuthorizationId: string;
+  cohort: "living" | "deceased";
+  now: string;
+  staleBefore: string;
+}): ConversationSession {
+  const database = getDb();
+  return database.transaction(() => {
+    const persona = database.prepare(
+      `SELECT id FROM personas
+       WHERE id = ? AND user_id = ? AND voice_id = ?`,
+    ).get(input.personaId, input.evaluatorUserId, input.voiceId);
+    if (!persona) throw new Error("conversation_session_owner_mismatch");
+
+    database.prepare(
+      `UPDATE conversation_sessions
+       SET status = 'expired', last_activity_at = ?
+       WHERE persona_id = ? AND evaluator_user_id = ?
+         AND status = 'active' AND last_activity_at < ?`,
+    ).run(input.now, input.personaId, input.evaluatorUserId, input.staleBefore);
+
+    const active = database.prepare(
+      `SELECT * FROM conversation_sessions
+       WHERE persona_id = ? AND evaluator_user_id = ? AND status = 'active'
+       LIMIT 1`,
+    ).get(input.personaId, input.evaluatorUserId);
+    if (active) return rowToConversationSession(active);
+
+    const created = database.prepare(
+      `INSERT INTO conversation_sessions
+         (id, persona_id, evaluator_user_id, voice_id, voice_authorization_id,
+          cohort, status, started_at, last_activity_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
+       RETURNING *`,
+    ).get(
+      input.proposedSessionId,
+      input.personaId,
+      input.evaluatorUserId,
+      input.voiceId,
+      input.voiceAuthorizationId,
+      input.cohort,
+      input.now,
+      input.now,
+    );
+    if (!created) throw new Error("conversation_session_start_failed");
+    return rowToConversationSession(created);
+  }).immediate();
+}
+
 export function startConversationTurn(input: {
   turnId: string;
+  sessionId: string | null;
   personaId: string;
   userMessageId: string;
   content: string;
@@ -1434,16 +1505,25 @@ export function startConversationTurn(input: {
   const database = getDb();
   return database.transaction(() => {
     const now = new Date().toISOString();
+    if (input.sessionId !== null) {
+      const session = database.prepare(
+        `UPDATE conversation_sessions
+         SET last_activity_at = ?
+         WHERE id = ? AND persona_id = ? AND status = 'active'
+         RETURNING id`,
+      ).get(now, input.sessionId, input.personaId);
+      if (!session) throw new Error("conversation_turn_session_mismatch");
+    }
     database.prepare(
       `INSERT INTO messages (id, persona_id, role, content, created_at)
        VALUES (?, ?, 'user', ?, ?)`,
     ).run(input.userMessageId, input.personaId, input.content, now);
     const row = database.prepare(
       `INSERT INTO conversation_turns
-         (id, persona_id, user_message_id, status, created_at, updated_at)
-       VALUES (?, ?, ?, 'started', ?, ?)
+         (id, persona_id, user_message_id, session_id, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'started', ?, ?)
        RETURNING *`,
-    ).get(input.turnId, input.personaId, input.userMessageId, now, now);
+    ).get(input.turnId, input.personaId, input.userMessageId, input.sessionId, now, now);
     if (!row) throw new Error("conversation_turn_start_failed");
     return rowToConversationTurn(row);
   })();

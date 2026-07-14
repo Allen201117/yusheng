@@ -295,6 +295,7 @@ export type ConversationTurnEvidence = {
 
 export type ConversationTurn = {
   id: string;
+  sessionId: string | null;
   personaId: string;
   userMessageId: string;
   assistantMessageId: string | null;
@@ -579,8 +580,19 @@ export interface AppRepository {
     personaId: string,
     updates: ConversationEmbeddingUpdate[],
   ): Promise<void>;
+  getOrStartConversationSession(input: {
+    proposedSessionId: string;
+    personaId: string;
+    evaluatorUserId: string;
+    voiceId: string;
+    voiceAuthorizationId: string;
+    cohort: RestorationCohort;
+    now: string;
+    staleBefore: string;
+  }): Promise<ConversationSession>;
   startConversationTurn(input: {
     turnId: string;
+    sessionId: string | null;
     personaId: string;
     userMessageId: string;
     content: string;

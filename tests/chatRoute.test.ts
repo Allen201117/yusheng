@@ -31,6 +31,7 @@ const persona: Persona = {
 
 const completedTurn = (id: string): ConversationTurn => ({
   id,
+  sessionId: "session-1",
   personaId: persona.id,
   userMessageId: "user-message",
   assistantMessageId: null,
@@ -51,6 +52,7 @@ type FakeOptions = {
   repositoryError?: Error;
   authorization?: "approved" | "pending_review" | "rejected" | "revoked" | null;
   authorizationError?: Error;
+  sessionError?: Error;
   knowledge?: ConfirmedConversationKnowledge;
   loadError?: Error;
   startError?: Error;
@@ -65,6 +67,7 @@ type FakeOptions = {
 function makeRepository(options: FakeOptions = {}) {
   const calls = {
     authorization: 0,
+    sessions: [] as Array<Record<string, unknown>>,
     start: [] as Array<Record<string, unknown>>,
     load: 0,
     stores: [] as Array<Array<{ kind: string; id: string; embedding: Float32Array }>>,
@@ -82,7 +85,23 @@ function makeRepository(options: FakeOptions = {}) {
       calls.authorization++;
       if (options.authorizationError) throw options.authorizationError;
       const status = options.authorization === undefined ? "approved" : options.authorization;
-      return status ? { status } : null;
+      return status ? { id: "auth-1", speakerStatus: "living", status } : null;
+    },
+    async getOrStartConversationSession(input: Record<string, unknown>) {
+      calls.sessions.push(input);
+      if (options.sessionError) throw options.sessionError;
+      return {
+        id: "session-1",
+        personaId: persona.id,
+        evaluatorUserId: "user-1",
+        voiceId: persona.voiceId,
+        voiceAuthorizationId: "auth-1",
+        cohort: "living",
+        status: "active",
+        startedAt: "2026-07-14T10:00:00.000Z",
+        lastActivityAt: "2026-07-14T10:00:00.000Z",
+        ratedAt: null,
+      };
     },
     async startConversationTurn(input: Record<string, unknown>) {
       calls.start.push(input);
@@ -161,6 +180,7 @@ function makeHarness(options: HarnessOptions = {}) {
     isVoiceAuthorizationEnforced: () => options.enforcement ?? true,
     randomUUID: () => `id-${++id}`,
     nowMs: () => clock += 5,
+    nowIso: () => "2026-07-14T10:00:00.000Z",
     logInfo: (event, data) => logs.push({ level: "info", event, data }),
     logError: (event, data) => logs.push({ level: "error", event, data }),
   });
@@ -200,6 +220,7 @@ async function assertUnpersistedEmergency(
   assert.equal(response.status, 200);
   assert.deepEqual(events[0].meta, {
     turnId: "id-1",
+    sessionId: null,
     mode: "boundary",
     boundaryKind,
     degradationReason: null,
@@ -250,6 +271,20 @@ it("stops before retrieval and model when atomic turn start fails", async () => 
   assert.equal(response.status, 500);
   assert.equal(h.calls.load, 0);
   assert.equal(h.modelCalls.length, 0);
+});
+
+it("stops before turn persistence and modeling when session creation fails", async () => {
+  const h = makeHarness({ sessionError: new Error("session db secret") });
+  const response = await h.handlers.POST(postRequest({ personaId: persona.id, text: "hello" }));
+  assert.equal(response.status, 500);
+  assert.deepEqual(await response.json(), {
+    error: "对话会话创建失败，请稍后重试",
+    code: "CHAT_SESSION_START_FAILED",
+  });
+  assert.equal(h.calls.sessions.length, 1);
+  assert.equal(h.calls.start.length, 0);
+  assert.equal(h.modelCalls.length, 0);
+  assert.doesNotMatch(JSON.stringify(h.logs), /session db secret/);
 });
 
 it("still streams self-harm safety guidance when persona lookup storage fails", async () => {
@@ -308,6 +343,8 @@ it("persists every boundary with no evidence, model, speech, or sentence event",
     const response = await h.handlers.POST(postRequest({ personaId: persona.id, text }));
     const events = await sseEvents(response);
     assert.equal(h.calls.start.length, 1, kind);
+    assert.equal(h.calls.start[0].sessionId, null, kind);
+    assert.equal(h.calls.sessions.length, 0, kind);
     assert.equal(h.calls.binds.length, 0, kind);
     assert.equal(h.modelCalls.length, 0, kind);
     assert.equal(h.calls.completes[0].mode, "boundary", kind);
@@ -364,8 +401,20 @@ it("binds confirmed evidence before one model stream and persists legacy and new
   assert.equal(currentQueryMessages.length, 1);
   assert.equal(currentQueryMessages[0].role, "user");
   const meta = events[0].meta as Record<string, unknown>;
+  assert.equal(meta.sessionId, "session-1");
   assert.equal(meta.mode, "grounded");
   assert.equal(meta.speechAllowed, true);
+  assert.deepEqual(h.calls.sessions[0], {
+    proposedSessionId: "id-2",
+    personaId: "persona-1",
+    evaluatorUserId: "user-1",
+    voiceId: "voice-1",
+    voiceAuthorizationId: "auth-1",
+    cohort: "living",
+    now: "2026-07-14T10:00:00.000Z",
+    staleBefore: "2026-07-14T09:30:00.000Z",
+  });
+  assert.equal(h.calls.start[0].sessionId, "session-1");
   assert.deepEqual((meta.evidence as Array<Record<string, unknown>>).map((item) => [item.kind, item.id]), [
     ["fact", "fact-1"], ["relationship_memory", "memory-1"],
   ]);

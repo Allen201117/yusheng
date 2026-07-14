@@ -52,7 +52,9 @@ function resetConversationFixtures() {
     DELETE FROM message_evidence;
     DELETE FROM conversation_turn_evidence;
     DELETE FROM conversation_turns;
+    DELETE FROM conversation_sessions;
     DELETE FROM messages;
+    DELETE FROM voice_authorizations;
     DELETE FROM persona_item_sources;
     DELETE FROM speech_style_items;
     DELETE FROM relationship_memories;
@@ -61,12 +63,30 @@ function resetConversationFixtures() {
     DELETE FROM personas;
   `);
   const now = "2026-07-14T00:00:00.000Z";
+  database.prepare(
+    `INSERT OR IGNORE INTO users (id, email, created_at) VALUES ('user-1', 'one@example.com', ?)`,
+  ).run(now);
   const insertPersona = database.prepare(
     `INSERT INTO personas (id, user_id, name, relation, voice_id, persona_desc, created_at)
      VALUES (?, 'user-1', ?, '母亲', 'voice-1', '', ?)`,
   );
   insertPersona.run("persona-1", "妈妈", now);
   insertPersona.run("persona-2", "阿姨", now);
+  database.prepare(
+    `INSERT INTO voice_authorizations
+       (id, voice_id, user_id, speaker_status, basis, status, notice_version,
+        separate_consent_confirmed, third_party_processing_confirmed,
+        synthetic_disclosure_confirmed, attested_at, created_at)
+     VALUES ('auth-1', 'voice-1', 'user-1', 'living', 'self', 'approved', 'notice-v1',
+             1, 1, 1, ?, ?)`,
+  ).run(now, now);
+  database.prepare(
+    `INSERT INTO conversation_sessions
+       (id, persona_id, evaluator_user_id, voice_id, voice_authorization_id,
+        cohort, status, started_at, last_activity_at)
+     VALUES ('session-1', 'persona-1', 'user-1', 'voice-1', 'auth-1',
+             'living', 'active', ?, ?)`,
+  ).run(now, now);
 }
 
 function insertSource(id: string, personaId: string, status: "ready" | "failed" | "revoked" = "ready") {
@@ -247,6 +267,7 @@ it("atomically persists a grounded turn and freezes selection-time evidence", as
 
   const started = await repository.startConversationTurn({
     turnId: "turn-1",
+    sessionId: "session-1",
     personaId: "persona-1",
     userMessageId: "user-message-1",
     content: "她喜欢喝什么？",
@@ -301,6 +322,7 @@ it("atomically persists a grounded turn and freezes selection-time evidence", as
 
   await repository.startConversationTurn({
     turnId: "turn-after-revoke",
+    sessionId: "session-1",
     personaId: "persona-1",
     userMessageId: "user-after-revoke",
     content: "再问一次",
@@ -326,6 +348,7 @@ it("enforces turn mode rules, compare-and-set failure status, and transaction ro
 
   await repository.startConversationTurn({
     turnId: "turn-invalid-bind",
+    sessionId: "session-1",
     personaId: "persona-1",
     userMessageId: "user-invalid-bind",
     content: "test",
@@ -372,6 +395,7 @@ it("enforces turn mode rules, compare-and-set failure status, and transaction ro
 
   await repository.startConversationTurn({
     turnId: "turn-rollback",
+    sessionId: "session-1",
     personaId: "persona-1",
     userMessageId: "user-rollback",
     content: "test rollback",
@@ -422,12 +446,14 @@ it("enforces turn mode rules, compare-and-set failure status, and transaction ro
 
   await repository.startConversationTurn({
     turnId: "turn-start-atomic",
+    sessionId: "session-1",
     personaId: "persona-1",
     userMessageId: "user-original",
     content: "original",
   });
   await assert.rejects(repository.startConversationTurn({
     turnId: "turn-start-atomic",
+    sessionId: "session-1",
     personaId: "persona-1",
     userMessageId: "user-must-rollback",
     content: "duplicate turn",
@@ -436,6 +462,7 @@ it("enforces turn mode rules, compare-and-set failure status, and transaction ro
 
   await repository.startConversationTurn({
     turnId: "turn-boundary",
+    sessionId: "session-1",
     personaId: "persona-1",
     userMessageId: "user-boundary",
     content: "boundary",

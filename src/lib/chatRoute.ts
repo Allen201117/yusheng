@@ -36,6 +36,7 @@ export type ChatRouteDependencies = {
   isVoiceAuthorizationEnforced: () => boolean;
   randomUUID: () => string;
   nowMs: () => number;
+  nowIso: () => string;
   logInfo: (event: string, data?: StableLogFields) => void;
   logError: (event: string, data?: StableLogFields) => void;
 };
@@ -48,6 +49,7 @@ const defaults: ChatRouteDependencies = {
   isVoiceAuthorizationEnforced,
   randomUUID,
   nowMs: () => performance.now(),
+  nowIso: () => new Date().toISOString(),
   logInfo: (event, data) => logger.info(event, data),
   logError: (event, data) => logger.error(event, data),
 };
@@ -211,6 +213,7 @@ function boundaryStream(input: {
     async start(controller) {
       const meta = {
         turnId: input.turnId,
+        sessionId: null,
         mode: "boundary",
         boundaryKind: input.boundary.kind,
         degradationReason: null,
@@ -281,6 +284,7 @@ function unpersistedEmergencyStream(input: {
       controller.enqueue(encodeEvent(encoder, {
         meta: {
           turnId: input.turnId,
+          sessionId: null,
           mode: "boundary",
           boundaryKind: input.boundary.kind,
           degradationReason: null,
@@ -385,10 +389,12 @@ export function createChatHandlers(overrides: Partial<ChatRouteDependencies> = {
         ? safetyBoundary
         : null;
     let speechAllowed = false;
+    let approvedAuthorization: Awaited<ReturnType<AppRepository["getCurrentVoiceAuthorization"]>> = null;
     if (!boundary) {
       try {
         const authorization = await repository.getCurrentVoiceAuthorization(persona.voiceId, auth.userId);
         speechAllowed = authorization?.status === "approved";
+        if (speechAllowed) approvedAuthorization = authorization;
         const textAllowed = speechAllowed;
         if (!textAllowed) {
           boundary = { kind: "voice_authorization_denied", reply: VOICE_AUTHORIZATION_REPLY };
@@ -402,10 +408,44 @@ export function createChatHandlers(overrides: Partial<ChatRouteDependencies> = {
       if (!boundary) boundary = detectConversationBoundary(text, [persona.name, persona.relation]);
     }
 
+    let sessionId: string | null = null;
+    if (!boundary) {
+      if (!approvedAuthorization) {
+        return jsonError("对话授权状态异常，请稍后重试", 500, "CHAT_AUTHORIZATION_STATE_INVALID");
+      }
+      if (typeof repository.getOrStartConversationSession !== "function") {
+        deps.logError("chat_session_tracking_unavailable", {
+          personaId, turnId, errorName: "RepositoryMethodUnavailableError",
+        });
+      } else {
+        const now = deps.nowIso();
+        const staleBefore = new Date(Date.parse(now) - 30 * 60 * 1_000).toISOString();
+        try {
+          const session = await repository.getOrStartConversationSession({
+            proposedSessionId: deps.randomUUID(),
+            personaId,
+            evaluatorUserId: auth.userId,
+            voiceId: persona.voiceId,
+            voiceAuthorizationId: approvedAuthorization.id,
+            cohort: approvedAuthorization.speakerStatus,
+            now,
+            staleBefore,
+          });
+          sessionId = session.id;
+        } catch (error) {
+          deps.logError("chat_session_start_failed", {
+            personaId, turnId, errorName: errorName(error),
+          });
+          return jsonError("对话会话创建失败，请稍后重试", 500, "CHAT_SESSION_START_FAILED");
+        }
+      }
+    }
+
     const userMessageId = deps.randomUUID();
     try {
       await repository.startConversationTurn({
         turnId,
+        sessionId,
         personaId,
         userMessageId,
         content: text,
@@ -489,6 +529,7 @@ export function createChatHandlers(overrides: Partial<ChatRouteDependencies> = {
     });
     const meta = {
       turnId,
+      sessionId,
       mode: context.mode,
       boundaryKind: null,
       degradationReason,

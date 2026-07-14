@@ -182,6 +182,122 @@ it("adds owner-consistent auditable restoration feedback schema", async () => {
   assert.match(sql, /CHECK \(comment IS NULL OR char_length\(comment\) <= 1000\)/);
 });
 
+it("locks the owner-scoped persona before atomically reusing an active restoration session", async () => {
+  const now = "2026-07-14T10:00:00.000Z";
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM personas") && text.includes("FOR UPDATE")) {
+      return [{ id: "persona-1" }];
+    }
+    if (text.includes("UPDATE conversation_sessions") && text.includes("status = 'expired'")) {
+      return [];
+    }
+    if (text.includes("FROM conversation_sessions") && text.includes("status = 'active'")) {
+      return [{
+        id: "session-existing",
+        persona_id: "persona-1",
+        evaluator_user_id: "user-1",
+        voice_id: "voice-1",
+        voice_authorization_id: "auth-1",
+        cohort: "living",
+        status: "active",
+        started_at: now,
+        last_activity_at: now,
+        rated_at: null,
+      }];
+    }
+    throw new Error(`unexpected query: ${text}`);
+  });
+  const repo = createPostgresRepository(fake.executor);
+  const session = await repo.getOrStartConversationSession({
+    proposedSessionId: "session-proposed",
+    personaId: "persona-1",
+    evaluatorUserId: "user-1",
+    voiceId: "voice-1",
+    voiceAuthorizationId: "auth-1",
+    cohort: "living",
+    now,
+    staleBefore: "2026-07-14T09:30:00.000Z",
+  });
+
+  assert.equal(session.id, "session-existing");
+  assert.equal(session.cohort, "living");
+  assert.equal(fake.transactions, 1);
+  const personaLock = fake.calls.findIndex((call) =>
+    call.text.includes("FROM personas") && call.text.includes("FOR UPDATE"));
+  const expiry = fake.calls.findIndex((call) =>
+    call.text.includes("UPDATE conversation_sessions") && call.text.includes("status = 'expired'"));
+  const activeSelect = fake.calls.findIndex((call) =>
+    call.text.includes("FROM conversation_sessions") && call.text.includes("status = 'active'"));
+  assert.ok(personaLock >= 0 && personaLock < expiry && expiry < activeSelect);
+  assert.match(fake.calls[personaLock].text, /id = \$1 AND user_id = \$2 AND voice_id = \$3/);
+});
+
+it("creates a new Postgres session with immutable voice authorization and cohort snapshots", async () => {
+  const now = "2026-07-14T10:00:00.000Z";
+  const fake = createFakeSql((text, params) => {
+    if (text.includes("FROM personas") && text.includes("FOR UPDATE")) return [{ id: "persona-2" }];
+    if (text.includes("UPDATE conversation_sessions") && text.includes("status = 'expired'")) return [];
+    if (text.includes("FROM conversation_sessions") && text.includes("status = 'active'")) return [];
+    if (text.includes("INSERT INTO conversation_sessions")) return [{
+      id: params[0],
+      persona_id: params[1],
+      evaluator_user_id: params[2],
+      voice_id: params[3],
+      voice_authorization_id: params[4],
+      cohort: params[5],
+      status: "active",
+      started_at: params[6],
+      last_activity_at: params[6],
+      rated_at: null,
+    }];
+    throw new Error(`unexpected query: ${text}`);
+  });
+  const repo = createPostgresRepository(fake.executor);
+  const session = await repo.getOrStartConversationSession({
+    proposedSessionId: "session-new",
+    personaId: "persona-2",
+    evaluatorUserId: "user-2",
+    voiceId: "voice-2",
+    voiceAuthorizationId: "auth-2",
+    cohort: "deceased",
+    now,
+    staleBefore: "2026-07-14T09:30:00.000Z",
+  });
+  assert.deepEqual(session, {
+    id: "session-new",
+    personaId: "persona-2",
+    evaluatorUserId: "user-2",
+    voiceId: "voice-2",
+    voiceAuthorizationId: "auth-2",
+    cohort: "deceased",
+    status: "active",
+    startedAt: now,
+    lastActivityAt: now,
+    ratedAt: null,
+  });
+  const insert = fake.calls.find((call) => call.text.includes("INSERT INTO conversation_sessions"))!;
+  assert.deepEqual(insert.params, [
+    "session-new", "persona-2", "user-2", "voice-2", "auth-2", "deceased", now,
+  ]);
+});
+
+it("rejects a turn/session persona mismatch before persisting its user message", async () => {
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM conversation_sessions") && text.includes("FOR UPDATE")) return [];
+    throw new Error(`unexpected query: ${text}`);
+  });
+  const repo = createPostgresRepository(fake.executor);
+  await assert.rejects(repo.startConversationTurn({
+    turnId: "turn-mismatch",
+    sessionId: "session-1",
+    personaId: "persona-2",
+    userMessageId: "message-mismatch",
+    content: "不应保存",
+  }), /conversation_turn_session_mismatch/);
+  assert.equal(fake.calls.some((call) => call.text.includes("INSERT INTO messages")), false);
+  assert.equal(fake.transactions, 1);
+});
+
 it("applies a pending migration and records it in one transaction", async () => {
   const queries: Array<{ text: string; params: unknown[] }> = [];
   let transactions = 0;
@@ -1030,6 +1146,7 @@ it("starts, binds, and completes a grounded turn in transactions with stable loc
   const now = "2026-07-14T00:00:00.000Z";
   const startedTurn = {
     id: "turn-1",
+    session_id: "session-1",
     persona_id: "persona-1",
     user_message_id: "user-message-1",
     assistant_message_id: null,
@@ -1044,6 +1161,12 @@ it("starts, binds, and completes a grounded turn in transactions with stable loc
     updated_at: now,
   };
   const fake = createFakeSql((text, params) => {
+    if (text.includes("FROM conversation_sessions") && text.includes("FOR UPDATE")) {
+      return [{ id: "session-1" }];
+    }
+    if (text.includes("UPDATE conversation_sessions") && text.includes("last_activity_at")) {
+      return [{ id: "session-1" }];
+    }
     if (text.includes("INSERT INTO messages") && params[0] === "user-message-1") return [{
       id: "user-message-1", persona_id: "persona-1", role: "user",
       content: params[2], created_at: now,
@@ -1092,7 +1215,7 @@ it("starts, binds, and completes a grounded turn in transactions with stable loc
   const repo = createPostgresRepository(fake.executor);
 
   await repo.startConversationTurn({
-    turnId: "turn-1", personaId: "persona-1", userMessageId: "user-message-1",
+    turnId: "turn-1", sessionId: "session-1", personaId: "persona-1", userMessageId: "user-message-1",
     content: "她喜欢喝什么？",
   });
   const bound = await repo.bindConversationTurnEvidence({
