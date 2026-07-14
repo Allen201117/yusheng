@@ -61,6 +61,7 @@ type FakeOptions = {
   storeError?: Error;
   bindError?: Error;
   sentenceError?: Error;
+  sentenceGate?: Promise<void>;
   completeError?: Error;
   failError?: Error;
   historyError?: Error;
@@ -133,6 +134,7 @@ function makeRepository(options: FakeOptions = {}) {
     async recordConversationSentence(input: Record<string, unknown>) {
       calls.sentences.push(input);
       if (options.sentenceError) throw options.sentenceError;
+      if (options.sentenceGate) await options.sentenceGate;
       const plan = input.plan as Record<string, unknown>;
       return {
         id: input.id,
@@ -654,6 +656,44 @@ it("keeps the text reply but emits no untracked sentence when sentence persisten
   assert.equal(h.calls.completes[0].degradationReason, "no_relevant_evidence");
   assert.ok(h.logs.some((entry) => entry.event === "chat_sentence_tracking_failed"));
   assert.doesNotMatch(JSON.stringify(events), /raw sentence db secret/);
+});
+
+it("does not stream a sentence until its persistence promise resolves", async () => {
+  let releaseSentence!: () => void;
+  const sentenceGate = new Promise<void>((resolve) => { releaseSentence = resolve; });
+  const h = makeHarness({
+    sentenceGate,
+    model: async function* () { yield "先保存再说。"; },
+  });
+  const response = await h.handlers.POST(postRequest({ personaId: persona.id, text: "hello" }));
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let received = "";
+  while (!received.includes('"token":"先保存再说。"')) {
+    const chunk = await reader.read();
+    assert.equal(chunk.done, false);
+    received += decoder.decode(chunk.value, { stream: true });
+  }
+  assert.doesNotMatch(received, /"sentence"/);
+
+  const nextChunk = reader.read();
+  const stateBeforePersistence = await Promise.race([
+    nextChunk.then(() => "resolved" as const),
+    Promise.resolve("pending" as const),
+  ]);
+  assert.equal(stateBeforePersistence, "pending");
+
+  releaseSentence();
+  const persistedChunk = await nextChunk;
+  assert.equal(persistedChunk.done, false);
+  const persistedText = decoder.decode(persistedChunk.value, { stream: true });
+  assert.match(persistedText, /"sentence"/);
+  assert.match(persistedText, /"sentenceId":"id-4"/);
+  assert.equal(h.calls.sentences[0].id, "id-4");
+
+  while (!(await reader.read()).done) {
+    // Drain the completed stream so persistence and turn completion finish.
+  }
 });
 
 it("calls the normal model stream exactly once", async () => {

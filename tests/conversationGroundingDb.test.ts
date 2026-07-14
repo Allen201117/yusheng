@@ -296,6 +296,7 @@ it("atomically persists a grounded turn and freezes selection-time evidence", as
     retrievalMs: 12,
     firstSentenceMs: 40,
     totalMs: 80,
+    speechTrackingFailed: false,
   });
   assert.equal(completed.status, "completed");
   assert.equal(completed.assistantMessageId, "assistant-1");
@@ -374,6 +375,7 @@ it("enforces turn mode rules, compare-and-set failure status, and transaction ro
     retrievalMs: 1,
     firstSentenceMs: null,
     totalMs: 2,
+    speechTrackingFailed: false,
   }), /conversation_turn_evidence_mismatch/);
   assert.equal(database.prepare("SELECT id FROM messages WHERE id = ?").get("assistant-no-evidence"), undefined);
 
@@ -416,6 +418,7 @@ it("enforces turn mode rules, compare-and-set failure status, and transaction ro
     retrievalMs: 1,
     firstSentenceMs: 2,
     totalMs: 3,
+    speechTrackingFailed: false,
   }), /conversation_turn_evidence_mismatch/);
   assert.equal(database.prepare("SELECT id FROM messages WHERE id = ?").get("assistant-wrong-mode"), undefined);
   database.exec(`
@@ -436,6 +439,7 @@ it("enforces turn mode rules, compare-and-set failure status, and transaction ro
     retrievalMs: 1,
     firstSentenceMs: 2,
     totalMs: 3,
+    speechTrackingFailed: false,
   }), /forced_evidence_failure/);
   database.exec("DROP TRIGGER fail_message_evidence_insert");
   assert.equal(database.prepare("SELECT id FROM messages WHERE id = ?").get("assistant-rollback"), undefined);
@@ -478,6 +482,7 @@ it("enforces turn mode rules, compare-and-set failure status, and transaction ro
     retrievalMs: 1,
     firstSentenceMs: 2,
     totalMs: 3,
+    speechTrackingFailed: false,
   });
   assert.equal(boundary.status, "completed");
   assert.equal((await repository.listMessageEvidence("assistant-boundary", "persona-1")).length, 0);

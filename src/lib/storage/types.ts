@@ -614,7 +614,7 @@ export interface AppRepository {
     retrievalMs: number;
     firstSentenceMs: number | null;
     totalMs: number;
-    speechTrackingFailed?: boolean;
+    speechTrackingFailed: boolean;
   }): Promise<ConversationTurn>;
   recordConversationSentence(input: {
     id: string;

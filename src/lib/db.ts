@@ -1656,7 +1656,7 @@ export function completeConversationTurn(input: {
   retrievalMs: number;
   firstSentenceMs: number | null;
   totalMs: number;
-  speechTrackingFailed?: boolean;
+  speechTrackingFailed: boolean;
 }): ConversationTurn {
   const database = getDb();
   return database.transaction(() => {

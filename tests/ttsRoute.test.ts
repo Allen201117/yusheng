@@ -105,6 +105,7 @@ function fixture(options: FixtureOptions = {}) {
   const synthesisInputs: Array<Record<string, unknown>> = [];
   let providerCalls = 0;
   let clock = 0;
+  const logs: Array<{ level: "info" | "error"; event: string; data?: Record<string, unknown> }> = [];
   const repository = {
     async getConversationSentenceForSynthesis(sentenceId: string, userId: string) {
       order.push("sentence");
@@ -159,12 +160,12 @@ function fixture(options: FixtureOptions = {}) {
     isVoiceAuthorizationEnforced: () => true,
     randomUUID: () => "attempt-1",
     nowMs: () => clock += 10,
-    logInfo: () => undefined,
-    logError: () => undefined,
+    logInfo: (event, data) => logs.push({ level: "info", event, data }),
+    logError: (event, data) => logs.push({ level: "error", event, data }),
   });
   return {
     handlers, order, starts, completes, failures, synthesisInputs,
-    providerCalls: () => providerCalls,
+    providerCalls: () => providerCalls, logs,
   };
 }
 
@@ -244,6 +245,7 @@ it("records one stable failed attempt for a provider 503 without leaking its raw
     providerError: Object.assign(new Error("raw provider secret response"), {
       status: 503,
       code: "provider_http_503_busy",
+      body: "sensitive upstream body",
     }),
   });
   const response = await f.handlers.POST(request({ sentenceId: sentence.id }));
@@ -253,6 +255,22 @@ it("records one stable failed attempt for a provider 503 without leaking its raw
   assert.equal(f.failures.length, 1);
   assert.equal(f.failures[0].stableErrorCode, "provider_http_503_busy");
   assert.doesNotMatch(JSON.stringify(await response.json()), /raw provider secret response|busy/);
+  assert.deepEqual(f.logs, [{
+    level: "error",
+    event: "tts_failed",
+    data: {
+      voiceId: "voice-1",
+      userId: "user-1",
+      attemptId: "attempt-1",
+      stableErrorCode: "provider_http_503_busy",
+      errorName: "Error",
+      totalMs: 30,
+    },
+  }]);
+  assert.doesNotMatch(
+    JSON.stringify(f.logs),
+    /raw provider secret response|sensitive upstream body/,
+  );
 });
 
 it("does not return untracked audio when authorization is revoked before attempt completion", async () => {
