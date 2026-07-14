@@ -299,6 +299,53 @@ it("stores a confirmed memory, its source, and its link in one transaction", asy
   assert.deepEqual(Array.from(memories[0].embedding), [0.25, 0.5]);
 });
 
+it("stores a whole memory batch in one transaction executor", async () => {
+  const calls: Array<{ text: string; params: unknown[] }> = [];
+  let transactions = 0;
+  let rootQueries = 0;
+  const transactionExecutor: SqlExecutor = {
+    async query<T extends Record<string, unknown>>(text: string, params: unknown[] = []) {
+      calls.push({ text, params });
+      if (text.includes("INSERT INTO persona_sources")) return [{ id: params[0] }] as unknown as T[];
+      if (text.includes("INSERT INTO relationship_memories")) return [{ id: params[0] }] as unknown as T[];
+      if (text.includes("INSERT INTO persona_item_sources")) return [{ item_id: params[0] }] as unknown as T[];
+      return [] as T[];
+    },
+    async transaction<T>(work: (transaction: SqlExecutor) => Promise<T>) {
+      return work(transactionExecutor);
+    },
+  };
+  const rootExecutor: SqlExecutor = {
+    async query<T extends Record<string, unknown>>() {
+      rootQueries += 1;
+      return [] as T[];
+    },
+    async transaction<T>(work: (transaction: SqlExecutor) => Promise<T>) {
+      transactions += 1;
+      return work(transactionExecutor);
+    },
+  };
+  const repo = createPostgresRepository(rootExecutor);
+  const makeInput = (suffix: string) => ({
+    id: `memory-${suffix}`,
+    personaId: "persona-1",
+    content: `记忆-${suffix}`,
+    embedding: Float32Array.from([0.25, 0.5]),
+    createdBy: "user-1",
+    sourceId: `source-${suffix}`,
+    checksumAlgorithm: "sha256" as const,
+    checksum: `checksum-${suffix}`,
+  });
+
+  await repo.insertMemories([makeInput("1"), makeInput("2")]);
+
+  assert.equal(transactions, 1);
+  assert.equal(rootQueries, 0);
+  assert.equal(calls.filter((call) => call.text.includes("INSERT INTO persona_sources")).length, 2);
+  assert.equal(calls.filter((call) => call.text.includes("INSERT INTO relationship_memories")).length, 2);
+  assert.equal(calls.filter((call) => call.text.includes("INSERT INTO persona_item_sources")).length, 2);
+});
+
 it("returns messages in chronological order", async () => {
   const fake = createFakeSql(() => [
     { id: "m2", persona_id: "p1", role: "assistant", content: "后", created_at: "2026-07-13T03:01:00.000Z" },
@@ -408,6 +455,7 @@ it("counts only the owner's personas using a voice", async () => {
 });
 
 it("lists and loads only confirmed relationship memories and soft-revokes them", async () => {
+  let deletes = 0;
   const fake = createFakeSql((text) => {
     if (text.includes("SELECT id, persona_id, content, created_at")) {
       return [{ id: "memory-1", persona_id: "persona-1", content: "记忆", created_at: "2026-07-13T05:00:00.000Z" }];
@@ -415,19 +463,24 @@ it("lists and loads only confirmed relationship memories and soft-revokes them",
     if (text.includes("SELECT id, persona_id, content") && !text.includes("created_at")) {
       return [{ id: "memory-1", persona_id: "persona-1", content: "记忆" }];
     }
+    if (text.includes("UPDATE relationship_memories")) {
+      deletes += 1;
+      return deletes === 1 ? [{ id: "memory-1" }] : [];
+    }
     return [];
   });
   const repo = createPostgresRepository(fake.executor);
   assert.equal((await repo.listMemories("persona-1"))[0].createdAt, "2026-07-13T05:00:00.000Z");
   assert.equal((await repo.getMemoryById("memory-1"))?.personaId, "persona-1");
-  await repo.deleteMemory("memory-1");
+  assert.equal(await repo.deleteMemory("memory-1"), true);
+  assert.equal(await repo.deleteMemory("memory-1"), false);
   const listCall = fake.calls.find((call) => call.text.includes("created_at"));
   const getCall = fake.calls.find((call) => call.text.includes("SELECT id, persona_id, content") && !call.text.includes("created_at"));
   const deleteCall = fake.calls.find((call) => call.text.includes("UPDATE relationship_memories"));
   assert.match(listCall?.text || "", /FROM relationship_memories[\s\S]*status = 'confirmed'/);
-  assert.match(getCall?.text || "", /FROM relationship_memories[\s\S]*status <> 'revoked'/);
+  assert.match(getCall?.text || "", /FROM relationship_memories[\s\S]*status = 'confirmed'/);
   assert.match(deleteCall?.text || "", /status = 'revoked'/);
-  assert.match(deleteCall?.text || "", /status IN \('pending', 'confirmed', 'conflicted'\)/);
+  assert.match(deleteCall?.text || "", /status = 'confirmed'[\s\S]*RETURNING id/);
   assert.equal(fake.calls.some((call) => /DELETE FROM (?:relationship_)?memories/.test(call.text)), false);
 });
 

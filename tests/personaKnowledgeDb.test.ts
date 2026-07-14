@@ -141,8 +141,8 @@ it("uses confirmed relationship memories as the local runtime source of truth", 
     1,
   );
 
-  dbModule.deleteMemory("manual-memory");
-  dbModule.deleteMemory("manual-memory");
+  assert.equal(dbModule.deleteMemory("manual-memory"), true);
+  assert.equal(dbModule.deleteMemory("manual-memory"), false);
   assert.equal(dbModule.listMemories("persona-1").some((memory) => memory.id === "manual-memory"), false);
   assert.equal(dbModule.loadMemoriesWithEmbeddings("persona-1").some((memory) => memory.id === "manual-memory"), false);
   assert.equal(dbModule.getMemoryById("manual-memory"), null);
@@ -186,6 +186,58 @@ it("rolls back the source and memory when a runtime source link fails", () => {
     (database.prepare("SELECT COUNT(*) AS count FROM relationship_memories WHERE id = ?").get("rollback-memory") as { count: number }).count,
     0,
   );
+});
+
+it("rolls back every memory when the second runtime batch item fails", () => {
+  database.exec(
+    `CREATE TEMP TRIGGER fail_second_batch_link
+     BEFORE INSERT ON persona_item_sources
+     WHEN NEW.source_id = 'batch-source-2'
+     BEGIN
+       SELECT RAISE(ABORT, 'forced second link failure');
+     END`,
+  );
+  const makeInput = (suffix: string) => ({
+    id: `batch-memory-${suffix}`,
+    personaId: "persona-1",
+    content: `批量记忆-${suffix}`,
+    embedding: Float32Array.from([0.1, 0.2]),
+    createdBy: "user-1",
+    sourceId: `batch-source-${suffix}`,
+    checksumAlgorithm: "sha256" as const,
+    checksum: `batch-checksum-${suffix}`,
+  });
+
+  assert.throws(
+    () => dbModule.insertMemories([makeInput("1"), makeInput("2")]),
+    /forced second link failure/,
+  );
+  for (const table of ["persona_sources", "relationship_memories", "persona_item_sources"]) {
+    const count = database.prepare(
+      `SELECT COUNT(*) AS count FROM ${table}
+       WHERE ${table === "persona_sources" ? "id" : table === "relationship_memories" ? "id" : "source_id"}
+       LIKE 'batch-%'`,
+    ).get() as { count: number };
+    assert.equal(count.count, 0, table);
+  }
+});
+
+it("keeps every non-confirmed status outside the legacy memory delete path", () => {
+  const now = "2026-07-14T08:00:00.000Z";
+  for (const status of ["pending", "conflicted", "rejected", "revoked"] as const) {
+    database.prepare(
+      `INSERT INTO relationship_memories
+         (id, persona_id, content, participants, status, created_at, updated_at)
+       VALUES (?, 'persona-1', ?, '[]', ?, ?, ?)`,
+    ).run(`legacy-delete-${status}`, status, status, now, now);
+    assert.equal(dbModule.getMemoryById(`legacy-delete-${status}`), null);
+    assert.equal(dbModule.deleteMemory(`legacy-delete-${status}`), false);
+    assert.equal(
+      (database.prepare("SELECT status FROM relationship_memories WHERE id = ?")
+        .get(`legacy-delete-${status}`) as { status: string }).status,
+      status,
+    );
+  }
 });
 
 it("persists persona knowledge atomically with scoped edits, status changes, and source revocation", () => {

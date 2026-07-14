@@ -344,7 +344,97 @@ async function insertReturningId(
 
 type ExistingUser = { id: string; email: string | null; phone: string | null };
 type ExistingVoice = { id: string; user_id: string; checksum_sha256: string };
-type ExistingPersona = { id: string; user_id: string; created_at: Date | string };
+type ExistingPersona = {
+  id: string;
+  user_id: string;
+  voice_id: string;
+  name: string;
+  relation: string;
+  persona_desc: string;
+  created_at: Date | string;
+};
+
+type ExistingLegacySource = {
+  id: string;
+  persona_id: string;
+  source_type: string;
+  content_text: string | null;
+  object_path: string | null;
+  checksum_algorithm: string;
+  checksum: string;
+  status: string;
+  created_by: string;
+  created_at: Date | string;
+  revoked_at: Date | string | null;
+};
+
+type ExistingLegacyMemory = {
+  id: string;
+  persona_id: string;
+  content: string;
+  occurred_at: Date | string | null;
+  location: string | null;
+  participants: unknown;
+  embedding: string | number[] | null;
+  status: string;
+  conflict_group_id: string | null;
+  confirmed_by: string | null;
+  confirmed_at: Date | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+  revoked_at: Date | string | null;
+};
+
+type ExistingLegacyLink = {
+  item_kind: string;
+  item_id: string;
+  source_id: string;
+  source_excerpt: string;
+};
+
+function sameTimestamp(actual: Date | string | null, expected: Date | string): boolean {
+  if (actual === null) return false;
+  try {
+    return new Date(actual).toISOString() === new Date(expected).toISOString();
+  } catch {
+    return false;
+  }
+}
+
+function hasNoParticipants(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value !== "string") return false;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) && parsed.length === 0;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeVector(value: string | number[] | null): number[] | null {
+  if (value === null) return null;
+  if (Array.isArray(value)) return value.map(Number);
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return [];
+  if (trimmed === "[]") return [];
+  return trimmed.slice(1, -1).split(",").map(Number);
+}
+
+function vectorsEqual(
+  actual: string | number[] | null,
+  expected: string | null,
+): boolean {
+  const left = normalizeVector(actual);
+  const right = normalizeVector(expected);
+  if (left === null || right === null) return left === right;
+  return left.length === right.length && left.every((value, index) => {
+    const expectedValue = right[index];
+    if (!Number.isFinite(value) || !Number.isFinite(expectedValue)) return false;
+    const scale = Math.max(1, Math.abs(value), Math.abs(expectedValue));
+    return Math.abs(value - expectedValue) <= 1e-6 * scale;
+  });
+}
 
 export async function migrateInventory(
   dataDir: string,
@@ -426,7 +516,7 @@ export async function migrateInventory(
   );
   const voicesById = new Map(existingVoices.map((voice) => [voice.id, voice]));
   const voicesByOwnerChecksum = new Map(existingVoices.map((voice) => [`${voice.user_id}:${voice.checksum_sha256}`, voice]));
-  const resolvedVoices = new Map<string, string>(existingVoices.map((voice) => [voice.id, voice.id]));
+  const resolvedVoices = new Map<string, string>();
 
   for (const voice of inventory.voices) {
     if (voice.state !== "ready" || !voice.checksum) {
@@ -441,6 +531,14 @@ export async function migrateInventory(
     }
     const byId = voicesById.get(voice.voiceId);
     const byChecksum = voicesByOwnerChecksum.get(`${ownerId}:${voice.checksum}`);
+    if (byId && byId.user_id !== ownerId) {
+      items.push({ entity: "voice", id: voice.voiceId, status: "failed", reason: "voice_owner_conflict" });
+      continue;
+    }
+    if (byId && byId.checksum_sha256 !== voice.checksum) {
+      items.push({ entity: "voice", id: voice.voiceId, status: "failed", reason: "voice_checksum_conflict" });
+      continue;
+    }
     const existing = byId || byChecksum;
     if (existing) {
       resolvedVoices.set(voice.voiceId, existing.id);
@@ -468,14 +566,36 @@ export async function migrateInventory(
   }
 
   const existingPersonaRows = await sql.query<ExistingPersona>(
-    "SELECT id, user_id, created_at FROM personas",
+    `SELECT id, user_id, voice_id, name, relation, persona_desc, created_at
+     FROM personas`,
   );
   const existingPersonas = new Map(existingPersonaRows.map((persona) => [persona.id, persona]));
+  const migratablePersonaIds = new Set<string>();
   for (const persona of inventory.personas) {
     const ownerId = resolvedUsers.get(persona.userId);
     const voiceId = resolvedVoices.get(persona.voiceId);
     if (!ownerId || !voiceId) {
       items.push({ entity: "persona", id: persona.id, status: "failed", reason: !ownerId ? "missing_owner_dependency" : "missing_voice_dependency" });
+      continue;
+    }
+    const existing = existingPersonas.get(persona.id);
+    if (existing) {
+      if (existing.user_id !== ownerId) {
+        items.push({ entity: "persona", id: persona.id, status: "failed", reason: "persona_owner_conflict" });
+        continue;
+      }
+      if (
+        existing.voice_id !== voiceId
+        || existing.name !== persona.name
+        || existing.relation !== persona.relation
+        || existing.persona_desc !== persona.personaDesc
+        || !sameTimestamp(existing.created_at, persona.createdAt)
+      ) {
+        items.push({ entity: "persona", id: persona.id, status: "failed", reason: "persona_identity_conflict" });
+        continue;
+      }
+      migratablePersonaIds.add(persona.id);
+      items.push({ entity: "persona", id: persona.id, status: "skipped", reason: "id_exists" });
       continue;
     }
     try {
@@ -490,10 +610,20 @@ export async function migrateInventory(
         existingPersonas.set(persona.id, {
           id: persona.id,
           user_id: ownerId,
+          voice_id: voiceId,
+          name: persona.name,
+          relation: persona.relation,
+          persona_desc: persona.personaDesc,
           created_at: persona.createdAt,
         });
+        migratablePersonaIds.add(persona.id);
       }
-      items.push({ entity: "persona", id: persona.id, status: inserted ? "imported" : "skipped", reason: inserted ? "inserted" : "id_exists" });
+      items.push({
+        entity: "persona",
+        id: persona.id,
+        status: inserted ? "imported" : "failed",
+        reason: inserted ? "inserted" : "persona_identity_conflict",
+      });
     } catch (error) {
       items.push({ entity: "persona", id: persona.id, status: "failed", reason: error instanceof Error ? error.message : String(error) });
     }
@@ -501,7 +631,7 @@ export async function migrateInventory(
 
   for (const memory of inventory.memories) {
     const persona = existingPersonas.get(memory.personaId);
-    if (!persona) {
+    if (!persona || !migratablePersonaIds.has(memory.personaId)) {
       items.push({ entity: "memory", id: memory.id, status: "failed", reason: "missing_persona_dependency" });
       continue;
     }
@@ -509,14 +639,42 @@ export async function migrateInventory(
       const vector = serializeEmbedding(memory.embedding);
       const inserted = await sql.transaction(async (transaction) => {
         const sourceId = `legacy-memory-source:${memory.personaId}`;
-        await transaction.query(
+        const sourceInserted = await transaction.query<{ id: string }>(
           `INSERT INTO persona_sources
              (id, persona_id, source_type, checksum_algorithm, checksum, status,
               created_by, created_at)
            VALUES ($1, $2, 'legacy_import', 'legacy_id', $1, 'ready', $3, $4)
-           ON CONFLICT (id) DO NOTHING`,
+           ON CONFLICT (id) DO NOTHING
+           RETURNING id`,
           [sourceId, memory.personaId, persona.user_id, persona.created_at],
         );
+        if (!sourceInserted[0]) {
+          const sourceRows = await transaction.query<ExistingLegacySource>(
+            `SELECT id, persona_id, source_type, content_text, object_path,
+                    checksum_algorithm, checksum, status,
+                    created_by, created_at, revoked_at
+             FROM persona_sources
+             WHERE id = $1
+             FOR UPDATE`,
+            [sourceId],
+          );
+          const source = sourceRows[0];
+          if (
+            !source
+            || source.persona_id !== memory.personaId
+            || source.source_type !== "legacy_import"
+            || source.content_text !== null
+            || source.object_path !== null
+            || source.checksum_algorithm !== "legacy_id"
+            || source.checksum !== sourceId
+            || source.status !== "ready"
+            || source.created_by !== persona.user_id
+            || !sameTimestamp(source.created_at, persona.created_at)
+            || source.revoked_at !== null
+          ) {
+            throw new Error("legacy_source_conflict");
+          }
+        }
         const memoryInserted = await insertReturningId(
           transaction,
           `INSERT INTO relationship_memories
@@ -526,13 +684,67 @@ export async function migrateInventory(
            ON CONFLICT (id) DO NOTHING RETURNING id`,
           [memory.id, memory.personaId, memory.content, vector, memory.createdAt],
         );
-        await transaction.query(
+        if (!memoryInserted) {
+          const memoryRows = await transaction.query<ExistingLegacyMemory>(
+            `SELECT id, persona_id, content, occurred_at, location, participants,
+                    embedding::text AS embedding, status, conflict_group_id, confirmed_by,
+                    confirmed_at, created_at, updated_at, revoked_at
+             FROM relationship_memories
+             WHERE id = $1
+             FOR UPDATE`,
+            [memory.id],
+          );
+          const existingMemory = memoryRows[0];
+          if (
+            !existingMemory
+            || existingMemory.persona_id !== memory.personaId
+            || existingMemory.content !== memory.content
+            || existingMemory.occurred_at !== null
+            || existingMemory.location !== null
+            || !hasNoParticipants(existingMemory.participants)
+            || !vectorsEqual(existingMemory.embedding, vector)
+            || existingMemory.status !== "confirmed"
+            || existingMemory.conflict_group_id !== null
+            || existingMemory.confirmed_by !== null
+            || !sameTimestamp(existingMemory.confirmed_at, memory.createdAt)
+            || !sameTimestamp(existingMemory.created_at, memory.createdAt)
+            || !sameTimestamp(existingMemory.updated_at, memory.createdAt)
+            || existingMemory.revoked_at !== null
+          ) {
+            throw new Error("legacy_memory_conflict");
+          }
+        }
+        const linkInserted = await transaction.query<{ item_id: string }>(
           `INSERT INTO persona_item_sources
              (item_kind, item_id, source_id, source_excerpt, created_at)
-           VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (item_kind, item_id, source_id) DO NOTHING`,
-          ["relationship_memory", memory.id, sourceId, memory.content, memory.createdAt],
+           SELECT $1, memory.id, source.id, $4, $5
+           FROM relationship_memories memory
+           JOIN persona_sources source ON source.persona_id = memory.persona_id
+           WHERE memory.id = $2 AND memory.persona_id = $6
+             AND source.id = $3 AND source.persona_id = $6 AND source.status = 'ready'
+           ON CONFLICT (item_kind, item_id, source_id) DO NOTHING
+           RETURNING item_id`,
+          ["relationship_memory", memory.id, sourceId, memory.content, memory.createdAt, memory.personaId],
         );
+        if (!linkInserted[0]) {
+          const linkRows = await transaction.query<ExistingLegacyLink>(
+            `SELECT item_kind, item_id, source_id, source_excerpt
+             FROM persona_item_sources
+             WHERE item_kind = $1 AND item_id = $2 AND source_id = $3
+             FOR UPDATE`,
+            ["relationship_memory", memory.id, sourceId],
+          );
+          const link = linkRows[0];
+          if (
+            !link
+            || link.item_kind !== "relationship_memory"
+            || link.item_id !== memory.id
+            || link.source_id !== sourceId
+            || link.source_excerpt !== memory.content
+          ) {
+            throw new Error("legacy_source_link_conflict");
+          }
+        }
         return memoryInserted;
       });
       items.push({ entity: "memory", id: memory.id, status: inserted ? "imported" : "skipped", reason: inserted ? "inserted" : "id_exists" });
@@ -542,7 +754,7 @@ export async function migrateInventory(
   }
 
   for (const message of inventory.messages) {
-    if (!existingPersonas.has(message.personaId)) {
+    if (!migratablePersonaIds.has(message.personaId)) {
       items.push({ entity: "message", id: message.id, status: "failed", reason: "missing_persona_dependency" });
       continue;
     }

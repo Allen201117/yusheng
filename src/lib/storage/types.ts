@@ -356,7 +356,8 @@ export interface AppRepository {
   listMemories(personaId: string): Promise<Memory[]>;
   getMemoryById(id: string): Promise<Pick<Memory, "id" | "personaId" | "content"> | null>;
   insertMemory(input: InsertMemoryInput): Promise<void>;
-  deleteMemory(id: string): Promise<void>;
+  insertMemories(inputs: InsertMemoryInput[]): Promise<void>;
+  deleteMemory(id: string): Promise<boolean>;
   loadMemoriesWithEmbeddings(personaId: string): Promise<MemoryEmbedding[]>;
   listMessages(personaId: string, limit?: number): Promise<Message[]>;
   insertMessage(input: InsertMessageInput): Promise<Message>;

@@ -69,8 +69,29 @@ it("manual memory ingestion creates server-owned confirmation audit fields", asy
   assert.match(source, /sourceId\s*=\s*randomUUID\(\)/);
   assert.match(source, /createdBy:\s*auth\.userId/);
   assert.match(source, /checksumAlgorithm:\s*["']sha256["']/);
-  assert.match(source, /sha256Hex\(Buffer\.from\(contents\[i\],\s*["']utf8["']\)\)/);
+  assert.match(source, /sha256Hex\(Buffer\.from\(content,\s*["']utf8["']\)\)/);
   assert.doesNotMatch(source, /body\.(?:status|confirmedBy|sourceId|checksum)/);
+  assert.match(source, /vectors\.length\s*!==\s*contents\.length/);
+  assert.match(source, /repository\.insertMemories\(inputs\)/);
+  assert.doesNotMatch(source, /repository\.insertMemory\(/);
+  assert.match(source, /@\/lib\/memoryRoute/);
+  assert.match(source, /status:\s*409/);
+});
+
+it("manual memory input trims strings and rejects non-string values before embedding", async () => {
+  const { parseMemoryContents } = await import("../src/lib/memoryRoute");
+  assert.deepEqual(parseMemoryContents({ content: "  一起吃饭  ", contents: ["  ", " 去海边 "] }), {
+    contents: ["一起吃饭", "去海边"],
+  });
+  assert.deepEqual(parseMemoryContents({ content: 42 }), { error: "content 必须是字符串" });
+  assert.deepEqual(parseMemoryContents({ contents: ["正常", { forged: true }] }), {
+    error: "contents 每一项都必须是字符串",
+  });
+  assert.deepEqual(parseMemoryContents(null), { error: "请求体必须是 JSON 对象" });
+  assert.deepEqual(parseMemoryContents({ content: "x".repeat(20_001) }), { error: "content 过长" });
+  assert.deepEqual(parseMemoryContents({ content: "正常\u0000伪造" }), {
+    error: "content 包含不允许的控制字符",
+  });
 });
 
 it("routes use the provider preset fast path and provider-aware deletion lifecycle", async () => {

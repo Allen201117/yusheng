@@ -521,6 +521,58 @@ function serializeVector(value: Float32Array): string {
   return `[${Array.from(value).join(",")}]`;
 }
 
+async function insertMemoryWith(executor: SqlExecutor, input: InsertMemoryInput): Promise<void> {
+  const sources = await executor.query<{ id: string }>(
+    `INSERT INTO persona_sources
+       (id, persona_id, source_type, content_text, object_path, checksum_algorithm,
+        checksum, status, created_by)
+     SELECT $1, $2, 'manual_text', $3, NULL, $4, $5, 'ready', $6
+     FROM personas persona
+     WHERE persona.id = $2 AND persona.user_id = $6
+     RETURNING id`,
+    [
+      input.sourceId,
+      input.personaId,
+      input.content,
+      input.checksumAlgorithm,
+      input.checksum,
+      input.createdBy,
+    ],
+  );
+  if (!sources[0]) throw new Error("persona_source_insert_failed");
+
+  const memories = await executor.query<{ id: string }>(
+    `INSERT INTO relationship_memories
+       (id, persona_id, content, participants, embedding, status,
+        confirmed_by, confirmed_at, created_at, updated_at)
+     SELECT $1, $2, $3, '[]'::jsonb, $4::vector, 'confirmed', $5, now(), now(), now()
+     FROM persona_sources source
+     WHERE source.id = $6 AND source.persona_id = $2
+     RETURNING id`,
+    [
+      input.id,
+      input.personaId,
+      input.content,
+      serializeVector(input.embedding),
+      input.createdBy,
+      input.sourceId,
+    ],
+  );
+  if (!memories[0]) throw new Error("relationship_memory_insert_failed");
+
+  const links = await executor.query<{ item_id: string }>(
+    `INSERT INTO persona_item_sources
+       (item_kind, item_id, source_id, source_excerpt)
+     SELECT 'relationship_memory', memory.id, source.id, $2
+     FROM relationship_memories memory
+     JOIN persona_sources source ON source.persona_id = memory.persona_id
+     WHERE memory.id = $1 AND memory.persona_id = $4 AND source.id = $3
+     RETURNING item_id`,
+    [input.id, input.content, input.sourceId, input.personaId],
+  );
+  if (!links[0]) throw new Error("persona_source_link_failed");
+}
+
 export function createPostgresRepository(sql: SqlExecutor): AppRepository {
   async function getCurrentVoiceAuthorizationForUser(
     voiceId: string,
@@ -1019,56 +1071,12 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
     },
 
     async insertMemory(input: InsertMemoryInput): Promise<void> {
+      await sql.transaction((transaction) => insertMemoryWith(transaction, input));
+    },
+
+    async insertMemories(inputs: InsertMemoryInput[]): Promise<void> {
       await sql.transaction(async (transaction) => {
-        const sources = await transaction.query<{ id: string }>(
-          `INSERT INTO persona_sources
-             (id, persona_id, source_type, content_text, object_path, checksum_algorithm,
-              checksum, status, created_by)
-           SELECT $1, $2, 'manual_text', $3, NULL, $4, $5, 'ready', $6
-           FROM personas persona
-           WHERE persona.id = $2 AND persona.user_id = $6
-           RETURNING id`,
-          [
-            input.sourceId,
-            input.personaId,
-            input.content,
-            input.checksumAlgorithm,
-            input.checksum,
-            input.createdBy,
-          ],
-        );
-        if (!sources[0]) throw new Error("persona_source_insert_failed");
-
-        const memories = await transaction.query<{ id: string }>(
-          `INSERT INTO relationship_memories
-             (id, persona_id, content, participants, embedding, status,
-              confirmed_by, confirmed_at, created_at, updated_at)
-           SELECT $1, $2, $3, '[]'::jsonb, $4::vector, 'confirmed', $5, now(), now(), now()
-           FROM persona_sources source
-           WHERE source.id = $6 AND source.persona_id = $2
-           RETURNING id`,
-          [
-            input.id,
-            input.personaId,
-            input.content,
-            serializeVector(input.embedding),
-            input.createdBy,
-            input.sourceId,
-          ],
-        );
-        if (!memories[0]) throw new Error("relationship_memory_insert_failed");
-
-        const links = await transaction.query<{ item_id: string }>(
-          `INSERT INTO persona_item_sources
-             (item_kind, item_id, source_id, source_excerpt)
-           SELECT 'relationship_memory', memory.id, source.id, $2
-           FROM relationship_memories memory
-           JOIN persona_sources source ON source.persona_id = memory.persona_id
-           WHERE memory.id = $1 AND memory.persona_id = $4 AND source.id = $3
-           RETURNING item_id`,
-          [input.id, input.content, input.sourceId, input.personaId],
-        );
-        if (!links[0]) throw new Error("persona_source_link_failed");
+        for (const input of inputs) await insertMemoryWith(transaction, input);
       });
     },
 
@@ -1087,7 +1095,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       const rows = await sql.query<Pick<MemoryRow, "id" | "persona_id" | "content">>(
         `SELECT id, persona_id, content
          FROM relationship_memories
-         WHERE id = $1 AND status <> 'revoked'`,
+         WHERE id = $1 AND status = 'confirmed'`,
         [id],
       );
       return rows[0]
@@ -1095,14 +1103,16 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
         : null;
     },
 
-    async deleteMemory(id: string): Promise<void> {
-      await sql.query(
+    async deleteMemory(id: string): Promise<boolean> {
+      const rows = await sql.query<{ id: string }>(
         `UPDATE relationship_memories
          SET status = 'revoked', confirmed_by = NULL, confirmed_at = NULL,
              revoked_at = now(), updated_at = now()
-         WHERE id = $1 AND status IN ('pending', 'confirmed', 'conflicted')`,
+         WHERE id = $1 AND status = 'confirmed'
+         RETURNING id`,
         [id],
       );
+      return Boolean(rows[0]);
     },
 
     async loadMemoriesWithEmbeddings(personaId: string): Promise<MemoryEmbedding[]> {

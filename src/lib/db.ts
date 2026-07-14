@@ -845,46 +845,55 @@ export type MemoryRow = {
   createdAt: string;
 };
 
-export function insertMemory(m: InsertMemoryInput) {
-  const database = getDb();
+function insertMemoryWithDb(database: Database.Database, m: InsertMemoryInput) {
   const createdAt = new Date().toISOString();
   const buf = Buffer.from(m.embedding.buffer, m.embedding.byteOffset, m.embedding.byteLength);
+  const source = database.prepare(
+    `INSERT INTO persona_sources
+       (id, persona_id, source_type, content_text, object_path, checksum_algorithm,
+        checksum, status, created_by, created_at)
+     SELECT ?, ?, 'manual_text', ?, NULL, ?, ?, 'ready', ?, ?
+     FROM personas
+     WHERE id = ? AND user_id = ?`,
+  ).run(
+    m.sourceId, m.personaId, m.content, m.checksumAlgorithm, m.checksum,
+    m.createdBy, createdAt, m.personaId, m.createdBy,
+  );
+  if (source.changes !== 1) throw new Error("persona_source_insert_failed");
+
+  const memory = database.prepare(
+    `INSERT INTO relationship_memories
+       (id, persona_id, content, participants, embedding, status, confirmed_by,
+        confirmed_at, created_at, updated_at)
+     SELECT ?, ?, ?, '[]', ?, 'confirmed', ?, ?, ?, ?
+     FROM persona_sources
+     WHERE id = ? AND persona_id = ?`,
+  ).run(
+    m.id, m.personaId, m.content, buf, m.createdBy, createdAt, createdAt, createdAt,
+    m.sourceId, m.personaId,
+  );
+  if (memory.changes !== 1) throw new Error("relationship_memory_insert_failed");
+
+  const link = database.prepare(
+    `INSERT INTO persona_item_sources
+       (item_kind, item_id, source_id, source_excerpt, created_at)
+     SELECT 'relationship_memory', memory.id, source.id, ?, ?
+     FROM relationship_memories memory
+     JOIN persona_sources source ON source.persona_id = memory.persona_id
+     WHERE memory.id = ? AND memory.persona_id = ? AND source.id = ?`,
+  ).run(m.content, createdAt, m.id, m.personaId, m.sourceId);
+  if (link.changes !== 1) throw new Error("persona_source_link_failed");
+}
+
+export function insertMemory(m: InsertMemoryInput) {
+  const database = getDb();
+  database.transaction(() => insertMemoryWithDb(database, m))();
+}
+
+export function insertMemories(inputs: InsertMemoryInput[]) {
+  const database = getDb();
   database.transaction(() => {
-    const source = database.prepare(
-      `INSERT INTO persona_sources
-         (id, persona_id, source_type, content_text, object_path, checksum_algorithm,
-          checksum, status, created_by, created_at)
-       SELECT ?, ?, 'manual_text', ?, NULL, ?, ?, 'ready', ?, ?
-       FROM personas
-       WHERE id = ? AND user_id = ?`,
-    ).run(
-      m.sourceId, m.personaId, m.content, m.checksumAlgorithm, m.checksum,
-      m.createdBy, createdAt, m.personaId, m.createdBy,
-    );
-    if (source.changes !== 1) throw new Error("persona_source_insert_failed");
-
-    const memory = database.prepare(
-      `INSERT INTO relationship_memories
-         (id, persona_id, content, participants, embedding, status, confirmed_by,
-          confirmed_at, created_at, updated_at)
-       SELECT ?, ?, ?, '[]', ?, 'confirmed', ?, ?, ?, ?
-       FROM persona_sources
-       WHERE id = ? AND persona_id = ?`,
-    ).run(
-      m.id, m.personaId, m.content, buf, m.createdBy, createdAt, createdAt, createdAt,
-      m.sourceId, m.personaId,
-    );
-    if (memory.changes !== 1) throw new Error("relationship_memory_insert_failed");
-
-    const link = database.prepare(
-      `INSERT INTO persona_item_sources
-         (item_kind, item_id, source_id, source_excerpt, created_at)
-       SELECT 'relationship_memory', memory.id, source.id, ?, ?
-       FROM relationship_memories memory
-       JOIN persona_sources source ON source.persona_id = memory.persona_id
-       WHERE memory.id = ? AND memory.persona_id = ? AND source.id = ?`,
-    ).run(m.content, createdAt, m.id, m.personaId, m.sourceId);
-    if (link.changes !== 1) throw new Error("persona_source_link_failed");
+    for (const input of inputs) insertMemoryWithDb(database, input);
   })();
 }
 
@@ -909,12 +918,13 @@ export function listMemories(personaId: string): MemoryRow[] {
 export function deleteMemory(id: string) {
   const db = getDb();
   const now = new Date().toISOString();
-  db.prepare(
+  const result = db.prepare(
     `UPDATE relationship_memories
      SET status = 'revoked', confirmed_by = NULL, confirmed_at = NULL,
          revoked_at = ?, updated_at = ?
-     WHERE id = ? AND status IN ('pending', 'confirmed', 'conflicted')`,
+     WHERE id = ? AND status = 'confirmed'`,
   ).run(now, now, id);
+  return result.changes === 1;
 }
 
 /** 根据 id 获取单条记忆（用于删除前校验归属） */
@@ -924,7 +934,7 @@ export function getMemoryById(id: string): { id: string; personaId: string; cont
     .prepare(
       `SELECT id, persona_id, content
        FROM relationship_memories
-       WHERE id = ? AND status <> 'revoked'`,
+       WHERE id = ? AND status = 'confirmed'`,
     )
     .get(id) as any;
   if (!row) return null;

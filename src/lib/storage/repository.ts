@@ -11,6 +11,7 @@ import {
   getPersonaKnowledgeItem,
   getUserByEmail,
   insertMemory,
+  insertMemories,
   insertMessage,
   listMemories,
   listMessages,
@@ -137,7 +138,8 @@ export function createLocalRepository(): AppRepository {
     async listMemories(personaId) { return listMemories(personaId); },
     async getMemoryById(id) { return getMemoryById(id); },
     async insertMemory(input) { insertMemory(input); },
-    async deleteMemory(id) { deleteMemory(id); },
+    async insertMemories(inputs) { insertMemories(inputs); },
+    async deleteMemory(id) { return deleteMemory(id); },
     async loadMemoriesWithEmbeddings(personaId) {
       return loadMemoriesWithEmbeddings(personaId);
     },
