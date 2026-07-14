@@ -75,10 +75,17 @@ async function withMockProviderData(
   data: ProviderRow[],
   run: () => Promise<void>,
 ): Promise<void> {
+  await withMockProviderBody(JSON.stringify({ data }), run);
+}
+
+async function withMockProviderBody(
+  body: string,
+  run: () => Promise<void>,
+): Promise<void> {
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.SILICONFLOW_API_KEY;
   globalThis.fetch = async () =>
-    new Response(JSON.stringify({ data }), {
+    new Response(body, {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
@@ -98,6 +105,18 @@ async function withMockProviderData(
 
 describe("embed", { concurrency: false }, () => {
   const texts = ["query", "fact", "memory"];
+
+  it("拒绝 JSON 根值为 null 的响应", async () => {
+    await withMockProviderBody("null", async () => {
+      await assert.rejects(embed(["query"]), /embedding_response_invalid/);
+    });
+  });
+
+  it("拒绝无法解析的 JSON 响应", async () => {
+    await withMockProviderBody("not-json", async () => {
+      await assert.rejects(embed(["query"]), /embedding_response_invalid/);
+    });
+  });
 
   it("拒绝不完整或 index 非法的批量响应", async () => {
     const vector = makeEmbedding(1);

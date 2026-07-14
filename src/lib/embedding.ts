@@ -31,8 +31,22 @@ export async function embed(texts: string[]): Promise<Float32Array[]> {
     const err = await resp.text();
     throw new Error(`Embedding 调用失败 ${resp.status}: ${err}`);
   }
-  const json = (await resp.json()) as { data?: unknown };
-  if (!Array.isArray(json.data) || json.data.length !== texts.length) {
+  let json: unknown;
+  try {
+    json = await resp.json();
+  } catch {
+    throw new Error("embedding_response_invalid:json");
+  }
+  if (
+    typeof json !== "object" ||
+    json === null ||
+    !Array.isArray((json as { data?: unknown }).data)
+  ) {
+    throw new Error("embedding_response_invalid:structure");
+  }
+
+  const data = (json as { data: unknown[] }).data;
+  if (data.length !== texts.length) {
     throw new Error("embedding_response_invalid:count");
   }
 
@@ -40,7 +54,7 @@ export async function embed(texts: string[]): Promise<Float32Array[]> {
     { length: texts.length },
     () => undefined,
   );
-  for (const item of json.data) {
+  for (const item of data) {
     if (typeof item !== "object" || item === null) {
       throw new Error("embedding_response_invalid:structure");
     }
