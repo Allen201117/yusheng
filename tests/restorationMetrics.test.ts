@@ -122,6 +122,16 @@ it("reports null rates for cohorts with no feedback", () => {
   assert.equal(summary.deceased.effectiveRate, null);
 });
 
+it("returns the exact effective rate without rounding non-terminating decimals", () => {
+  const summary = summarizeRestorationFeedback([
+    feedbackRow("exact-rate-1"),
+    feedbackRow("exact-rate-2", { voiceSimilarity: 3 }),
+    feedbackRow("exact-rate-3", { voiceSimilarity: 3 }),
+  ]);
+
+  assert.equal(summary.living.effectiveRate, 1 / 3);
+});
+
 it("requires 10 evaluators, 30 sessions, and a 0.6 effective rate for each cohort", () => {
   const passing = cohortRows({
     cohort: "living",
