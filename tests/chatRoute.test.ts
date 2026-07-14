@@ -306,16 +306,20 @@ it("fails closed before turn persistence when session tracking is unavailable", 
   assert.ok(h.logs.some((entry) => entry.event === "chat_session_tracking_unavailable"));
 });
 
-it("does not create a turn or model stream after voice authorization is revoked", async () => {
+it("persists a fixed boundary but creates no restoration session or model stream after revocation", async () => {
   const h = makeHarness({ authorization: "revoked" });
   const events = await sseEvents(await h.handlers.POST(postRequest({
     personaId: persona.id,
     text: "今天陪我说说话",
   })));
   assert.equal(h.calls.sessions.length, 0);
-  assert.equal(h.calls.start.length, 0);
+  assert.equal(h.calls.start.length, 1);
+  assert.equal(h.calls.start[0].sessionId, null);
   assert.equal(h.modelCalls.length, 0);
   assert.equal((events[0].meta as Record<string, unknown>).boundaryKind, "voice_authorization_denied");
+  assert.equal(h.calls.completes.length, 1);
+  assert.equal(h.calls.completes[0].mode, "boundary");
+  assert.equal(events.some((event) => "sentence" in event), false);
 });
 
 it("still streams self-harm safety guidance when persona lookup storage fails", async () => {
@@ -373,17 +377,14 @@ it("handles every boundary with no evidence, model, speech, or sentence event", 
     const h = makeHarness(options);
     const response = await h.handlers.POST(postRequest({ personaId: persona.id, text }));
     const events = await sseEvents(response);
-    const authorizationDenied = kind === "voice_authorization_denied";
-    assert.equal(h.calls.start.length, authorizationDenied ? 0 : 1, kind);
-    if (!authorizationDenied) assert.equal(h.calls.start[0].sessionId, null, kind);
+    assert.equal(h.calls.start.length, 1, kind);
+    assert.equal(h.calls.start[0].sessionId, null, kind);
     assert.equal(h.calls.sessions.length, 0, kind);
     assert.equal(h.calls.binds.length, 0, kind);
     assert.equal(h.modelCalls.length, 0, kind);
-    assert.equal(h.calls.completes.length, authorizationDenied ? 0 : 1, kind);
-    if (!authorizationDenied) {
-      assert.equal(h.calls.completes[0].mode, "boundary", kind);
-      assert.equal(h.calls.completes[0].boundaryKind, kind, kind);
-    }
+    assert.equal(h.calls.completes.length, 1, kind);
+    assert.equal(h.calls.completes[0].mode, "boundary", kind);
+    assert.equal(h.calls.completes[0].boundaryKind, kind, kind);
     assert.equal((events[0].meta as Record<string, unknown>).speechAllowed, false, kind);
     assert.deepEqual((events[0].meta as Record<string, unknown>).evidence, [], kind);
     assert.equal(events.some((event) => "sentence" in event), false, kind);
@@ -392,7 +393,6 @@ it("handles every boundary with no evidence, model, speech, or sentence event", 
     assert.equal(completion.boundary, true, kind);
     assert.equal(completion.safety, true, kind);
     assert.equal(completion.speechAllowed, false, kind);
-    if (authorizationDenied) assert.equal(completion.persisted, false, kind);
     assert.equal("reply" in completion, false, kind);
     if (kind === "self_harm" || kind === "real_world_danger") assert.equal(h.calls.authorization, 0, kind);
   }
@@ -406,8 +406,11 @@ it("never lets disabled staged enforcement bypass the chat authorization hard ga
       text: "今天陪我说说话",
     })));
     assert.equal(h.modelCalls.length, 0, String(authorization));
-    assert.equal(h.calls.start.length, 0, String(authorization));
-    assert.equal(h.calls.completes.length, 0, String(authorization));
+    assert.equal(h.calls.start.length, 1, String(authorization));
+    assert.equal(h.calls.start[0].sessionId, null, String(authorization));
+    assert.equal(h.calls.completes.length, 1, String(authorization));
+    assert.equal(h.calls.completes[0].mode, "boundary", String(authorization));
+    assert.equal(h.calls.completes[0].boundaryKind, "voice_authorization_denied", String(authorization));
     assert.equal((events[0].meta as Record<string, unknown>).speechAllowed, false, String(authorization));
     assert.equal(events.some((event) => "sentence" in event), false, String(authorization));
   }

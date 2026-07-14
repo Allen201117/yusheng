@@ -1298,6 +1298,8 @@ it("starts, binds, and completes a grounded turn in transactions with stable loc
     call.text.includes("FROM conversation_sessions sessions") && call.text.includes("FOR UPDATE"))!;
   assert.match(sessionLock.text, /JOIN voice_authorizations authorization/);
   assert.match(sessionLock.text, /authorization\.status = 'approved'/);
+  assert.match(sessionLock.text, /FOR UPDATE OF authorization/);
+  assert.doesNotMatch(sessionLock.text, /FOR UPDATE\s*$/m);
   const assistantInsert = fake.calls.find((call) =>
     call.text.includes("INSERT INTO messages") && call.params[0] === "assistant-1")!;
   assert.match(assistantInsert.text, /'assistant'/);

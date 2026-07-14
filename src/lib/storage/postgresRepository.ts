@@ -1555,7 +1555,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
               AND authorization.speaker_status = sessions.cohort
               AND authorization.status = 'approved'
              WHERE sessions.id = $1 AND sessions.persona_id = $2 AND sessions.status = 'active'
-             FOR UPDATE`,
+             FOR UPDATE OF authorization`,
             [input.sessionId, input.personaId],
           );
           if (sessions.length !== 1) throw new Error("conversation_turn_session_mismatch");
