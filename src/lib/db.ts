@@ -55,6 +55,7 @@ export function getDb(): Database.Database {
   initSchema(_db);
   migrateUserColumn(_db);
   migratePersonaFactEmbedding(_db);
+  migrateRestorationFeedbackSchema(_db);
   migrateLegacyPersonaKnowledge(_db);
   return _db;
 }
@@ -282,6 +283,157 @@ function migratePersonaFactEmbedding(db: Database.Database) {
   if (!columns.some((column) => column.name === "embedding")) {
     db.exec("ALTER TABLE persona_facts ADD COLUMN embedding BLOB");
   }
+}
+
+/** Add the restoration-feedback schema without rewriting legacy conversation turns. */
+export function migrateRestorationFeedbackSchema(db: Database.Database) {
+  db.transaction(() => {
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_personas_restoration_owner_voice
+        ON personas(id, user_id, voice_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_authorizations_restoration_owner_voice
+        ON voice_authorizations(id, voice_id, user_id);
+
+      CREATE TABLE IF NOT EXISTS conversation_sessions (
+        id                     TEXT PRIMARY KEY,
+        persona_id             TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+        evaluator_user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        voice_id               TEXT NOT NULL,
+        voice_authorization_id TEXT NOT NULL REFERENCES voice_authorizations(id),
+        cohort                 TEXT NOT NULL CHECK (cohort IN ('living','deceased')),
+        status                 TEXT NOT NULL CHECK (status IN ('active','rated','expired')),
+        started_at             TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_activity_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        rated_at               TEXT,
+        FOREIGN KEY (persona_id, evaluator_user_id, voice_id)
+          REFERENCES personas(id, user_id, voice_id) ON DELETE CASCADE,
+        FOREIGN KEY (voice_authorization_id, voice_id, evaluator_user_id)
+          REFERENCES voice_authorizations(id, voice_id, user_id) ON DELETE RESTRICT
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_sessions_one_active
+        ON conversation_sessions(persona_id, evaluator_user_id) WHERE status = 'active';
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_sessions_id_persona
+        ON conversation_sessions(id, persona_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_sessions_id_persona_voice
+        ON conversation_sessions(id, persona_id, voice_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_sessions_id_persona_evaluator
+        ON conversation_sessions(id, persona_id, evaluator_user_id);
+      CREATE INDEX IF NOT EXISTS idx_conversation_sessions_evaluator_activity
+        ON conversation_sessions(evaluator_user_id, last_activity_at DESC);
+    `);
+
+    const turnColumns = db.pragma("table_info(conversation_turns)") as { name: string }[];
+    if (!turnColumns.some((column) => column.name === "session_id")) {
+      db.exec(
+        "ALTER TABLE conversation_turns ADD COLUMN session_id TEXT REFERENCES conversation_sessions(id) ON DELETE SET NULL",
+      );
+    }
+    if (!turnColumns.some((column) => column.name === "speech_tracking_failed")) {
+      db.exec(
+        "ALTER TABLE conversation_turns ADD COLUMN speech_tracking_failed INTEGER NOT NULL DEFAULT 0 CHECK (speech_tracking_failed IN (0,1))",
+      );
+    }
+
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_turns_session_consistency
+        ON conversation_turns(id, persona_id, session_id);
+      CREATE INDEX IF NOT EXISTS idx_conversation_turns_session_created
+        ON conversation_turns(session_id, created_at) WHERE session_id IS NOT NULL;
+
+      CREATE TABLE IF NOT EXISTS conversation_sentences (
+        id              TEXT PRIMARY KEY,
+        session_id      TEXT NOT NULL REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+        turn_id         TEXT NOT NULL REFERENCES conversation_turns(id) ON DELETE CASCADE,
+        persona_id      TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+        sentence_index  INTEGER NOT NULL CHECK (typeof(sentence_index) = 'integer' AND sentence_index >= 0),
+        text            TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 500),
+        emotion         TEXT NOT NULL CHECK (emotion IN ('calm','warm','happy','sad','concerned','nostalgic')),
+        intensity       INTEGER NOT NULL CHECK (typeof(intensity) = 'integer' AND intensity BETWEEN 0 AND 100),
+        speed           REAL NOT NULL CHECK (speed BETWEEN 0.75 AND 1.15),
+        pause_after_ms  INTEGER NOT NULL CHECK (typeof(pause_after_ms) = 'integer' AND pause_after_ms BETWEEN 0 AND 300000),
+        planner_version TEXT NOT NULL CHECK (length(planner_version) BETWEEN 1 AND 100),
+        created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (turn_id, sentence_index),
+        UNIQUE (id, session_id, turn_id, persona_id),
+        FOREIGN KEY (session_id, persona_id)
+          REFERENCES conversation_sessions(id, persona_id) ON DELETE CASCADE,
+        FOREIGN KEY (turn_id, persona_id, session_id)
+          REFERENCES conversation_turns(id, persona_id, session_id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_conversation_sentences_session_turn
+        ON conversation_sentences(session_id, turn_id, sentence_index);
+
+      CREATE TABLE IF NOT EXISTS tts_attempts (
+        id                 TEXT PRIMARY KEY,
+        sentence_id        TEXT NOT NULL REFERENCES conversation_sentences(id) ON DELETE CASCADE,
+        session_id         TEXT NOT NULL REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+        turn_id            TEXT NOT NULL REFERENCES conversation_turns(id) ON DELETE CASCADE,
+        persona_id         TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+        voice_id           TEXT NOT NULL,
+        attempt_no         INTEGER NOT NULL CHECK (typeof(attempt_no) = 'integer' AND attempt_no >= 1),
+        status             TEXT NOT NULL CHECK (status IN ('started','completed','failed')),
+        voice_source       TEXT CHECK (voice_source IS NULL OR voice_source IN ('preset','dynamic')),
+        provider_voice_id  TEXT,
+        tts_model          TEXT NOT NULL CHECK (length(tts_model) BETWEEN 1 AND 100),
+        tts_config_version TEXT NOT NULL CHECK (length(tts_config_version) BETWEEN 1 AND 100),
+        fell_back          INTEGER NOT NULL DEFAULT 0 CHECK (fell_back IN (0,1)),
+        storage_ms         INTEGER CHECK (storage_ms IS NULL OR (typeof(storage_ms) = 'integer' AND storage_ms >= 0)),
+        provider_ms        INTEGER CHECK (provider_ms IS NULL OR (typeof(provider_ms) = 'integer' AND provider_ms >= 0)),
+        total_ms           INTEGER CHECK (total_ms IS NULL OR (typeof(total_ms) = 'integer' AND total_ms >= 0)),
+        stable_error_code  TEXT CHECK (stable_error_code IS NULL OR length(stable_error_code) <= 100),
+        created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        completed_at       TEXT,
+        UNIQUE (sentence_id, attempt_no),
+        FOREIGN KEY (sentence_id, session_id, turn_id, persona_id)
+          REFERENCES conversation_sentences(id, session_id, turn_id, persona_id) ON DELETE CASCADE,
+        FOREIGN KEY (session_id, persona_id, voice_id)
+          REFERENCES conversation_sessions(id, persona_id, voice_id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_tts_attempts_session_turn
+        ON tts_attempts(session_id, turn_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS playback_events (
+        event_id          TEXT PRIMARY KEY CHECK (length(event_id) BETWEEN 1 AND 100),
+        tts_attempt_id    TEXT NOT NULL REFERENCES tts_attempts(id) ON DELETE CASCADE,
+        event_type        TEXT NOT NULL CHECK (event_type IN ('audio_ready','play_started','play_completed','play_failed')),
+        client_elapsed_ms INTEGER NOT NULL CHECK (typeof(client_elapsed_ms) = 'integer' AND client_elapsed_ms BETWEEN 0 AND 300000),
+        received_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_playback_events_attempt_received
+        ON playback_events(tts_attempt_id, received_at);
+
+      CREATE TABLE IF NOT EXISTS conversation_feedback (
+        id                          TEXT PRIMARY KEY,
+        session_id                  TEXT NOT NULL REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+        persona_id                  TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+        evaluator_user_id           TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        evaluator_relation          TEXT NOT NULL CHECK (evaluator_relation IN ('self','family','friend','other')),
+        knows_voice_owner           INTEGER NOT NULL CHECK (knows_voice_owner = 1),
+        heard_all_rounds            INTEGER NOT NULL CHECK (heard_all_rounds = 1),
+        voice_similarity            INTEGER NOT NULL CHECK (typeof(voice_similarity) = 'integer' AND voice_similarity BETWEEN 1 AND 5),
+        expression_similarity       INTEGER NOT NULL CHECK (typeof(expression_similarity) = 'integer' AND expression_similarity BETWEEN 1 AND 5),
+        emotion_fit                 INTEGER NOT NULL CHECK (typeof(emotion_fit) = 'integer' AND emotion_fit BETWEEN 1 AND 5),
+        fact_trust                  INTEGER NOT NULL CHECK (typeof(fact_trust) = 'integer' AND fact_trust BETWEEN 1 AND 5),
+        discomfort                  INTEGER NOT NULL CHECK (typeof(discomfort) = 'integer' AND discomfort BETWEEN 1 AND 5),
+        major_fabrication           INTEGER NOT NULL CHECK (major_fabrication IN (0,1)),
+        identity_impersonation      INTEGER NOT NULL CHECK (identity_impersonation IN (0,1)),
+        authorization_violation     INTEGER NOT NULL CHECK (authorization_violation IN (0,1)),
+        comment                     TEXT,
+        created_at                  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (session_id, evaluator_user_id),
+        CHECK (comment IS NULL OR length(comment) <= 1000),
+        FOREIGN KEY (session_id, persona_id, evaluator_user_id)
+          REFERENCES conversation_sessions(id, persona_id, evaluator_user_id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_conversation_feedback_created
+        ON conversation_feedback(created_at DESC);
+    `);
+  })();
 }
 
 export function migrateLegacyPersonaKnowledge(db: Database.Database) {

@@ -143,6 +143,44 @@ it("adds grounded conversation durability and confirmed fact embeddings", async 
   );
 });
 
+it("adds owner-consistent auditable restoration feedback schema", async () => {
+  const sql = await readFile(
+    new URL("../migrations/006_restoration_feedback.sql", import.meta.url),
+    "utf8",
+  );
+
+  for (const table of [
+    "conversation_sessions",
+    "conversation_sentences",
+    "tts_attempts",
+    "playback_events",
+    "conversation_feedback",
+  ]) {
+    assert.match(sql, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}`));
+  }
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS session_id text REFERENCES conversation_sessions\(id\) ON DELETE SET NULL/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS speech_tracking_failed boolean NOT NULL DEFAULT false/);
+  assert.match(sql, /WHERE status = 'active'/);
+  assert.match(sql, /UNIQUE \(turn_id, sentence_index\)/);
+  assert.match(sql, /UNIQUE \(sentence_id, attempt_no\)/);
+  assert.match(sql, /event_id text PRIMARY KEY/);
+  assert.match(sql, /UNIQUE \(session_id, evaluator_user_id\)/);
+  for (const score of [
+    "voice_similarity",
+    "expression_similarity",
+    "emotion_fit",
+    "fact_trust",
+    "discomfort",
+  ]) {
+    assert.match(sql, new RegExp(`${score} integer NOT NULL CHECK \\(${score} BETWEEN 1 AND 5\\)`));
+  }
+  assert.match(sql, /CHECK \(knows_voice_owner = true\)/);
+  assert.match(sql, /CHECK \(heard_all_rounds = true\)/);
+  assert.match(sql, /FOREIGN KEY \(persona_id, evaluator_user_id, voice_id\)[\s\S]*REFERENCES personas\(id, user_id, voice_id\)/);
+  assert.match(sql, /FOREIGN KEY \(voice_authorization_id, voice_id, evaluator_user_id\)[\s\S]*REFERENCES voice_authorizations\(id, voice_id, user_id\)/);
+  assert.match(sql, /CHECK \(comment IS NULL OR char_length\(comment\) <= 1000\)/);
+});
+
 it("applies a pending migration and records it in one transaction", async () => {
   const queries: Array<{ text: string; params: unknown[] }> = [];
   let transactions = 0;
