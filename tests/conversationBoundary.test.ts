@@ -65,6 +65,34 @@ describe("detectConversationBoundary", () => {
     );
   });
 
+  it("treats current-token reflection phrases as past narration", () => {
+    for (const text of [
+      "我刚刚想起他以前持刀威胁我的事",
+      "我刚刚回想起妈妈去世前大出血的那天",
+    ]) {
+      assert.equal(detectConversationBoundary(text, ["妈妈"]), null, text);
+    }
+  });
+
+  it("recognizes trapped-story continuations without requiring punctuation", () => {
+    for (const text of [
+      "我被困在房间里时妈妈一直陪我说话",
+      "我被锁在屋里时她在门外安慰我",
+    ]) {
+      assert.equal(detectConversationBoundary(text, ["妈妈"]), null, text);
+    }
+  });
+
+  it("keeps explicit current trapped situations inside the danger boundary", () => {
+    for (const text of ["我现在被困在房间里出不去", "我被困在房间里时怎么办"]) {
+      assert.equal(
+        detectConversationBoundary(text, ["妈妈"])?.kind,
+        "real_world_danger",
+        text,
+      );
+    }
+  });
+
   it("detects requests to make major decisions for the person", () => {
     for (const text of [
       "你替妈妈决定要不要卖房",

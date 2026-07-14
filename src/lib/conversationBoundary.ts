@@ -40,7 +40,7 @@ const MEDICAL_EMERGENCY_PATTERNS = [
 
 const PAST_DANGER_PATTERNS = [
   /(?:以前|曾经|当时|那时|小时候|去世前|临终前|过去|很多年前)/u,
-  /被(?:困|锁|堵).{0,20}(?:的时候|时)(?:[，,。]|$)/u,
+  /被(?:困|锁|堵).{0,20}(?:的时候|时)(?:[，,。])?(?=(?:妈妈|爸爸|她|他|家人|朋友|后来|那天|当时|有人|我记得))/u,
 ];
 
 function hasDangerPattern(text: string): boolean {
@@ -52,7 +52,7 @@ function hasDangerPattern(text: string): boolean {
 
 function hasCurrentDangerSignal(text: string): boolean {
   const withoutReflection = text.replace(
-    /现在(?:想起来|想起|回想(?:起来)?|回忆(?:起来|起)?|说起)/gu,
+    /(?:现在|刚刚|此刻|眼下|还在|仍在)(?:才)?(?:想起来|想起|回想(?:起来|起)?|回忆(?:起来|起)?|说起)/gu,
     "回忆",
   );
   if (/^(?:救命|快救我)/u.test(withoutReflection)) return true;
