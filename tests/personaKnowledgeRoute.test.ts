@@ -294,6 +294,10 @@ it("rejects invalid review identity, enum, transition shape, and server fields",
     personaId: "p", kind: "speech_style", id: "1", action: "confirm",
     edits: { status: "confirmed" },
   }), /status/);
+  expectBad(() => parseReviewKnowledgeBody({
+    personaId: "p", kind: "fact", id: "1", action: "confirm",
+    embedding: { content: "forged", vector: Array(1024).fill(0.01) },
+  }), /embedding/);
 });
 
 it("route source shows server-generated ownership and audit fields", async () => {

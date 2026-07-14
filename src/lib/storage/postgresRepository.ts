@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { EMBEDDING_DIM } from "../embedding";
 import { normalizePersonaKnowledgeText } from "../personaKnowledge";
 import {
   buildPersonaKnowledgeReviewResult,
@@ -23,7 +24,7 @@ import type {
   PersonaKnowledgeBundle,
   PersonaKnowledgeItem,
   PersonaKnowledgeKind,
-  PersonaKnowledgeReviewInput,
+  PersonaKnowledgeAtomicReviewInput,
   PersonaKnowledgeReviewResult,
   PersonaKnowledgeStatus,
   PersonaKnowledgeStatusChange,
@@ -182,6 +183,11 @@ const KNOWLEDGE_TABLES = {
   speech_style: "speech_style_items",
 } as const;
 
+const EMBEDDING_KNOWLEDGE_TABLES = {
+  fact: "persona_facts",
+  relationship_memory: "relationship_memories",
+} as const;
+
 const PERSONA_SOURCE_COLUMNS = `
   id, persona_id, source_type, content_text, object_path, checksum_algorithm,
   checksum, status, created_by, created_at, revoked_at
@@ -318,11 +324,12 @@ async function getPersonaKnowledgeItemWith(
   kind: PersonaKnowledgeKind,
   id: string,
   personaId: string,
+  forUpdate = false,
 ): Promise<PersonaKnowledgeItem | null> {
   const table = KNOWLEDGE_TABLES[kind];
   const rows = await executor.query<Record<string, unknown>>(
     `SELECT ${columnsForKnowledgeKind(kind)} FROM ${table}
-     WHERE id = $1 AND persona_id = $2`,
+     WHERE id = $1 AND persona_id = $2${forUpdate ? "\n     FOR UPDATE" : ""}`,
     [id, personaId],
   );
   return rows[0] ? mapKnowledgeItem(kind, rows[0]) : null;
@@ -418,6 +425,24 @@ async function setPersonaKnowledgeStatusesWith(
     changed.push(mapKnowledgeItem(input.kind, rows[0]));
   }
   return changed;
+}
+
+async function storeKnowledgeEmbeddingWith(
+  executor: SqlExecutor,
+  kind: keyof typeof EMBEDDING_KNOWLEDGE_TABLES,
+  id: string,
+  personaId: string,
+  vector: Float32Array,
+): Promise<void> {
+  const table = EMBEDDING_KNOWLEDGE_TABLES[kind];
+  const rows = await executor.query<{ id: string }>(
+    `UPDATE ${table}
+     SET embedding = $3::vector
+     WHERE id = $1 AND persona_id = $2
+     RETURNING id`,
+    [id, personaId, serializeVector(vector)],
+  );
+  if (!rows[0]) throw new Error("knowledge_embedding_stale");
 }
 
 function mapPersona(row: PersonaRow): Persona {
@@ -968,7 +993,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
     },
 
     async reviewPersonaKnowledgeAtomically(
-      input: PersonaKnowledgeReviewInput,
+      input: PersonaKnowledgeAtomicReviewInput,
     ): Promise<PersonaKnowledgeReviewResult> {
       return sql.transaction(async (transaction) => {
         await transaction.query(
@@ -980,6 +1005,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
           input.kind,
           input.id,
           input.personaId,
+          true,
         );
         if (!item) throw new Error("knowledge_not_found");
 
@@ -994,6 +1020,23 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
           });
           if (!updated) throw new Error("knowledge_status_changed");
           item = updated;
+        }
+
+        if (input.embedding !== undefined) {
+          if (
+            item.kind === "speech_style"
+            || item.content !== input.embedding.content
+            || input.embedding.vector.length !== EMBEDDING_DIM
+          ) {
+            throw new Error("knowledge_embedding_stale");
+          }
+          await storeKnowledgeEmbeddingWith(
+            transaction,
+            item.kind,
+            item.id,
+            item.personaId,
+            input.embedding.vector,
+          );
         }
 
         const confirmedFacts = input.action === "confirm" && item.kind === "fact"

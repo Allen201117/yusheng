@@ -136,6 +136,13 @@ export type PersonaKnowledgeReviewInput = {
   edits?: Record<string, string | string[] | null>;
 };
 
+export type PersonaKnowledgeAtomicReviewInput = PersonaKnowledgeReviewInput & {
+  embedding?: {
+    content: string;
+    vector: Float32Array;
+  };
+};
+
 export type PersonaKnowledgeStatusChange = {
   kind: PersonaKnowledgeKind;
   id: string;
@@ -438,7 +445,7 @@ export interface AppRepository {
     inputs: PersonaKnowledgeStatusChange[],
   ): Promise<PersonaKnowledgeItem[]>;
   reviewPersonaKnowledgeAtomically(
-    input: PersonaKnowledgeReviewInput,
+    input: PersonaKnowledgeAtomicReviewInput,
   ): Promise<PersonaKnowledgeReviewResult>;
   revokePersonaSource(
     sourceId: string,

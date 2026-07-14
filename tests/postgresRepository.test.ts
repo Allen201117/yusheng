@@ -109,6 +109,40 @@ it("adds persona knowledge tables and idempotently copies legacy memories", asyn
   assert.match(sql, /WHERE status = 'confirmed'/);
 });
 
+it("adds grounded conversation durability and confirmed fact embeddings", async () => {
+  const sql = await readFile(
+    new URL("../migrations/005_grounded_conversation.sql", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(sql, /ALTER TABLE persona_facts ADD COLUMN IF NOT EXISTS embedding vector\(1024\)/);
+  for (const table of [
+    "conversation_turns",
+    "conversation_turn_evidence",
+    "message_evidence",
+  ]) {
+    assert.match(sql, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}`));
+  }
+  assert.match(sql, /mode[^\n]*CHECK \(mode IN \('grounded', 'companionship', 'boundary'\)\)/);
+  assert.match(
+    sql,
+    /assistant_message_id text UNIQUE REFERENCES messages\(id\) ON DELETE CASCADE/,
+  );
+
+  const turnsBody = sql.match(
+    /CREATE TABLE IF NOT EXISTS conversation_turns \(([\s\S]*?)\n\);/,
+  )?.[1];
+  assert.ok(turnsBody, "conversation_turns CREATE TABLE body must be extractable");
+  assert.match(
+    turnsBody,
+    /status[^\n]*CHECK \(status IN \('started', 'completed', 'generation_failed', 'assistant_persistence_failed'\)\)/,
+  );
+  assert.match(
+    turnsBody,
+    /status = 'completed'[\s\S]*assistant_message_id IS NOT NULL/,
+  );
+});
+
 it("applies a pending migration and records it in one transaction", async () => {
   const queries: Array<{ text: string; params: unknown[] }> = [];
   let transactions = 0;
@@ -635,6 +669,9 @@ it("reviews persona knowledge under one transaction-scoped persona lock", async 
           normalized_value: params[4],
         }] as unknown as T[];
       }
+      if (text.includes("UPDATE persona_facts") && text.includes("SET embedding")) {
+        return [{ id: "fact-new" }] as unknown as T[];
+      }
       if (text.includes("UPDATE persona_facts")) {
         const source = params[0] === "fact-old" ? confirmedRow : pendingRow;
         return [{
@@ -670,6 +707,10 @@ it("reviews persona knowledge under one transaction-scoped persona lock", async 
     id: "fact-new",
     action: "confirm",
     edits: { content: "改后喜欢咖啡", normalizedValue: "咖啡" },
+    embedding: {
+      content: "改后喜欢咖啡",
+      vector: new Float32Array(1024).fill(0.01),
+    },
   });
 
   assert.equal(transactions, 1);
@@ -678,17 +719,74 @@ it("reviews persona knowledge under one transaction-scoped persona lock", async 
   const itemReadIndex = transactionCalls.findIndex((call) =>
     call.text.includes("FROM persona_facts") && call.text.includes("WHERE id = $1"));
   assert.ok(itemReadIndex > 0);
+  assert.match(transactionCalls[itemReadIndex].text, /FOR UPDATE/);
   const editIndex = transactionCalls.findIndex((call) =>
     call.text.includes("UPDATE persona_facts") && call.text.includes("status = 'pending'"));
   const conflictReadIndex = transactionCalls.findIndex((call) =>
     call.text.includes("FROM persona_facts") && call.text.includes("status = 'confirmed'"));
+  const embeddingIndex = transactionCalls.findIndex((call) =>
+    call.text.includes("UPDATE persona_facts") && call.text.includes("SET embedding"));
   const statusIndex = transactionCalls.findIndex((call) =>
     call.text.includes("UPDATE persona_facts") && call.text.includes("status = $4"));
-  assert.ok(itemReadIndex < editIndex && editIndex < conflictReadIndex && conflictReadIndex < statusIndex);
+  assert.ok(
+    itemReadIndex < editIndex
+    && editIndex < embeddingIndex
+    && embeddingIndex < conflictReadIndex
+    && conflictReadIndex < statusIndex,
+  );
+  assert.equal(transactionCalls[embeddingIndex].params[0], "fact-new");
+  assert.equal(transactionCalls[embeddingIndex].params[1], "persona-1");
+  assert.match(String(transactionCalls[embeddingIndex].params[2]), /^\[0\.009999/);
   assert.equal(result.item.id, "fact-new");
   assert.equal(result.item.status, "conflicted");
   assert.deepEqual(result.conflicts.map((item) => item.id), ["fact-old"]);
   assert.equal(result.conflicts[0].conflictGroupId, result.item.conflictGroupId);
+});
+
+it("rejects stale, speech-style, and wrong-sized confirmation embeddings before status changes", async () => {
+  const now = "2026-07-14T00:00:00.000Z";
+  const rows = {
+    fact: {
+      id: "fact-1", persona_id: "persona-1", fact_type: "preference",
+      fact_key: "favorite drink", content: "她喜欢茶", normalized_value: "茶",
+      status: "pending", conflict_group_id: null, confirmed_by: null, confirmed_at: null,
+      revoked_at: null, created_at: now, updated_at: now,
+    },
+    speech_style: {
+      id: "style-1", persona_id: "persona-1", category: "tone", content: "慢慢来",
+      example: null, status: "pending", conflict_group_id: null, confirmed_by: null,
+      confirmed_at: null, revoked_at: null, created_at: now, updated_at: now,
+    },
+  } as const;
+
+  for (const scenario of [
+    { kind: "fact" as const, id: "fact-1", content: "过期内容", vector: new Float32Array(1024) },
+    { kind: "speech_style" as const, id: "style-1", content: "慢慢来", vector: new Float32Array(1024) },
+    { kind: "fact" as const, id: "fact-1", content: "她喜欢茶", vector: new Float32Array(1023) },
+  ]) {
+    const fake = createFakeSql((text) => {
+      if (text.includes("pg_advisory_xact_lock")) return [];
+      if (text.includes("FROM persona_facts") && text.includes("WHERE id = $1")) return [rows.fact];
+      if (text.includes("FROM speech_style_items") && text.includes("WHERE id = $1")) {
+        return [rows.speech_style];
+      }
+      throw new Error(`unexpected query after invalid embedding: ${text}`);
+    });
+    const repo = createPostgresRepository(fake.executor);
+
+    await assert.rejects(repo.reviewPersonaKnowledgeAtomically({
+      personaId: "persona-1",
+      actorUserId: "user-1",
+      kind: scenario.kind,
+      id: scenario.id,
+      action: "confirm",
+      embedding: { content: scenario.content, vector: scenario.vector },
+    }), /knowledge_embedding_stale/);
+    assert.equal(
+      fake.calls.some((call) => call.text.includes("SET status = $4")),
+      false,
+    );
+  }
 });
 
 it("uses confirmed relationship memories and compare-and-set status updates", async () => {

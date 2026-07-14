@@ -1,4 +1,5 @@
 import { factsConflict, requireKnowledgeTransition } from "./personaKnowledge";
+import { embedOne } from "./embedding";
 import type {
   AppRepository,
   PersonaFact,
@@ -137,8 +138,31 @@ export function buildPersonaKnowledgeReviewResult(
 }
 
 export async function reviewPersonaKnowledge(
-  input: PersonaKnowledgeReviewInput & { repository: AppRepository },
+  input: PersonaKnowledgeReviewInput & {
+    repository: AppRepository;
+    embedText?: (text: string) => Promise<Float32Array>;
+  },
 ): Promise<PersonaKnowledgeReviewResult> {
-  const { repository, ...review } = input;
+  const { repository, embedText = embedOne, ...review } = input;
+  const item = await repository.getPersonaKnowledgeItem(
+    review.kind,
+    review.id,
+    review.personaId,
+  );
+  if (!item) throw new Error("knowledge_not_found");
+
+  if (
+    review.action === "confirm"
+    && (review.kind === "fact" || review.kind === "relationship_memory")
+  ) {
+    const finalContent = review.edits?.content ?? item.content;
+    if (typeof finalContent !== "string") throw new Error("invalid_knowledge_content");
+    const vector = await embedText(finalContent);
+    return repository.reviewPersonaKnowledgeAtomically({
+      ...review,
+      embedding: { content: finalContent, vector },
+    });
+  }
+
   return repository.reviewPersonaKnowledgeAtomically(review);
 }

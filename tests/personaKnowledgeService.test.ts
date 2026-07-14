@@ -10,6 +10,7 @@ import type {
   AppRepository,
   PersonaFact,
   PersonaKnowledgeItem,
+  RelationshipMemory,
   SpeechStyleItem,
 } from "../src/lib/storage/types";
 
@@ -38,6 +39,26 @@ function style(input: Partial<SpeechStyleItem> & Pick<SpeechStyleItem, "id" | "s
     category: "catchphrase",
     content: "慢慢来",
     example: null,
+    conflictGroupId: null,
+    confirmedBy: null,
+    confirmedAt: null,
+    revokedAt: null,
+    createdAt: "2026-07-14T00:00:00.000Z",
+    updatedAt: "2026-07-14T00:00:00.000Z",
+    ...input,
+  };
+}
+
+function memory(
+  input: Partial<RelationshipMemory> & Pick<RelationshipMemory, "id" | "status">,
+): RelationshipMemory {
+  return {
+    kind: "relationship_memory",
+    personaId: "persona-1",
+    content: "我们一起看过日落",
+    occurredAt: null,
+    location: null,
+    participants: [],
     conflictGroupId: null,
     confirmedBy: null,
     confirmedAt: null,
@@ -166,10 +187,13 @@ test("strictly maps a complete repository status result", () => {
   );
 });
 
-test("service delegates the whole review to one atomic repository call", async () => {
-  const expected = { item: style({ id: "style-1", status: "confirmed" }), conflicts: [] };
+function reviewRepository(item: PersonaKnowledgeItem) {
   const calls: unknown[] = [];
+  const expected = { item: { ...item, status: "confirmed" } as PersonaKnowledgeItem, conflicts: [] };
   const repository = new Proxy({
+    async getPersonaKnowledgeItem() {
+      return item;
+    },
     async reviewPersonaKnowledgeAtomically(input: unknown) {
       calls.push(input);
       return expected;
@@ -180,24 +204,114 @@ test("service delegates the whole review to one atomic repository call", async (
       return Reflect.get(target, property, receiver);
     },
   }) as unknown as AppRepository;
+  return { repository, calls, expected };
+}
+
+test("confirm embeds the final fact content once and passes the server vector atomically", async () => {
+  const fixture = reviewRepository(fact({ id: "fact-1", status: "pending", content: "原内容" }));
+  const embedded: string[] = [];
+  const vector = new Float32Array(1024).fill(0.01);
 
   const result = await reviewPersonaKnowledge({
-    repository,
+    repository: fixture.repository,
+    embedText: async (content) => {
+      embedded.push(content);
+      return vector;
+    },
     personaId: "persona-1",
     actorUserId: "user-1",
-    kind: "speech_style",
-    id: "style-1",
+    kind: "fact",
+    id: "fact-1",
     action: "confirm",
-    edits: {},
+    edits: { content: "她最喜欢桂花茶" },
   });
 
-  assert.equal(result, expected);
-  assert.deepEqual(calls, [{
+  assert.equal(result, fixture.expected);
+  assert.deepEqual(embedded, ["她最喜欢桂花茶"]);
+  assert.deepEqual(fixture.calls, [{
     personaId: "persona-1",
     actorUserId: "user-1",
-    kind: "speech_style",
-    id: "style-1",
+    kind: "fact",
+    id: "fact-1",
     action: "confirm",
-    edits: {},
+    edits: { content: "她最喜欢桂花茶" },
+    embedding: { content: "她最喜欢桂花茶", vector },
   }]);
+});
+
+test("relationship confirmation embeds edited content instead of pending content", async () => {
+  const fixture = reviewRepository(memory({ id: "memory-1", status: "pending", content: "旧回忆" }));
+  const embedded: string[] = [];
+  const vector = new Float32Array(1024).fill(0.01);
+
+  await reviewPersonaKnowledge({
+    repository: fixture.repository,
+    embedText: async (content) => {
+      embedded.push(content);
+      return vector;
+    },
+    personaId: "persona-1",
+    actorUserId: "user-1",
+    kind: "relationship_memory",
+    id: "memory-1",
+    action: "confirm",
+    edits: { content: "编辑后的回忆" },
+  });
+
+  assert.deepEqual(embedded, ["编辑后的回忆"]);
+  assert.deepEqual(fixture.calls, [{
+    personaId: "persona-1",
+    actorUserId: "user-1",
+    kind: "relationship_memory",
+    id: "memory-1",
+    action: "confirm",
+    edits: { content: "编辑后的回忆" },
+    embedding: { content: "编辑后的回忆", vector },
+  }]);
+});
+
+test("reject, revoke, and speech-style confirm never request embeddings", async () => {
+  for (const scenario of [
+    { item: fact({ id: "fact-reject", status: "pending" }), action: "reject" as const },
+    { item: memory({ id: "memory-revoke", status: "confirmed" }), action: "revoke" as const },
+    { item: style({ id: "style-confirm", status: "pending" }), action: "confirm" as const },
+  ]) {
+    const fixture = reviewRepository(scenario.item);
+    let embeddingCalls = 0;
+    await reviewPersonaKnowledge({
+      repository: fixture.repository,
+      embedText: async () => {
+        embeddingCalls += 1;
+        return new Float32Array(1024);
+      },
+      personaId: scenario.item.personaId,
+      actorUserId: "user-1",
+      kind: scenario.item.kind,
+      id: scenario.item.id,
+      action: scenario.action,
+    });
+    assert.equal(embeddingCalls, 0);
+    assert.equal("embedding" in (fixture.calls[0] as object), false);
+  }
+});
+
+test("embedding failure leaves pending and conflicted items untouched", async () => {
+  for (const status of ["pending", "conflicted"] as const) {
+    const fixture = reviewRepository(fact({ id: `fact-${status}`, status }));
+    await assert.rejects(reviewPersonaKnowledge({
+      repository: fixture.repository,
+      embedText: async () => { throw new Error("provider_down"); },
+      personaId: "persona-1",
+      actorUserId: "user-1",
+      kind: "fact",
+      id: `fact-${status}`,
+      action: "confirm",
+    }), /provider_down/);
+    assert.equal(fixture.calls.length, 0);
+    assert.equal((await fixture.repository.getPersonaKnowledgeItem(
+      "fact",
+      `fact-${status}`,
+      "persona-1",
+    ))?.status, status);
+  }
 });

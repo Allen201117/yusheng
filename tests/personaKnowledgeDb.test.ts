@@ -472,15 +472,29 @@ it("rolls back edits when the status decision fails", () => {
       id: "fact-rollback",
       action: "confirm",
       edits: { content: "改后内容", normalizedValue: "改后值" },
+      embedding: {
+        content: "改后内容",
+        vector: new Float32Array(1024).fill(0.01),
+      },
     }), /forced status failure/);
   } finally {
     database.exec("DROP TRIGGER IF EXISTS fail_fact_review_status");
   }
 
   const row = database.prepare(
-    "SELECT content, normalized_value, status FROM persona_facts WHERE id = ?",
-  ).get("fact-rollback") as { content: string; normalized_value: string; status: string };
-  assert.deepEqual(row, { content: "原内容", normalized_value: "原值", status: "pending" });
+    "SELECT content, normalized_value, status, embedding FROM persona_facts WHERE id = ?",
+  ).get("fact-rollback") as {
+    content: string;
+    normalized_value: string;
+    status: string;
+    embedding: Buffer | null;
+  };
+  assert.deepEqual(row, {
+    content: "原内容",
+    normalized_value: "原值",
+    status: "pending",
+    embedding: null,
+  });
 });
 
 it("does not edit a terminal item", () => {
@@ -504,4 +518,87 @@ it("does not edit a terminal item", () => {
     "SELECT content, normalized_value, status FROM persona_facts WHERE id = ?",
   ).get("fact-terminal") as { content: string; normalized_value: string; status: string };
   assert.deepEqual(row, { content: "不能改", normalized_value: "原值", status: "rejected" });
+});
+
+it("stores a matching fact embedding before confirmation", () => {
+  const now = "2026-07-14T06:00:00.000Z";
+  database.prepare(
+    `INSERT INTO persona_facts
+       (id, persona_id, fact_type, fact_key, content, normalized_value, status, created_at, updated_at)
+     VALUES ('fact-embedded', 'persona-1', 'preference', 'embedded drink',
+             '她最喜欢桂花茶', '桂花茶', 'pending', ?, ?)`,
+  ).run(now, now);
+  const vector = new Float32Array(1024).fill(0.01);
+
+  const result = dbModule.reviewPersonaKnowledgeAtomically({
+    personaId: "persona-1",
+    actorUserId: "user-1",
+    kind: "fact",
+    id: "fact-embedded",
+    action: "confirm",
+    embedding: { content: "她最喜欢桂花茶", vector },
+  });
+
+  assert.equal(result.item.status, "confirmed");
+  const row = database.prepare(
+    "SELECT embedding FROM persona_facts WHERE id = ?",
+  ).get("fact-embedded") as { embedding: Buffer };
+  assert.deepEqual(new Float32Array(
+    row.embedding.buffer,
+    row.embedding.byteOffset,
+    row.embedding.byteLength / Float32Array.BYTES_PER_ELEMENT,
+  ), vector);
+});
+
+it("rejects invalid confirmation embeddings and keeps knowledge unconfirmed", () => {
+  const now = "2026-07-14T07:00:00.000Z";
+  database.prepare(
+    `INSERT INTO persona_facts
+       (id, persona_id, fact_type, fact_key, content, normalized_value, status, created_at, updated_at)
+     VALUES ('fact-invalid-embedding', 'persona-1', 'preference', 'invalid embedding',
+             '事务内最终内容', '最终内容', 'pending', ?, ?)`,
+  ).run(now, now);
+  database.prepare(
+    `INSERT INTO speech_style_items
+       (id, persona_id, category, content, status, created_at, updated_at)
+     VALUES ('style-invalid-embedding', 'persona-1', 'tone', '慢慢来', 'pending', ?, ?)`,
+  ).run(now, now);
+
+  for (const input of [
+    {
+      kind: "fact" as const,
+      id: "fact-invalid-embedding",
+      embedding: { content: "过期内容", vector: new Float32Array(1024) },
+    },
+    {
+      kind: "fact" as const,
+      id: "fact-invalid-embedding",
+      embedding: { content: "事务内最终内容", vector: new Float32Array(1023) },
+    },
+    {
+      kind: "speech_style" as const,
+      id: "style-invalid-embedding",
+      embedding: { content: "慢慢来", vector: new Float32Array(1024) },
+    },
+  ]) {
+    assert.throws(() => dbModule.reviewPersonaKnowledgeAtomically({
+      personaId: "persona-1",
+      actorUserId: "user-1",
+      kind: input.kind,
+      id: input.id,
+      action: "confirm",
+      embedding: input.embedding,
+    }), /knowledge_embedding_stale/);
+  }
+
+  assert.equal(dbModule.getPersonaKnowledgeItem(
+    "fact",
+    "fact-invalid-embedding",
+    "persona-1",
+  )?.status, "pending");
+  assert.equal(dbModule.getPersonaKnowledgeItem(
+    "speech_style",
+    "style-invalid-embedding",
+    "persona-1",
+  )?.status, "pending");
 });

@@ -10,6 +10,7 @@ import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs";
+import { EMBEDDING_DIM } from "./embedding";
 import { normalizePersonaKnowledgeText } from "./personaKnowledge";
 import {
   buildPersonaKnowledgeReviewResult,
@@ -23,7 +24,7 @@ import type {
   PersonaKnowledgeBundle,
   PersonaKnowledgeItem,
   PersonaKnowledgeKind,
-  PersonaKnowledgeReviewInput,
+  PersonaKnowledgeAtomicReviewInput,
   PersonaKnowledgeReviewResult,
   PersonaKnowledgeStatusChange,
   PersonaSource,
@@ -47,6 +48,7 @@ export function getDb(): Database.Database {
   _db.pragma("foreign_keys = ON");
   initSchema(_db);
   migrateUserColumn(_db);
+  migratePersonaFactEmbedding(_db);
   migrateLegacyPersonaKnowledge(_db);
   return _db;
 }
@@ -144,6 +146,7 @@ function initSchema(db: Database.Database) {
       fact_key          TEXT NOT NULL,
       content           TEXT NOT NULL,
       normalized_value  TEXT NOT NULL,
+      embedding         BLOB,
       status            TEXT NOT NULL CHECK (status IN ('pending','confirmed','rejected','conflicted','revoked')),
       conflict_group_id TEXT,
       confirmed_by      TEXT,
@@ -194,6 +197,50 @@ function initSchema(db: Database.Database) {
       PRIMARY KEY (item_kind, item_id, source_id)
     );
 
+    CREATE TABLE IF NOT EXISTS conversation_turns (
+      id                   TEXT PRIMARY KEY,
+      persona_id           TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+      user_message_id      TEXT NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,
+      assistant_message_id TEXT UNIQUE REFERENCES messages(id) ON DELETE CASCADE,
+      mode                 TEXT CHECK (mode IN ('grounded','companionship','boundary')),
+      status               TEXT NOT NULL CHECK (status IN ('started','completed','generation_failed','assistant_persistence_failed')),
+      boundary_kind        TEXT CHECK (boundary_kind IN ('self_harm','real_world_danger','voice_authorization_denied','identity','real_will','commitment','major_decision')),
+      degradation_reason   TEXT CHECK (degradation_reason IN ('no_relevant_evidence','retrieval_failed','embedding_backfill_partial','model_failed','assistant_persistence_failed')),
+      retrieval_ms         INTEGER CHECK (retrieval_ms IS NULL OR retrieval_ms >= 0),
+      first_sentence_ms    INTEGER CHECK (first_sentence_ms IS NULL OR first_sentence_ms >= 0),
+      total_ms             INTEGER CHECK (total_ms IS NULL OR total_ms >= 0),
+      created_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CHECK (
+        (status = 'started' AND assistant_message_id IS NULL AND mode IS NULL AND boundary_kind IS NULL)
+        OR (status = 'completed' AND assistant_message_id IS NOT NULL AND mode IS NOT NULL AND total_ms IS NOT NULL)
+        OR (status IN ('generation_failed','assistant_persistence_failed') AND assistant_message_id IS NULL)
+      ),
+      CHECK (
+        status <> 'completed'
+        OR (mode = 'boundary' AND boundary_kind IS NOT NULL)
+        OR (mode IN ('grounded','companionship') AND boundary_kind IS NULL)
+      )
+    );
+
+    CREATE TABLE IF NOT EXISTS conversation_turn_evidence (
+      turn_id    TEXT NOT NULL REFERENCES conversation_turns(id) ON DELETE CASCADE,
+      persona_id TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+      item_kind  TEXT NOT NULL CHECK (item_kind IN ('fact','relationship_memory')),
+      item_id    TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (turn_id, item_kind, item_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS message_evidence (
+      assistant_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      persona_id            TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+      item_kind             TEXT NOT NULL CHECK (item_kind IN ('fact','relationship_memory')),
+      item_id               TEXT NOT NULL,
+      created_at            TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (assistant_message_id, item_kind, item_id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_persona_sources_persona
       ON persona_sources(persona_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_persona_facts_confirmed
@@ -207,6 +254,12 @@ function initSchema(db: Database.Database) {
       WHERE status = 'confirmed';
     CREATE INDEX IF NOT EXISTS idx_persona_item_sources_source
       ON persona_item_sources(source_id);
+    CREATE INDEX IF NOT EXISTS idx_conversation_turns_persona_created
+      ON conversation_turns(persona_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_conversation_turn_evidence_persona_turn
+      ON conversation_turn_evidence(persona_id, turn_id);
+    CREATE INDEX IF NOT EXISTS idx_message_evidence_persona_message
+      ON message_evidence(persona_id, assistant_message_id);
   `);
 }
 
@@ -215,6 +268,13 @@ function migrateUserColumn(db: Database.Database) {
   const cols = db.pragma("table_info(personas)") as { name: string }[];
   if (!cols.some((c) => c.name === "user_id")) {
     db.exec(`ALTER TABLE personas ADD COLUMN user_id TEXT NOT NULL DEFAULT '__legacy__'`);
+  }
+}
+
+function migratePersonaFactEmbedding(db: Database.Database) {
+  const columns = db.pragma("table_info(persona_facts)") as { name: string }[];
+  if (!columns.some((column) => column.name === "embedding")) {
+    db.exec("ALTER TABLE persona_facts ADD COLUMN embedding BLOB");
   }
 }
 
@@ -408,6 +468,15 @@ const KNOWLEDGE_TABLES = {
   relationship_memory: "relationship_memories",
   speech_style: "speech_style_items",
 } as const;
+
+const EMBEDDING_KNOWLEDGE_TABLES = {
+  fact: "persona_facts",
+  relationship_memory: "relationship_memories",
+} as const;
+
+function float32ToBuffer(vector: Float32Array): Buffer {
+  return Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength);
+}
 
 function parseParticipants(value: unknown): string[] {
   if (typeof value !== "string") return [];
@@ -612,9 +681,7 @@ export function createPersonaKnowledgeCandidates(input: {
         );
         facts.push(getPersonaKnowledgeItem("fact", candidate.id, candidate.personaId) as PersonaFact);
       } else if (candidate.kind === "relationship_memory") {
-        const embedding = candidate.embedding
-          ? Buffer.from(candidate.embedding.buffer, candidate.embedding.byteOffset, candidate.embedding.byteLength)
-          : null;
+        const embedding = candidate.embedding ? float32ToBuffer(candidate.embedding) : null;
         database.prepare(
           `INSERT INTO relationship_memories
              (id, persona_id, content, occurred_at, location, participants, embedding,
@@ -755,8 +822,22 @@ export function setPersonaKnowledgeStatuses(
   return database.transaction(() => setPersonaKnowledgeStatusesWithDb(database, inputs))();
 }
 
+function storeKnowledgeEmbeddingWithDb(
+  database: Database.Database,
+  kind: keyof typeof EMBEDDING_KNOWLEDGE_TABLES,
+  id: string,
+  personaId: string,
+  vector: Float32Array,
+): void {
+  const table = EMBEDDING_KNOWLEDGE_TABLES[kind];
+  const result = database.prepare(
+    `UPDATE ${table} SET embedding = ? WHERE id = ? AND persona_id = ?`,
+  ).run(float32ToBuffer(vector), id, personaId);
+  if (result.changes !== 1) throw new Error("knowledge_embedding_stale");
+}
+
 export function reviewPersonaKnowledgeAtomically(
-  input: PersonaKnowledgeReviewInput,
+  input: PersonaKnowledgeAtomicReviewInput,
 ): PersonaKnowledgeReviewResult {
   const database = getDb();
   const review = database.transaction(() => {
@@ -774,6 +855,23 @@ export function reviewPersonaKnowledgeAtomically(
       });
       if (!updated) throw new Error("knowledge_status_changed");
       item = updated;
+    }
+
+    if (input.embedding !== undefined) {
+      if (
+        item.kind === "speech_style"
+        || item.content !== input.embedding.content
+        || input.embedding.vector.length !== EMBEDDING_DIM
+      ) {
+        throw new Error("knowledge_embedding_stale");
+      }
+      storeKnowledgeEmbeddingWithDb(
+        database,
+        item.kind,
+        item.id,
+        item.personaId,
+        input.embedding.vector,
+      );
     }
 
     const confirmedFacts = input.action === "confirm" && item.kind === "fact"
@@ -847,7 +945,7 @@ export type MemoryRow = {
 
 function insertMemoryWithDb(database: Database.Database, m: InsertMemoryInput) {
   const createdAt = new Date().toISOString();
-  const buf = Buffer.from(m.embedding.buffer, m.embedding.byteOffset, m.embedding.byteLength);
+  const buf = float32ToBuffer(m.embedding);
   const source = database.prepare(
     `INSERT INTO persona_sources
        (id, persona_id, source_type, content_text, object_path, checksum_algorithm,
