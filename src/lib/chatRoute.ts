@@ -11,7 +11,12 @@ import { requireAuth } from "./guard";
 import { chatCompleteStream, type ChatMessage } from "./llm";
 import { logger } from "./logger";
 import { buildPersonaSystemPrompt } from "./personaPrompt";
-import { SpeechPlanAccumulator } from "./speechPlanning";
+import {
+  SPEECH_PLANNER_VERSION,
+  SpeechPlanAccumulator,
+  type SpeechPlan,
+  type TrackedSpeechPlan,
+} from "./speechPlanning";
 import { getRepository } from "./storage/repository";
 import type {
   AppRepository,
@@ -236,6 +241,7 @@ function boundaryStream(input: {
           retrievalMs: 0,
           firstSentenceMs: null,
           totalMs,
+          speechTrackingFailed: false,
         });
         controller.enqueue(encodeEvent(encoder, {
           done: true,
@@ -547,22 +553,47 @@ export function createChatHandlers(overrides: Partial<ChatRouteDependencies> = {
         controller.enqueue(encodeEvent(encoder, { meta }));
         let reply = "";
         let firstSentenceMs: number | null = null;
+        let speechTrackingFailed = false;
         const speech = new SpeechPlanAccumulator();
+        const persistAndEmitSentence = async (plan: SpeechPlan): Promise<void> => {
+          if (speechTrackingFailed || sessionId === null) return;
+          const sentenceId = deps.randomUUID();
+          try {
+            await repository.recordConversationSentence({
+              id: sentenceId,
+              sessionId,
+              turnId,
+              personaId,
+              plan,
+              plannerVersion: SPEECH_PLANNER_VERSION,
+            });
+          } catch (error) {
+            speechTrackingFailed = true;
+            deps.logError("chat_sentence_tracking_failed", {
+              personaId,
+              turnId,
+              sessionId,
+              errorName: errorName(error),
+            });
+            return;
+          }
+          if (firstSentenceMs === null) firstSentenceMs = Math.round(deps.nowMs() - startedAt);
+          const tracked: TrackedSpeechPlan = { ...plan, sentenceId };
+          controller.enqueue(encodeEvent(encoder, { sentence: tracked }));
+        };
         try {
           for await (const token of deps.chatCompleteStream(llmMessages)) {
             reply += token;
             controller.enqueue(encodeEvent(encoder, { token }));
             if (speechAllowed) {
               for (const sentence of speech.push(token)) {
-                if (firstSentenceMs === null) firstSentenceMs = Math.round(deps.nowMs() - startedAt);
-                controller.enqueue(encodeEvent(encoder, { sentence }));
+                await persistAndEmitSentence(sentence);
               }
             }
           }
           if (speechAllowed) {
             for (const sentence of speech.flush()) {
-              if (firstSentenceMs === null) firstSentenceMs = Math.round(deps.nowMs() - startedAt);
-              controller.enqueue(encodeEvent(encoder, { sentence }));
+              await persistAndEmitSentence(sentence);
             }
           }
         } catch (error) {
@@ -609,6 +640,7 @@ export function createChatHandlers(overrides: Partial<ChatRouteDependencies> = {
             retrievalMs,
             firstSentenceMs,
             totalMs,
+            speechTrackingFailed,
           });
         } catch (error) {
           await safelyFailTurn(repository, deps, {

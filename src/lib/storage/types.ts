@@ -306,6 +306,7 @@ export type ConversationTurn = {
   retrievalMs: number | null;
   firstSentenceMs: number | null;
   totalMs: number | null;
+  speechTrackingFailed: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -613,7 +614,44 @@ export interface AppRepository {
     retrievalMs: number;
     firstSentenceMs: number | null;
     totalMs: number;
+    speechTrackingFailed?: boolean;
   }): Promise<ConversationTurn>;
+  recordConversationSentence(input: {
+    id: string;
+    sessionId: string;
+    turnId: string;
+    personaId: string;
+    plan: import("../speechPlanning").SpeechPlan;
+    plannerVersion: string;
+  }): Promise<ConversationSentence>;
+  getConversationSentenceForSynthesis(
+    sentenceId: string,
+    evaluatorUserId: string,
+  ): Promise<(ConversationSentence & { voiceId: string }) | null>;
+  startTtsAttempt(input: {
+    id: string;
+    sentenceId: string;
+    evaluatorUserId: string;
+    voiceSource: VoiceSource;
+    providerVoiceId: string | null;
+    ttsModel: string;
+    ttsConfigVersion: string;
+  }): Promise<TtsAttempt>;
+  completeTtsAttempt(input: {
+    id: string;
+    evaluatorUserId: string;
+    voiceSource: VoiceSource;
+    fellBack: boolean;
+    storageMs: number;
+    providerMs: number;
+    totalMs: number;
+  }): Promise<TtsAttempt>;
+  failTtsAttempt(input: {
+    id: string;
+    evaluatorUserId: string;
+    stableErrorCode: string;
+    totalMs: number;
+  }): Promise<boolean>;
   failConversationTurn(input: {
     turnId: string;
     personaId: string;

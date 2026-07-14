@@ -1281,6 +1281,7 @@ it("starts, binds, and completes a grounded turn in transactions with stable loc
     turnId: "turn-1", personaId: "persona-1", assistantMessageId: "assistant-1",
     content: "她爱喝桂花茶。", mode: "grounded", boundaryKind: null,
     degradationReason: null, retrievalMs: 12, firstSentenceMs: 40, totalMs: 80,
+    speechTrackingFailed: false,
   });
   assert.equal(completed.status, "completed");
   assert.equal((await repo.listMessageEvidence("assistant-1", "persona-1")).length, 1);
@@ -1318,6 +1319,149 @@ it("starts, binds, and completes a grounded turn in transactions with stable loc
   assert.match(completionUpdate.text, /id = \$1 AND persona_id = \$2 AND status = 'started'/);
   assert.ok(fake.calls.some((call) =>
     call.text.includes("INSERT INTO message_evidence") && call.text.includes("conversation_turn_evidence")));
+});
+
+it("locks Postgres sentences while allocating attempts and uses owner-scoped CAS", async () => {
+  const now = "2026-07-14T10:00:00.000Z";
+  const sentenceRow = {
+    id: "sentence-1",
+    session_id: "session-1",
+    turn_id: "turn-1",
+    persona_id: "persona-1",
+    sentence_index: 0,
+    text: "服务端句子。",
+    emotion: "warm",
+    intensity: 55,
+    speed: 0.96,
+    pause_after_ms: 360,
+    planner_version: "keyword-v1",
+    created_at: now,
+    voice_id: "voice-1",
+  };
+  const attemptRow = {
+    id: "attempt-1",
+    sentence_id: "sentence-1",
+    session_id: "session-1",
+    turn_id: "turn-1",
+    persona_id: "persona-1",
+    voice_id: "voice-1",
+    attempt_no: 1,
+    status: "started",
+    voice_source: "preset",
+    provider_voice_id: "provider-1",
+    tts_model: "cosyvoice-v1",
+    tts_config_version: "config-v1",
+    fell_back: false,
+    storage_ms: null,
+    provider_ms: null,
+    total_ms: null,
+    stable_error_code: null,
+    created_at: now,
+    completed_at: null,
+  };
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM conversation_turns") && text.includes("FOR UPDATE")) {
+      return [{ id: "turn-1" }];
+    }
+    if (text.includes("INSERT INTO conversation_sentences")) return [sentenceRow];
+    if (text.includes("FROM conversation_sentences sentence") && text.includes("FOR UPDATE OF sentence")) {
+      return [sentenceRow];
+    }
+    if (text.includes("FROM conversation_sentences sentence")) return [sentenceRow];
+    if (text.includes("INSERT INTO tts_attempts")) return [attemptRow];
+    if (text.includes("FROM tts_attempts attempt") && text.includes("FOR UPDATE OF attempt")) {
+      return [{ id: "attempt-1" }];
+    }
+    if (text.includes("UPDATE tts_attempts") && text.includes("status = 'completed'")) {
+      return [{
+        ...attemptRow,
+        status: "completed",
+        voice_source: "dynamic",
+        fell_back: true,
+        storage_ms: 10,
+        provider_ms: 20,
+        total_ms: 30,
+        completed_at: now,
+      }];
+    }
+    throw new Error(`unexpected query: ${text}`);
+  });
+  const repo = createPostgresRepository(fake.executor);
+
+  const stored = await repo.recordConversationSentence({
+    id: "sentence-1",
+    sessionId: "session-1",
+    turnId: "turn-1",
+    personaId: "persona-1",
+    plan: {
+      index: 0,
+      text: "服务端句子。",
+      emotion: "warm",
+      intensity: 55,
+      speed: 0.96,
+      pauseAfterMs: 360,
+    },
+    plannerVersion: "keyword-v1",
+  });
+  assert.equal(stored.id, "sentence-1");
+  assert.equal(
+    (await repo.getConversationSentenceForSynthesis("sentence-1", "user-1"))?.voiceId,
+    "voice-1",
+  );
+  const started = await repo.startTtsAttempt({
+    id: "attempt-1",
+    sentenceId: "sentence-1",
+    evaluatorUserId: "user-1",
+    voiceSource: "preset",
+    providerVoiceId: "provider-1",
+    ttsModel: "cosyvoice-v1",
+    ttsConfigVersion: "config-v1",
+  });
+  assert.equal(started.attemptNo, 1);
+  const completed = await repo.completeTtsAttempt({
+    id: "attempt-1",
+    evaluatorUserId: "user-1",
+    voiceSource: "dynamic",
+    fellBack: true,
+    storageMs: 10,
+    providerMs: 20,
+    totalMs: 30,
+  });
+  assert.equal(completed.status, "completed");
+  assert.equal(fake.transactions, 3);
+
+  const sentenceLock = fake.calls.find((call) =>
+    call.text.includes("FROM conversation_sentences sentence")
+      && call.text.includes("FOR UPDATE OF sentence"))!;
+  assert.match(sentenceLock.text, /sessions\.evaluator_user_id = \$2/);
+  assert.match(sentenceLock.text, /authorization\.status = 'approved'/);
+  const attemptInsert = fake.calls.find((call) => call.text.includes("INSERT INTO tts_attempts"))!;
+  assert.match(attemptInsert.text, /COALESCE\(MAX\(attempt_no\), 0\) \+ 1/);
+  const completionLock = fake.calls.find((call) =>
+    call.text.includes("FROM tts_attempts attempt") && call.text.includes("FOR UPDATE OF attempt"))!;
+  assert.match(completionLock.text, /authorization\.status = 'approved'/);
+  assert.match(completionLock.text, /sessions\.evaluator_user_id = \$2/);
+  const completionUpdate = fake.calls.find((call) =>
+    call.text.includes("UPDATE tts_attempts") && call.text.includes("status = 'completed'"))!;
+  assert.match(completionUpdate.text, /WHERE id = \$1 AND status = 'started'/);
+});
+
+it("fails a Postgres TTS attempt only for its evaluator and started status", async () => {
+  const fake = createFakeSql((text) => text.includes("UPDATE tts_attempts attempt")
+    ? [{ id: "attempt-1" }]
+    : []);
+  const repo = createPostgresRepository(fake.executor);
+  assert.equal(await repo.failTtsAttempt({
+    id: "attempt-1",
+    evaluatorUserId: "user-1",
+    stableErrorCode: "provider_http_503",
+    totalMs: 30,
+  }), true);
+  assert.match(fake.calls[0].text, /attempt\.status = 'started'/);
+  assert.match(fake.calls[0].text, /sessions\.evaluator_user_id = \$2/);
+  assert.deepEqual(fake.calls[0].params, [
+    "attempt-1", "user-1", "provider_http_503", 30,
+  ]);
 });
 
 it("locks the persona before persisting a null-session boundary turn", async () => {

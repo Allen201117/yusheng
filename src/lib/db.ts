@@ -21,6 +21,8 @@ import type {
   ConfirmedConversationKnowledge,
   ConversationEmbeddingUpdate,
   ConversationSession,
+  ConversationSentence,
+  TtsAttempt,
   ConversationTurn,
   ConversationTurnEvidence,
   CreatePersonaKnowledgeCandidateInput,
@@ -1340,6 +1342,7 @@ function rowToConversationTurn(row: any): ConversationTurn {
     retrievalMs: row.retrieval_ms,
     firstSentenceMs: row.first_sentence_ms,
     totalMs: row.total_ms,
+    speechTrackingFailed: Boolean(row.speech_tracking_failed),
     createdAt: sqliteIso(row.created_at),
     updatedAt: sqliteIso(row.updated_at),
   };
@@ -1653,6 +1656,7 @@ export function completeConversationTurn(input: {
   retrievalMs: number;
   firstSentenceMs: number | null;
   totalMs: number;
+  speechTrackingFailed?: boolean;
 }): ConversationTurn {
   const database = getDb();
   return database.transaction(() => {
@@ -1690,6 +1694,7 @@ export function completeConversationTurn(input: {
       `UPDATE conversation_turns
        SET assistant_message_id = ?, mode = ?, status = 'completed', boundary_kind = ?,
            degradation_reason = ?, retrieval_ms = ?, first_sentence_ms = ?, total_ms = ?,
+           speech_tracking_failed = ?,
            updated_at = ?
        WHERE id = ? AND persona_id = ? AND status = 'started'`,
     ).run(
@@ -1700,6 +1705,7 @@ export function completeConversationTurn(input: {
       input.retrievalMs,
       input.firstSentenceMs,
       input.totalMs,
+      input.speechTrackingFailed ? 1 : 0,
       now,
       input.turnId,
       input.personaId,
@@ -1711,6 +1717,230 @@ export function completeConversationTurn(input: {
     if (!row) throw new Error("conversation_turn_status_changed");
     return rowToConversationTurn(row);
   })();
+}
+
+function rowToConversationSentence(row: any): ConversationSentence {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    turnId: row.turn_id,
+    personaId: row.persona_id,
+    sentenceIndex: Number(row.sentence_index),
+    text: row.text,
+    emotion: row.emotion,
+    intensity: Number(row.intensity),
+    speed: Number(row.speed),
+    pauseAfterMs: Number(row.pause_after_ms),
+    plannerVersion: row.planner_version,
+    createdAt: sqliteIso(row.created_at),
+  };
+}
+
+function rowToTtsAttempt(row: any): TtsAttempt {
+  return {
+    id: row.id,
+    sentenceId: row.sentence_id,
+    sessionId: row.session_id,
+    turnId: row.turn_id,
+    personaId: row.persona_id,
+    voiceId: row.voice_id,
+    attemptNo: Number(row.attempt_no),
+    status: row.status,
+    voiceSource: row.voice_source,
+    providerVoiceId: row.provider_voice_id,
+    ttsModel: row.tts_model,
+    ttsConfigVersion: row.tts_config_version,
+    fellBack: Boolean(row.fell_back),
+    storageMs: row.storage_ms === null ? null : Number(row.storage_ms),
+    providerMs: row.provider_ms === null ? null : Number(row.provider_ms),
+    totalMs: row.total_ms === null ? null : Number(row.total_ms),
+    stableErrorCode: row.stable_error_code,
+    createdAt: sqliteIso(row.created_at),
+    completedAt: row.completed_at === null ? null : sqliteIso(row.completed_at),
+  };
+}
+
+export function recordConversationSentence(input: {
+  id: string;
+  sessionId: string;
+  turnId: string;
+  personaId: string;
+  plan: import("./speechPlanning").SpeechPlan;
+  plannerVersion: string;
+}): ConversationSentence {
+  const database = getDb();
+  return database.transaction(() => {
+    const turn = database.prepare(
+      `SELECT id FROM conversation_turns
+       WHERE id = ? AND session_id = ? AND persona_id = ? AND status = 'started'`,
+    ).get(input.turnId, input.sessionId, input.personaId);
+    if (!turn) throw new Error("conversation_sentence_turn_mismatch");
+    const row = database.prepare(
+      `INSERT INTO conversation_sentences
+         (id, session_id, turn_id, persona_id, sentence_index, text, emotion,
+          intensity, speed, pause_after_ms, planner_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       RETURNING *`,
+    ).get(
+      input.id,
+      input.sessionId,
+      input.turnId,
+      input.personaId,
+      input.plan.index,
+      input.plan.text,
+      input.plan.emotion,
+      input.plan.intensity,
+      input.plan.speed,
+      input.plan.pauseAfterMs,
+      input.plannerVersion,
+    );
+    if (!row) throw new Error("conversation_sentence_persistence_failed");
+    return rowToConversationSentence(row);
+  }).immediate();
+}
+
+export function getConversationSentenceForSynthesis(
+  sentenceId: string,
+  evaluatorUserId: string,
+): (ConversationSentence & { voiceId: string }) | null {
+  const row = getDb().prepare(
+    `SELECT sentence.*, sessions.voice_id
+     FROM conversation_sentences sentence
+     JOIN conversation_sessions sessions
+       ON sessions.id = sentence.session_id AND sessions.persona_id = sentence.persona_id
+     JOIN personas persona
+       ON persona.id = sessions.persona_id AND persona.user_id = sessions.evaluator_user_id
+     WHERE sentence.id = ? AND sessions.evaluator_user_id = ?`,
+  ).get(sentenceId, evaluatorUserId) as any;
+  return row ? { ...rowToConversationSentence(row), voiceId: row.voice_id } : null;
+}
+
+export function startTtsAttempt(input: {
+  id: string;
+  sentenceId: string;
+  evaluatorUserId: string;
+  voiceSource: "preset" | "dynamic";
+  providerVoiceId: string | null;
+  ttsModel: string;
+  ttsConfigVersion: string;
+}): TtsAttempt {
+  const database = getDb();
+  return database.transaction(() => {
+    const sentence = database.prepare(
+      `SELECT sentence.session_id, sentence.turn_id, sentence.persona_id, sessions.voice_id
+       FROM conversation_sentences sentence
+       JOIN conversation_sessions sessions
+         ON sessions.id = sentence.session_id AND sessions.persona_id = sentence.persona_id
+       JOIN personas persona
+         ON persona.id = sessions.persona_id AND persona.user_id = sessions.evaluator_user_id
+       JOIN voice_authorizations authorization
+         ON authorization.id = sessions.voice_authorization_id
+        AND authorization.voice_id = sessions.voice_id
+        AND authorization.user_id = sessions.evaluator_user_id
+        AND authorization.status = 'approved'
+       WHERE sentence.id = ? AND sessions.evaluator_user_id = ? AND sessions.status = 'active'`,
+    ).get(input.sentenceId, input.evaluatorUserId) as any;
+    if (!sentence) throw new Error("tts_attempt_sentence_unavailable");
+    const next = database.prepare(
+      "SELECT COALESCE(MAX(attempt_no), 0) + 1 AS attempt_no FROM tts_attempts WHERE sentence_id = ?",
+    ).get(input.sentenceId) as { attempt_no: number };
+    const row = database.prepare(
+      `INSERT INTO tts_attempts
+         (id, sentence_id, session_id, turn_id, persona_id, voice_id, attempt_no,
+          status, voice_source, provider_voice_id, tts_model, tts_config_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'started', ?, ?, ?, ?)
+       RETURNING *`,
+    ).get(
+      input.id,
+      input.sentenceId,
+      sentence.session_id,
+      sentence.turn_id,
+      sentence.persona_id,
+      sentence.voice_id,
+      next.attempt_no,
+      input.voiceSource,
+      input.providerVoiceId,
+      input.ttsModel,
+      input.ttsConfigVersion,
+    );
+    if (!row) throw new Error("tts_attempt_start_failed");
+    return rowToTtsAttempt(row);
+  }).immediate();
+}
+
+export function completeTtsAttempt(input: {
+  id: string;
+  evaluatorUserId: string;
+  voiceSource: "preset" | "dynamic";
+  fellBack: boolean;
+  storageMs: number;
+  providerMs: number;
+  totalMs: number;
+}): TtsAttempt {
+  const database = getDb();
+  return database.transaction(() => {
+    const eligible = database.prepare(
+      `SELECT attempt.id
+       FROM tts_attempts attempt
+       JOIN conversation_sessions sessions
+         ON sessions.id = attempt.session_id AND sessions.persona_id = attempt.persona_id
+       JOIN personas persona
+         ON persona.id = sessions.persona_id AND persona.user_id = sessions.evaluator_user_id
+       JOIN voice_authorizations authorization
+         ON authorization.id = sessions.voice_authorization_id
+        AND authorization.voice_id = attempt.voice_id
+        AND authorization.user_id = sessions.evaluator_user_id
+        AND authorization.status = 'approved'
+       WHERE attempt.id = ? AND attempt.status = 'started'
+         AND sessions.evaluator_user_id = ? AND sessions.status = 'active'`,
+    ).get(input.id, input.evaluatorUserId);
+    if (!eligible) throw new Error("tts_attempt_authorization_denied");
+    const row = database.prepare(
+      `UPDATE tts_attempts
+       SET status = 'completed', voice_source = ?, fell_back = ?, storage_ms = ?,
+           provider_ms = ?, total_ms = ?, stable_error_code = NULL, completed_at = ?
+       WHERE id = ? AND status = 'started'
+       RETURNING *`,
+    ).get(
+      input.voiceSource,
+      input.fellBack ? 1 : 0,
+      input.storageMs,
+      input.providerMs,
+      input.totalMs,
+      new Date().toISOString(),
+      input.id,
+    );
+    if (!row) throw new Error("tts_attempt_status_changed");
+    return rowToTtsAttempt(row);
+  }).immediate();
+}
+
+export function failTtsAttempt(input: {
+  id: string;
+  evaluatorUserId: string;
+  stableErrorCode: string;
+  totalMs: number;
+}): boolean {
+  const changed = getDb().prepare(
+    `UPDATE tts_attempts
+     SET status = 'failed', stable_error_code = ?, total_ms = ?, completed_at = ?
+     WHERE id = ? AND status = 'started'
+       AND EXISTS (
+         SELECT 1 FROM conversation_sessions sessions
+         JOIN personas persona
+           ON persona.id = sessions.persona_id AND persona.user_id = sessions.evaluator_user_id
+         WHERE sessions.id = tts_attempts.session_id
+           AND sessions.persona_id = tts_attempts.persona_id
+           AND sessions.evaluator_user_id = ?
+       )`,
+  ).run(
+    input.stableErrorCode,
+    input.totalMs,
+    new Date().toISOString(),
+    input.id,
+    input.evaluatorUserId,
+  );
+  return changed.changes === 1;
 }
 
 export function failConversationTurn(input: {

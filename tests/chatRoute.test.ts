@@ -42,6 +42,7 @@ const completedTurn = (id: string): ConversationTurn => ({
   retrievalMs: null,
   firstSentenceMs: null,
   totalMs: null,
+  speechTrackingFailed: false,
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
 });
@@ -59,6 +60,7 @@ type FakeOptions = {
   startError?: Error;
   storeError?: Error;
   bindError?: Error;
+  sentenceError?: Error;
   completeError?: Error;
   failError?: Error;
   historyError?: Error;
@@ -73,6 +75,7 @@ function makeRepository(options: FakeOptions = {}) {
     load: 0,
     stores: [] as Array<Array<{ kind: string; id: string; embedding: Float32Array }>>,
     binds: [] as Array<Record<string, unknown>>,
+    sentences: [] as Array<Record<string, unknown>>,
     completes: [] as Array<Record<string, unknown>>,
     fails: [] as Array<Record<string, unknown>>,
   };
@@ -126,6 +129,25 @@ function makeRepository(options: FakeOptions = {}) {
       calls.binds.push(input);
       if (options.bindError) throw options.bindError;
       return [];
+    },
+    async recordConversationSentence(input: Record<string, unknown>) {
+      calls.sentences.push(input);
+      if (options.sentenceError) throw options.sentenceError;
+      const plan = input.plan as Record<string, unknown>;
+      return {
+        id: input.id,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        personaId: input.personaId,
+        sentenceIndex: plan.index,
+        text: plan.text,
+        emotion: plan.emotion,
+        intensity: plan.intensity,
+        speed: plan.speed,
+        pauseAfterMs: plan.pauseAfterMs,
+        plannerVersion: input.plannerVersion,
+        createdAt: "2026-07-14T10:00:00.000Z",
+      };
     },
     async completeConversationTurn(input: Record<string, unknown>) {
       calls.completes.push(input);
@@ -459,6 +481,15 @@ it("binds confirmed evidence before one model stream and persists legacy and new
   ]);
   assert.deepEqual(meta.retrievedMemories, [{ content: "一起去过海边", score: 1 }]);
   assert.ok(events.findIndex((event) => "sentence" in event) < events.findIndex((event) => event.done === true));
+  const sentenceEvents = events
+    .filter((event) => "sentence" in event)
+    .map((event) => event.sentence as Record<string, unknown>);
+  assert.equal(sentenceEvents.length, h.calls.sentences.length);
+  assert.deepEqual(
+    sentenceEvents.map((sentence) => sentence.sentenceId),
+    h.calls.sentences.map((call) => call.id),
+  );
+  assert.ok(h.calls.sentences.every((call) => call.plannerVersion === "keyword-v1"));
   assert.deepEqual(h.calls.binds[0].evidence, [
     { kind: "fact", itemId: "fact-1" },
     { kind: "relationship_memory", itemId: "memory-1" },
@@ -606,6 +637,23 @@ it("reports assistant persistence failure after transient tokens without claimin
   assert.equal(h.calls.fails[0].status, "assistant_persistence_failed");
   assert.equal(h.calls.fails[0].degradationReason, "assistant_persistence_failed");
   assert.equal(h.messages.some((item) => item.role === "assistant"), false);
+});
+
+it("keeps the text reply but emits no untracked sentence when sentence persistence fails", async () => {
+  const h = makeHarness({ sentenceError: new Error("raw sentence db secret") });
+  const events = await sseEvents(await h.handlers.POST(postRequest({
+    personaId: persona.id,
+    text: "hello",
+  })));
+  assert.equal(events.some((event) => "token" in event), true);
+  assert.equal(events.some((event) => "sentence" in event), false);
+  assert.equal(events.at(-1)?.done, true);
+  assert.equal(h.calls.sentences.length, 1);
+  assert.equal(h.calls.completes.length, 1);
+  assert.equal(h.calls.completes[0].speechTrackingFailed, true);
+  assert.equal(h.calls.completes[0].degradationReason, "no_relevant_evidence");
+  assert.ok(h.logs.some((entry) => entry.event === "chat_sentence_tracking_failed"));
+  assert.doesNotMatch(JSON.stringify(events), /raw sentence db secret/);
 });
 
 it("calls the normal model stream exactly once", async () => {

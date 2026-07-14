@@ -9,6 +9,10 @@ export type SpeechPlan = {
   pauseAfterMs: number;
 };
 
+export const SPEECH_PLANNER_VERSION = "keyword-v1";
+
+export type TrackedSpeechPlan = SpeechPlan & { sentenceId: string };
+
 export type SpeechControls = {
   emotion: SpeechEmotion;
   intensity: number;

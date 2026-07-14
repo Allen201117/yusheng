@@ -1,5 +1,10 @@
 import {
   bindConversationTurnEvidence,
+  recordConversationSentence,
+  getConversationSentenceForSynthesis,
+  startTtsAttempt,
+  completeTtsAttempt,
+  failTtsAttempt,
   completeConversationTurn,
   countPersonasUsingVoice,
   createPersonaKnowledgeCandidates,
@@ -165,6 +170,13 @@ export function createLocalRepository(): AppRepository {
       return bindConversationTurnEvidence(input);
     },
     async completeConversationTurn(input) { return completeConversationTurn(input); },
+    async recordConversationSentence(input) { return recordConversationSentence(input); },
+    async getConversationSentenceForSynthesis(sentenceId, evaluatorUserId) {
+      return getConversationSentenceForSynthesis(sentenceId, evaluatorUserId);
+    },
+    async startTtsAttempt(input) { return startTtsAttempt(input); },
+    async completeTtsAttempt(input) { return completeTtsAttempt(input); },
+    async failTtsAttempt(input) { return failTtsAttempt(input); },
     async failConversationTurn(input) { return failConversationTurn(input); },
     async listMessageEvidence(assistantMessageId, personaId) {
       return listMessageEvidence(assistantMessageId, personaId);

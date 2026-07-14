@@ -490,6 +490,32 @@ it("keeps legacy turn session links nullable", () => {
   );
 });
 
+it("maps speech tracking failure independently from retrieval degradation", async () => {
+  insertSession();
+  insertTurn();
+  const completed = await repository.completeConversationTurn({
+    turnId: "turn-1",
+    personaId: "persona-1",
+    assistantMessageId: "assistant-1",
+    content: "回复仍然完成。",
+    mode: "companionship",
+    boundaryKind: null,
+    degradationReason: "no_relevant_evidence",
+    retrievalMs: 10,
+    firstSentenceMs: null,
+    totalMs: 30,
+    speechTrackingFailed: true,
+  });
+  assert.equal(completed.speechTrackingFailed, true);
+  assert.equal(completed.degradationReason, "no_relevant_evidence");
+  assert.deepEqual(
+    database.prepare(
+      "SELECT degradation_reason, speech_tracking_failed FROM conversation_turns WHERE id = ?",
+    ).get("turn-1"),
+    { degradation_reason: "no_relevant_evidence", speech_tracking_failed: 1 },
+  );
+});
+
 it("enforces one sentence index per turn and one attempt number per sentence", () => {
   insertSession();
   insertTurn();
@@ -497,6 +523,128 @@ it("enforces one sentence index per turn and one attempt number per sentence", (
   assert.throws(() => insertSentence("sentence-2", 0), /UNIQUE constraint failed/);
   insertAttempt();
   assert.throws(() => insertAttempt("attempt-2", 1), /UNIQUE constraint failed/);
+});
+
+it("persists owner-scoped server sentences and compare-and-set TTS attempts", async () => {
+  insertSession();
+  insertTurn();
+  const stored = await repository.recordConversationSentence({
+    id: "sentence-tracked",
+    sessionId: "session-1",
+    turnId: "turn-1",
+    personaId: "persona-1",
+    plan: {
+      index: 0,
+      text: "服务端句子。",
+      emotion: "warm",
+      intensity: 55,
+      speed: 0.96,
+      pauseAfterMs: 360,
+    },
+    plannerVersion: "keyword-v1",
+  });
+  assert.equal(stored.text, "服务端句子。");
+  assert.equal(stored.plannerVersion, "keyword-v1");
+  assert.equal(
+    (await repository.getConversationSentenceForSynthesis("sentence-tracked", "user-1"))?.voiceId,
+    "voice-1",
+  );
+  assert.equal(
+    await repository.getConversationSentenceForSynthesis("sentence-tracked", "user-2"),
+    null,
+  );
+
+  const first = await repository.startTtsAttempt({
+    id: "attempt-tracked-1",
+    sentenceId: "sentence-tracked",
+    evaluatorUserId: "user-1",
+    voiceSource: "preset",
+    providerVoiceId: "provider-1",
+    ttsModel: "cosyvoice-v1",
+    ttsConfigVersion: "config-v1",
+  });
+  const second = await repository.startTtsAttempt({
+    id: "attempt-tracked-2",
+    sentenceId: "sentence-tracked",
+    evaluatorUserId: "user-1",
+    voiceSource: "preset",
+    providerVoiceId: "provider-1",
+    ttsModel: "cosyvoice-v1",
+    ttsConfigVersion: "config-v1",
+  });
+  assert.equal(first.attemptNo, 1);
+  assert.equal(second.attemptNo, 2);
+
+  assert.equal(await repository.failTtsAttempt({
+    id: first.id,
+    evaluatorUserId: "user-1",
+    stableErrorCode: "provider_http_503",
+    totalMs: 30,
+  }), true);
+  assert.equal(await repository.failTtsAttempt({
+    id: first.id,
+    evaluatorUserId: "user-1",
+    stableErrorCode: "provider_http_503",
+    totalMs: 40,
+  }), false);
+  assert.equal(await repository.failTtsAttempt({
+    id: second.id,
+    evaluatorUserId: "user-2",
+    stableErrorCode: "provider_unknown",
+    totalMs: 30,
+  }), false);
+
+  const completed = await repository.completeTtsAttempt({
+    id: second.id,
+    evaluatorUserId: "user-1",
+    voiceSource: "dynamic",
+    fellBack: true,
+    storageMs: 10,
+    providerMs: 20,
+    totalMs: 30,
+  });
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.voiceSource, "dynamic");
+  assert.equal(completed.fellBack, true);
+  await assert.rejects(repository.completeTtsAttempt({
+    id: second.id,
+    evaluatorUserId: "user-1",
+    voiceSource: "dynamic",
+    fellBack: true,
+    storageMs: 10,
+    providerMs: 20,
+    totalMs: 30,
+  }), /tts_attempt_authorization_denied|tts_attempt_status_changed/);
+});
+
+it("blocks TTS attempt completion after the exact session authorization is revoked", async () => {
+  insertSession();
+  insertTurn();
+  insertSentence();
+  const started = await repository.startTtsAttempt({
+    id: "attempt-revoked",
+    sentenceId: "sentence-1",
+    evaluatorUserId: "user-1",
+    voiceSource: "preset",
+    providerVoiceId: "provider-1",
+    ttsModel: "cosyvoice-v1",
+    ttsConfigVersion: "config-v1",
+  });
+  assert.equal(started.status, "started");
+  database.prepare("UPDATE voice_authorizations SET status = 'revoked' WHERE id = 'auth-1'").run();
+  await assert.rejects(repository.completeTtsAttempt({
+    id: started.id,
+    evaluatorUserId: "user-1",
+    voiceSource: "preset",
+    fellBack: false,
+    storageMs: 10,
+    providerMs: 20,
+    totalMs: 30,
+  }), /tts_attempt_authorization_denied/);
+  assert.equal(
+    (database.prepare("SELECT status FROM tts_attempts WHERE id = ?").get(started.id) as { status: string }).status,
+    "started",
+  );
 });
 
 it("deduplicates playback event ids and bounds event values", () => {

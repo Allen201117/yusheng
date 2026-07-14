@@ -30,7 +30,6 @@ it("voice routes use the object store and data routes use the repository", async
   const voiceRoutes = [
     "voice/upload/route.ts",
     "voice/authorization/route.ts",
-    "tts/route.ts",
     "persona/route.ts",
   ];
   for (const route of voiceRoutes) {
@@ -39,7 +38,10 @@ it("voice routes use the object store and data routes use the repository", async
   }
 
   const repositoryRoutes = durableRoutes.filter(
-    (route) => route !== "voice/upload/route.ts" && route !== "persona-knowledge/route.ts" && route !== "chat/route.ts",
+    (route) => route !== "voice/upload/route.ts"
+      && route !== "persona-knowledge/route.ts"
+      && route !== "chat/route.ts"
+      && route !== "tts/route.ts",
   );
   for (const route of repositoryRoutes) {
     const source = await readFile(new URL(`../src/app/api/${route}`, import.meta.url), "utf8");
@@ -73,6 +75,21 @@ it("voice routes use the object store and data routes use the repository", async
   assert.match(chatImplementation, /getRepository/);
   assert.doesNotMatch(chatImplementation, /@\/lib\/(db|voiceStore)/);
   assert.doesNotMatch(chatImplementation, /\bgetDb\s*\(/);
+
+  const ttsRoute = await readFile(
+    new URL("../src/app/api/tts/route.ts", import.meta.url),
+    "utf8",
+  );
+  const ttsImplementation = await readFile(
+    new URL("../src/lib/ttsRoute.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(ttsRoute, /createTtsHandlers/);
+  assert.doesNotMatch(ttsRoute, /getRepository|getVoiceObjectStore|requireAuth|NextResponse/);
+  assert.match(ttsImplementation, /getRepository/);
+  assert.match(ttsImplementation, /getVoiceObjectStore/);
+  assert.doesNotMatch(ttsImplementation, /@\/lib\/(db|voiceStore)/);
+  assert.doesNotMatch(ttsImplementation, /\bgetDb\s*\(/);
 });
 
 it("manual memory ingestion creates server-owned confirmation audit fields", async () => {
@@ -115,7 +132,7 @@ it("manual memory input trims strings and rejects non-string values before embed
 
 it("routes use the provider preset fast path and provider-aware deletion lifecycle", async () => {
   const tts = await readFile(
-    new URL("../src/app/api/tts/route.ts", import.meta.url),
+    new URL("../src/lib/ttsRoute.ts", import.meta.url),
     "utf8",
   );
   const persona = await readFile(

@@ -6,8 +6,13 @@ import {
   normalizeSpeechControls,
   sanitizeSpeechText,
   SpeechPlanAccumulator,
+  SPEECH_PLANNER_VERSION,
   toCosyVoiceControls,
 } from "../src/lib/speechPlanning";
+
+it("pins the server speech planner version used by persisted sentences", () => {
+  assert.equal(SPEECH_PLANNER_VERSION, "keyword-v1");
+});
 
 it("emits complete Chinese sentences and keeps an unfinished remainder", () => {
   assert.deepEqual(extractSpeakableSentences("今天挺好的。你呢？我还想"), {
