@@ -64,11 +64,32 @@ it("copies each legacy memory into confirmed persona knowledge only once", () =>
     count: 1,
   });
 
+  const source = database.prepare(
+    `SELECT id, status, checksum_algorithm, checksum
+     FROM persona_sources
+     WHERE id = ?`,
+  ).get("legacy-memory-source:persona-1") as {
+    id: string;
+    status: string;
+    checksum_algorithm: string;
+    checksum: string;
+  };
+  assert.deepEqual(source, {
+    id: "legacy-memory-source:persona-1",
+    status: "ready",
+    checksum_algorithm: "legacy_id",
+    checksum: "legacy-memory-source:persona-1",
+  });
+
   const link = database.prepare(
-    `SELECT item_id, COUNT(*) AS count
+    `SELECT item_id, source_id, COUNT(*) AS count
      FROM persona_item_sources
      WHERE item_id = ?
-     GROUP BY item_id`,
-  ).get("legacy-memory") as { item_id: string; count: number };
-  assert.deepEqual(link, { item_id: "legacy-memory", count: 1 });
+     GROUP BY item_id, source_id`,
+  ).get("legacy-memory") as { item_id: string; source_id: string; count: number };
+  assert.deepEqual(link, {
+    item_id: "legacy-memory",
+    source_id: "legacy-memory-source:persona-1",
+    count: 1,
+  });
 });
