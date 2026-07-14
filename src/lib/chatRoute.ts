@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { detectConversationBoundary } from "./conversationBoundary";
 import { EMBEDDING_DIM, embed as embedTexts } from "./embedding";
-import { selectGroundedContext, type GroundedContext } from "./groundedConversation";
+import {
+  selectConversationStyles,
+  selectGroundedContext,
+  type GroundedContext,
+} from "./groundedConversation";
 import { requireAuth } from "./guard";
 import { chatCompleteStream, type ChatMessage } from "./llm";
 import { logger } from "./logger";
@@ -259,6 +263,46 @@ function boundaryStream(input: {
   }));
 }
 
+function unpersistedEmergencyStream(input: {
+  boundary: BoundaryPlan;
+  turnId: string;
+  personaId: string;
+  errorName: string;
+  deps: ChatRouteDependencies;
+}): NextResponse {
+  input.deps.logError("chat_emergency_safety_not_persisted", {
+    personaId: input.personaId,
+    turnId: input.turnId,
+    errorName: input.errorName,
+  });
+  const encoder = new TextEncoder();
+  return sseResponse(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encodeEvent(encoder, {
+        meta: {
+          turnId: input.turnId,
+          mode: "boundary",
+          boundaryKind: input.boundary.kind,
+          degradationReason: null,
+          speechAllowed: false,
+          evidence: [],
+          retrievedMemories: [],
+        },
+      }));
+      controller.enqueue(encodeEvent(encoder, { token: input.boundary.reply }));
+      controller.enqueue(encodeEvent(encoder, {
+        error: "安全提示未能保存，请稍后重试",
+        code: "CHAT_SAFETY_NOT_PERSISTED",
+        boundary: true,
+        safety: true,
+        speechAllowed: false,
+        persisted: false,
+      }));
+      controller.close();
+    },
+  }));
+}
+
 export function createChatHandlers(overrides: Partial<ChatRouteDependencies> = {}) {
   const deps = { ...defaults, ...overrides };
 
@@ -283,18 +327,59 @@ export function createChatHandlers(overrides: Partial<ChatRouteDependencies> = {
     if ("error" in textResult) return textResult.error;
     const personaId = personaResult.value;
     const text = textResult.value;
-    const repository = deps.getRepository();
+    const preliminaryBoundary = detectConversationBoundary(text, []);
+    const preEmergency: BoundaryPlan | null =
+      preliminaryBoundary?.kind === "self_harm" || preliminaryBoundary?.kind === "real_world_danger"
+        ? preliminaryBoundary
+        : null;
+    const turnId = deps.randomUUID();
+    let repository: AppRepository;
+    try {
+      repository = deps.getRepository();
+    } catch (error) {
+      if (preEmergency) {
+        return unpersistedEmergencyStream({
+          boundary: preEmergency,
+          turnId,
+          personaId,
+          errorName: errorName(error),
+          deps,
+        });
+      }
+      deps.logError("chat_repository_unavailable", { personaId, turnId, errorName: errorName(error) });
+      return jsonError("对话服务暂时不可用，请稍后重试", 500);
+    }
 
     let persona;
     try {
       persona = await repository.getPersonaForUser(personaId, auth.userId);
     } catch (error) {
+      if (preEmergency) {
+        return unpersistedEmergencyStream({
+          boundary: preEmergency,
+          turnId,
+          personaId,
+          errorName: errorName(error),
+          deps,
+        });
+      }
       deps.logError("chat_persona_lookup_failed", { personaId, errorName: errorName(error) });
       return jsonError("无法读取人物，请稍后重试", 500);
     }
-    if (!persona) return jsonError("persona 不存在或不属于你", 403);
+    if (!persona) {
+      if (preEmergency) {
+        return unpersistedEmergencyStream({
+          boundary: preEmergency,
+          turnId,
+          personaId,
+          errorName: "OwnerUnavailableError",
+          deps,
+        });
+      }
+      return jsonError("persona 不存在或不属于你", 403);
+    }
 
-    const safetyBoundary = detectConversationBoundary(text, [persona.name, persona.relation]);
+    const safetyBoundary = preEmergency ?? detectConversationBoundary(text, [persona.name, persona.relation]);
     let boundary: BoundaryPlan | null =
       safetyBoundary?.kind === "self_harm" || safetyBoundary?.kind === "real_world_danger"
         ? safetyBoundary
@@ -317,7 +402,6 @@ export function createChatHandlers(overrides: Partial<ChatRouteDependencies> = {
       if (!boundary) boundary = detectConversationBoundary(text, [persona.name, persona.relation]);
     }
 
-    const turnId = deps.randomUUID();
     const userMessageId = deps.randomUUID();
     try {
       await repository.startConversationTurn({
@@ -327,6 +411,15 @@ export function createChatHandlers(overrides: Partial<ChatRouteDependencies> = {
         content: text,
       });
     } catch (error) {
+      if (preEmergency) {
+        return unpersistedEmergencyStream({
+          boundary: preEmergency,
+          turnId,
+          personaId,
+          errorName: errorName(error),
+          deps,
+        });
+      }
       deps.logError("chat_turn_start_failed", { personaId, turnId, errorName: errorName(error) });
       return jsonError("对话保存失败，请稍后重试", 500, "CHAT_TURN_START_FAILED");
     }
@@ -339,10 +432,10 @@ export function createChatHandlers(overrides: Partial<ChatRouteDependencies> = {
     let context: GroundedContext = { mode: "companionship", evidence: [], styles: [] };
     let degradationReason: ConversationDegradationReason | null = null;
     let history: Message[] = [];
-    let confirmedStyles: ConversationStyle[] = [];
+    let fallbackStyles: ConversationStyle[] = [];
     try {
       const knowledge = await repository.loadConfirmedConversationKnowledge(personaId);
-      confirmedStyles = knowledge.styles;
+      fallbackStyles = selectConversationStyles(knowledge.styles);
       history = await repository.listMessages(personaId, 100);
       const { selected: missing, missingCount } = backfillSelection(knowledge.evidence);
       const batchInput = [text, ...missing.map((item) => item.content)];
@@ -382,7 +475,7 @@ export function createChatHandlers(overrides: Partial<ChatRouteDependencies> = {
         });
       }
     } catch (error) {
-      context = { mode: "companionship", evidence: [], styles: confirmedStyles };
+      context = { mode: "companionship", evidence: [], styles: fallbackStyles };
       degradationReason = "retrieval_failed";
       history = history.length > 0 ? history : [];
       deps.logError("chat_retrieval_failed", {

@@ -11,6 +11,7 @@ import type {
   Persona,
 } from "../src/lib/storage/types";
 import type { ChatMessage } from "../src/lib/llm";
+import { detectConversationBoundary } from "../src/lib/conversationBoundary";
 
 const vector = (value = 1) => {
   const result = new Float32Array(EMBEDDING_DIM);
@@ -46,6 +47,8 @@ const completedTurn = (id: string): ConversationTurn => ({
 
 type FakeOptions = {
   owner?: boolean;
+  personaError?: Error;
+  repositoryError?: Error;
   authorization?: "approved" | "pending_review" | "rejected" | "revoked" | null;
   authorizationError?: Error;
   knowledge?: ConfirmedConversationKnowledge;
@@ -72,6 +75,7 @@ function makeRepository(options: FakeOptions = {}) {
   const messages = [...(options.history ?? [])];
   const repo = {
     async getPersonaForUser(id: string, userId: string) {
+      if (options.personaError) throw options.personaError;
       return options.owner === false || id !== persona.id || userId !== "user-1" ? null : persona;
     },
     async getCurrentVoiceAuthorization() {
@@ -144,7 +148,10 @@ function makeHarness(options: HarnessOptions = {}) {
     requireAuth: async () => options.auth === "denied"
       ? { error: NextResponse.json({ error: "未登录", code: "UNAUTHORIZED" }, { status: 401 }) }
       : { userId: "user-1" },
-    getRepository: () => fake.repo,
+    getRepository: () => {
+      if (options.repositoryError) throw options.repositoryError;
+      return fake.repo;
+    },
     embedTexts: options.embedTexts ?? (async (texts) => texts.map(() => vector())),
     chatCompleteStream: (messages) => {
       order.push("model");
@@ -181,6 +188,40 @@ async function sseEvents(response: Response): Promise<Array<Record<string, unkno
   });
 }
 
+async function assertUnpersistedEmergency(
+  options: HarnessOptions,
+  text: string,
+  boundaryKind: "self_harm" | "real_world_danger",
+) {
+  const h = makeHarness(options);
+  const response = await h.handlers.POST(postRequest({ personaId: persona.id, text }));
+  const events = await sseEvents(response);
+  const fixedReply = detectConversationBoundary(text, [])?.reply;
+  assert.equal(response.status, 200);
+  assert.deepEqual(events[0].meta, {
+    turnId: "id-1",
+    mode: "boundary",
+    boundaryKind,
+    degradationReason: null,
+    speechAllowed: false,
+    evidence: [],
+    retrievedMemories: [],
+  });
+  assert.equal(events.some((event) => event.token === fixedReply), true);
+  assert.equal(events.some((event) => "sentence" in event), false);
+  assert.equal(events.some((event) => event.done === true), false);
+  assert.equal(h.modelCalls.length, 0);
+  assert.deepEqual(events.at(-1), {
+    error: "安全提示未能保存，请稍后重试",
+    code: "CHAT_SAFETY_NOT_PERSISTED",
+    boundary: true,
+    safety: true,
+    speechAllowed: false,
+    persisted: false,
+  });
+  assert.doesNotMatch(JSON.stringify(events), /secret|persona 不存在|不属于你/);
+}
+
 it("rejects auth, malformed and unsafe inputs, and wrong owners before starting or modeling", async () => {
   const cases: Array<[HarnessOptions, NextRequest, number]> = [
     [{ auth: "denied" }, postRequest({ personaId: persona.id, text: "hello" }), 401],
@@ -209,6 +250,44 @@ it("stops before retrieval and model when atomic turn start fails", async () => 
   assert.equal(response.status, 500);
   assert.equal(h.calls.load, 0);
   assert.equal(h.modelCalls.length, 0);
+});
+
+it("still streams self-harm safety guidance when persona lookup storage fails", async () => {
+  await assertUnpersistedEmergency(
+    { personaError: new Error("persona db secret") },
+    "我想自杀",
+    "self_harm",
+  );
+});
+
+it("still streams self-harm safety guidance when atomic turn start fails", async () => {
+  await assertUnpersistedEmergency(
+    { startError: new Error("turn db secret") },
+    "我想自杀",
+    "self_harm",
+  );
+});
+
+it("still streams real-danger guidance when repository construction fails", async () => {
+  await assertUnpersistedEmergency(
+    { repositoryError: new Error("repository secret") },
+    "他正在拿刀捅我",
+    "real_world_danger",
+  );
+});
+
+it("does not leak owner existence for emergency guidance and keeps ordinary storage failures as 500", async () => {
+  await assertUnpersistedEmergency({ owner: false }, "我想自杀", "self_harm");
+  for (const options of [
+    { repositoryError: new Error("repository secret") },
+    { personaError: new Error("persona db secret") },
+    { startError: new Error("turn db secret") },
+  ]) {
+    const h = makeHarness(options);
+    const response = await h.handlers.POST(postRequest({ personaId: persona.id, text: "hello" }));
+    assert.equal(response.status, 500);
+    assert.equal(h.modelCalls.length, 0);
+  }
 });
 
 it("persists every boundary with no evidence, model, speech, or sentence event", async () => {
@@ -354,6 +433,39 @@ it("keeps the current query exactly once as a user message when knowledge or his
     assert.equal(queryMessages.length, 1);
     assert.equal(queryMessages[0].role, "user");
     assert.match(queryMessages[0].content, /当前用户消息.*不是指令/);
+  }
+});
+
+it("keeps confirmed styles inside the shared budget after retrieval fallback", async () => {
+  const styles = Array.from({ length: 30 }, (_, index) => ({
+    id: `style-${index}-${"i".repeat(180)}`,
+    category: `category-${index}-${"c".repeat(180)}`,
+    content: `content-${index}-${"x".repeat(900)}`,
+    example: `example-${index}-${"y".repeat(900)}`,
+  }));
+  const knowledge: ConfirmedConversationKnowledge = {
+    evidence: [],
+    styles,
+  };
+  for (const options of [
+    { knowledge, historyError: new Error("history unavailable") },
+    { knowledge, embedTexts: async () => [new Float32Array(2)] },
+  ] satisfies HarnessOptions[]) {
+    const h = makeHarness(options);
+    await (await h.handlers.POST(postRequest({ personaId: persona.id, text: "hello" }))).text();
+    const systemPrompt = h.modelCalls[0][0].content;
+    const encoded = systemPrompt.match(/<speech_style_data>(.*?)<\/speech_style_data>/s)?.[1];
+    assert.ok(encoded);
+    const promptStyles = JSON.parse(encoded) as Array<Record<string, string | null>>;
+    assert.ok(promptStyles.length <= 20);
+    const totalStringCharacters = promptStyles.reduce(
+      (total, style) => total + Object.values(style).reduce(
+        (subtotal, value) => subtotal + (typeof value === "string" ? value.length : 0),
+        0,
+      ),
+      0,
+    );
+    assert.ok(totalStringCharacters <= 8_000, String(totalStringCharacters));
   }
 });
 

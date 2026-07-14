@@ -28,7 +28,7 @@ function normalizedMinScore(minScore: number): number {
   return Math.max(0, Math.min(1, minScore));
 }
 
-function selectStyles(styles: ConversationStyle[]): ConversationStyle[] {
+export function selectConversationStyles(styles: ConversationStyle[]): ConversationStyle[] {
   const selected: ConversationStyle[] = [];
   let remainingChars = MAX_STYLE_TEXT_CHARS;
 
@@ -103,6 +103,6 @@ export function selectGroundedContext({
   return {
     mode: evidence.length > 0 ? "grounded" : "companionship",
     evidence,
-    styles: selectStyles(knowledge.styles),
+    styles: selectConversationStyles(knowledge.styles),
   };
 }
