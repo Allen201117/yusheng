@@ -8,6 +8,7 @@ const durableRoutes = [
   "auth/send-code/route.ts",
   "chat/route.ts",
   "memory/route.ts",
+  "persona-knowledge/route.ts",
   "persona/route.ts",
   "tts/route.ts",
   "voice/upload/route.ts",
