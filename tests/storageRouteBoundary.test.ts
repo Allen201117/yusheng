@@ -39,7 +39,7 @@ it("voice routes use the object store and data routes use the repository", async
   }
 
   const repositoryRoutes = durableRoutes.filter(
-    (route) => route !== "voice/upload/route.ts" && route !== "persona-knowledge/route.ts",
+    (route) => route !== "voice/upload/route.ts" && route !== "persona-knowledge/route.ts" && route !== "chat/route.ts",
   );
   for (const route of repositoryRoutes) {
     const source = await readFile(new URL(`../src/app/api/${route}`, import.meta.url), "utf8");
@@ -59,6 +59,20 @@ it("voice routes use the object store and data routes use the repository", async
   assert.match(personaKnowledgeImplementation, /getRepository/);
   assert.doesNotMatch(personaKnowledgeImplementation, /@\/lib\/(db|voiceStore)/);
   assert.doesNotMatch(personaKnowledgeImplementation, /\bgetDb\s*\(/);
+
+  const chatRoute = await readFile(
+    new URL("../src/app/api/chat/route.ts", import.meta.url),
+    "utf8",
+  );
+  const chatImplementation = await readFile(
+    new URL("../src/lib/chatRoute.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(chatRoute, /createChatHandlers/);
+  assert.doesNotMatch(chatRoute, /getRepository|requireAuth|NextResponse/);
+  assert.match(chatImplementation, /getRepository/);
+  assert.doesNotMatch(chatImplementation, /@\/lib\/(db|voiceStore)/);
+  assert.doesNotMatch(chatImplementation, /\bgetDb\s*\(/);
 });
 
 it("manual memory ingestion creates server-owned confirmation audit fields", async () => {
