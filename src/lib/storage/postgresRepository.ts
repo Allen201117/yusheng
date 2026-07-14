@@ -9,6 +9,10 @@ import {
 import type { SqlExecutor } from "./postgres";
 import type {
   AppRepository,
+  ConfirmedConversationKnowledge,
+  ConversationEmbeddingUpdate,
+  ConversationTurn,
+  ConversationTurnEvidence,
   CreatePersonaKnowledgeCandidateInput,
   CreatePersonaInput,
   CreatePersonaSourceInput,
@@ -19,6 +23,7 @@ import type {
   Memory,
   MemoryEmbedding,
   Message,
+  MessageEvidence,
   Persona,
   PersonaFact,
   PersonaKnowledgeBundle,
@@ -136,6 +141,38 @@ type MessageRow = {
   created_at: Date | string;
 };
 
+type ConversationTurnRow = {
+  id: string;
+  persona_id: string;
+  user_message_id: string;
+  assistant_message_id: string | null;
+  mode: ConversationTurn["mode"];
+  status: ConversationTurn["status"];
+  boundary_kind: ConversationTurn["boundaryKind"];
+  degradation_reason: ConversationTurn["degradationReason"];
+  retrieval_ms: number | string | null;
+  first_sentence_ms: number | string | null;
+  total_ms: number | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+};
+
+type ConversationTurnEvidenceRow = {
+  turn_id: string;
+  persona_id: string;
+  item_kind: ConversationTurnEvidence["kind"];
+  item_id: string;
+  created_at: Date | string;
+};
+
+type MessageEvidenceRow = {
+  assistant_message_id: string;
+  persona_id: string;
+  item_kind: MessageEvidence["kind"];
+  item_id: string;
+  created_at: Date | string;
+};
+
 type VoiceProfileRow = {
   id: string;
   user_id: string;
@@ -183,7 +220,7 @@ const KNOWLEDGE_TABLES = {
   speech_style: "speech_style_items",
 } as const;
 
-const EMBEDDING_KNOWLEDGE_TABLES = {
+const EVIDENCE_TABLES = {
   fact: "persona_facts",
   relationship_memory: "relationship_memories",
 } as const;
@@ -429,12 +466,12 @@ async function setPersonaKnowledgeStatusesWith(
 
 async function storeKnowledgeEmbeddingWith(
   executor: SqlExecutor,
-  kind: keyof typeof EMBEDDING_KNOWLEDGE_TABLES,
+  kind: keyof typeof EVIDENCE_TABLES,
   id: string,
   personaId: string,
   vector: Float32Array,
 ): Promise<void> {
-  const table = EMBEDDING_KNOWLEDGE_TABLES[kind];
+  const table = EVIDENCE_TABLES[kind];
   const rows = await executor.query<{ id: string }>(
     `UPDATE ${table}
      SET embedding = $3::vector
@@ -540,6 +577,66 @@ function parseVector(value: string | number[]): Float32Array {
   }
   if (trimmed === "[]") return new Float32Array();
   return Float32Array.from(trimmed.slice(1, -1).split(",").map(Number));
+}
+
+function parseConversationVector(value: string | number[] | null): Float32Array | null {
+  if (value === null) return null;
+  try {
+    const parsed = parseVector(value);
+    return parsed.length === EMBEDDING_DIM && Array.from(parsed).every(Number.isFinite)
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isValidConversationVector(value: Float32Array): boolean {
+  return value.length === EMBEDDING_DIM && Array.from(value).every(Number.isFinite);
+}
+
+const CONVERSATION_TURN_COLUMNS = `
+  id, persona_id, user_message_id, assistant_message_id, mode, status,
+  boundary_kind, degradation_reason, retrieval_ms, first_sentence_ms, total_ms,
+  created_at, updated_at
+`;
+
+function mapConversationTurn(row: ConversationTurnRow): ConversationTurn {
+  return {
+    id: row.id,
+    personaId: row.persona_id,
+    userMessageId: row.user_message_id,
+    assistantMessageId: row.assistant_message_id,
+    mode: row.mode,
+    status: row.status,
+    boundaryKind: row.boundary_kind,
+    degradationReason: row.degradation_reason,
+    retrievalMs: row.retrieval_ms === null ? null : Number(row.retrieval_ms),
+    firstSentenceMs: row.first_sentence_ms === null ? null : Number(row.first_sentence_ms),
+    totalMs: row.total_ms === null ? null : Number(row.total_ms),
+    createdAt: toIsoString(row.created_at),
+    updatedAt: toIsoString(row.updated_at),
+  };
+}
+
+function mapConversationTurnEvidence(row: ConversationTurnEvidenceRow): ConversationTurnEvidence {
+  return {
+    turnId: row.turn_id,
+    personaId: row.persona_id,
+    kind: row.item_kind,
+    itemId: row.item_id,
+    createdAt: toIsoString(row.created_at),
+  };
+}
+
+function mapMessageEvidence(row: MessageEvidenceRow): MessageEvidence {
+  return {
+    assistantMessageId: row.assistant_message_id,
+    personaId: row.persona_id,
+    kind: row.item_kind,
+    itemId: row.item_id,
+    createdAt: toIsoString(row.created_at),
+  };
 }
 
 function serializeVector(value: Float32Array): string {
@@ -1168,6 +1265,316 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       return rows
         .filter((row): row is MemoryEmbeddingRow & { embedding: string | number[] } => row.embedding !== null)
         .map((row) => ({ id: row.id, content: row.content, embedding: parseVector(row.embedding) }));
+    },
+
+    async loadConfirmedConversationKnowledge(
+      personaId: string,
+    ): Promise<ConfirmedConversationKnowledge> {
+      const [facts, memories, styles] = await Promise.all([
+        sql.query<{
+          id: string;
+          content: string;
+          embedding: string | number[] | null;
+          fact_type: string;
+          fact_key: string;
+        }>(
+          `SELECT id, content, embedding::text AS embedding, fact_type, fact_key
+           FROM persona_facts
+           WHERE persona_id = $1 AND status = 'confirmed'
+           ORDER BY created_at, id`,
+          [personaId],
+        ),
+        sql.query<{
+          id: string;
+          content: string;
+          embedding: string | number[] | null;
+          occurred_at: Date | string | null;
+          location: string | null;
+          participants: unknown;
+        }>(
+          `SELECT id, content, embedding::text AS embedding, occurred_at, location, participants
+           FROM relationship_memories
+           WHERE persona_id = $1 AND status = 'confirmed'
+           ORDER BY created_at, id`,
+          [personaId],
+        ),
+        sql.query<{
+          id: string;
+          category: string;
+          content: string;
+          example: string | null;
+        }>(
+          `SELECT id, category, content, example
+           FROM speech_style_items
+           WHERE persona_id = $1 AND status = 'confirmed'
+           ORDER BY created_at, id`,
+          [personaId],
+        ),
+      ]);
+      return {
+        evidence: [
+          ...facts.map((row) => ({
+            kind: "fact" as const,
+            id: row.id,
+            content: row.content,
+            embedding: parseConversationVector(row.embedding),
+            factType: row.fact_type,
+            factKey: row.fact_key,
+          })),
+          ...memories.map((row) => ({
+            kind: "relationship_memory" as const,
+            id: row.id,
+            content: row.content,
+            embedding: parseConversationVector(row.embedding),
+            occurredAt: toNullableIsoString(row.occurred_at),
+            location: row.location,
+            participants: parseParticipants(row.participants),
+          })),
+        ],
+        styles: styles.map((row) => ({
+          id: row.id,
+          category: row.category,
+          content: row.content,
+          example: row.example,
+        })),
+      };
+    },
+
+    async storeConfirmedConversationEmbeddings(
+      personaId: string,
+      updates: ConversationEmbeddingUpdate[],
+    ): Promise<void> {
+      if (updates.some((update) => !isValidConversationVector(update.embedding))) {
+        throw new Error("conversation_embedding_status_changed");
+      }
+      await sql.transaction(async (transaction) => {
+        for (const update of updates) {
+          const table = EVIDENCE_TABLES[update.kind];
+          const changed = await transaction.query<{ id: string }>(
+            `UPDATE ${table}
+             SET embedding = $3::vector
+             WHERE id = $1 AND persona_id = $2
+               AND status = 'confirmed' AND embedding IS NULL
+             RETURNING id`,
+            [update.id, personaId, serializeVector(update.embedding)],
+          );
+          if (changed.length === 1) continue;
+          const current = await transaction.query<{
+            status: PersonaKnowledgeStatus;
+            embedding: string | number[] | null;
+          }>(
+            `SELECT status, embedding::text AS embedding
+             FROM ${table}
+             WHERE id = $1 AND persona_id = $2
+             FOR UPDATE`,
+            [update.id, personaId],
+          );
+          if (
+            current[0]?.status !== "confirmed"
+            || parseConversationVector(current[0].embedding) === null
+          ) {
+            throw new Error("conversation_embedding_status_changed");
+          }
+        }
+      });
+    },
+
+    async startConversationTurn(input): Promise<ConversationTurn> {
+      return sql.transaction(async (transaction) => {
+        const messages = await transaction.query<{ id: string }>(
+          `INSERT INTO messages (id, persona_id, role, content)
+           VALUES ($1, $2, 'user', $3)
+           RETURNING id`,
+          [input.userMessageId, input.personaId, input.content],
+        );
+        if (messages.length !== 1) throw new Error("conversation_user_message_persistence_failed");
+        const turns = await transaction.query<ConversationTurnRow>(
+          `INSERT INTO conversation_turns (id, persona_id, user_message_id, status)
+           VALUES ($1, $2, $3, 'started')
+           RETURNING ${CONVERSATION_TURN_COLUMNS}`,
+          [input.turnId, input.personaId, input.userMessageId],
+        );
+        if (turns.length !== 1) throw new Error("conversation_turn_start_failed");
+        return mapConversationTurn(turns[0]);
+      });
+    },
+
+    async bindConversationTurnEvidence(input): Promise<ConversationTurnEvidence[]> {
+      return sql.transaction(async (transaction) => {
+        const turns = await transaction.query<ConversationTurnRow>(
+          `SELECT ${CONVERSATION_TURN_COLUMNS}
+           FROM conversation_turns
+           WHERE id = $1 AND persona_id = $2 AND status = 'started'
+           FOR UPDATE`,
+          [input.turnId, input.personaId],
+        );
+        if (turns.length !== 1) throw new Error("conversation_turn_status_changed");
+        const evidence = Array.from(
+          new Map(input.evidence.map((item) => [`${item.kind}:${item.itemId}`, item])).values(),
+        ).sort((left, right) =>
+          left.kind.localeCompare(right.kind) || left.itemId.localeCompare(right.itemId));
+        const sourceIdsByItem = new Map<string, string[]>();
+        for (const item of evidence) {
+          const rows = await transaction.query<{
+            item_kind: ConversationTurnEvidence["kind"];
+            item_id: string;
+            source_id: string;
+          }>(
+            `SELECT links.item_kind, links.item_id, source.id AS source_id
+             FROM persona_item_sources links
+             JOIN persona_sources source ON source.id = links.source_id
+             WHERE links.item_kind = $1 AND links.item_id = $2
+               AND source.persona_id = $3 AND source.status = 'ready'
+             ORDER BY source.id`,
+            [item.kind, item.itemId, input.personaId],
+          );
+          if (rows.length === 0) throw new Error("conversation_evidence_unavailable");
+          sourceIdsByItem.set(
+            `${item.kind}:${item.itemId}`,
+            rows.map((row) => row.source_id),
+          );
+        }
+
+        const sourceIds = Array.from(new Set(Array.from(sourceIdsByItem.values()).flat())).sort();
+        if (sourceIds.length > 0) {
+          const lockedSources = await transaction.query<{ id: string }>(
+            `SELECT id FROM persona_sources
+             WHERE persona_id = $1 AND status = 'ready' AND id = ANY($2::text[])
+             ORDER BY id
+             FOR UPDATE`,
+            [input.personaId, sourceIds],
+          );
+          const lockedIds = new Set(lockedSources.map((row) => row.id));
+          for (const item of evidence) {
+            const supports = sourceIdsByItem.get(`${item.kind}:${item.itemId}`) || [];
+            if (!supports.some((sourceId) => lockedIds.has(sourceId))) {
+              throw new Error("conversation_evidence_unavailable");
+            }
+          }
+        }
+
+        for (const item of evidence) {
+          const table = EVIDENCE_TABLES[item.kind];
+          const rows = await transaction.query<{ id: string }>(
+            `SELECT id FROM ${table}
+             WHERE id = $1 AND persona_id = $2 AND status = 'confirmed'
+             FOR UPDATE`,
+            [item.itemId, input.personaId],
+          );
+          if (rows.length !== 1) throw new Error("conversation_evidence_unavailable");
+        }
+
+        const bound: ConversationTurnEvidence[] = [];
+        for (const item of evidence) {
+          const rows = await transaction.query<ConversationTurnEvidenceRow>(
+            `INSERT INTO conversation_turn_evidence
+               (turn_id, persona_id, item_kind, item_id)
+             VALUES ($1, $2, $3, $4)
+             RETURNING turn_id, persona_id, item_kind, item_id, created_at`,
+            [input.turnId, input.personaId, item.kind, item.itemId],
+          );
+          if (rows.length !== 1) throw new Error("conversation_evidence_persistence_failed");
+          bound.push(mapConversationTurnEvidence(rows[0]));
+        }
+        return bound;
+      });
+    },
+
+    async completeConversationTurn(input): Promise<ConversationTurn> {
+      return sql.transaction(async (transaction) => {
+        const turns = await transaction.query<ConversationTurnRow>(
+          `SELECT ${CONVERSATION_TURN_COLUMNS}
+           FROM conversation_turns
+           WHERE id = $1 AND persona_id = $2 AND status = 'started'
+           FOR UPDATE`,
+          [input.turnId, input.personaId],
+        );
+        if (turns.length !== 1) throw new Error("conversation_turn_status_changed");
+        const evidence = await transaction.query<ConversationTurnEvidenceRow>(
+          `SELECT turn_id, persona_id, item_kind, item_id, created_at
+           FROM conversation_turn_evidence
+           WHERE turn_id = $1 AND persona_id = $2
+           ORDER BY item_kind, item_id`,
+          [input.turnId, input.personaId],
+        );
+        if (
+          (input.mode === "grounded" && evidence.length === 0)
+          || (input.mode !== "grounded" && evidence.length !== 0)
+        ) {
+          throw new Error("conversation_turn_evidence_mismatch");
+        }
+        const messages = await transaction.query<{ id: string }>(
+          `INSERT INTO messages (id, persona_id, role, content)
+           VALUES ($1, $2, 'assistant', $3)
+           RETURNING id`,
+          [input.assistantMessageId, input.personaId, input.content],
+        );
+        if (messages.length !== 1) throw new Error("conversation_assistant_message_persistence_failed");
+        const copied = await transaction.query<MessageEvidenceRow>(
+          `INSERT INTO message_evidence
+             (assistant_message_id, persona_id, item_kind, item_id, created_at)
+           SELECT $1, persona_id, item_kind, item_id, created_at
+           FROM conversation_turn_evidence
+           WHERE turn_id = $2 AND persona_id = $3
+           RETURNING assistant_message_id, persona_id, item_kind, item_id, created_at`,
+          [input.assistantMessageId, input.turnId, input.personaId],
+        );
+        if (copied.length !== evidence.length) {
+          throw new Error("conversation_evidence_persistence_failed");
+        }
+        const completed = await transaction.query<ConversationTurnRow>(
+          `UPDATE conversation_turns
+           SET assistant_message_id = $3, mode = $4, status = 'completed',
+               boundary_kind = $5, degradation_reason = $6, retrieval_ms = $7,
+               first_sentence_ms = $8, total_ms = $9, updated_at = now()
+           WHERE id = $1 AND persona_id = $2 AND status = 'started'
+           RETURNING ${CONVERSATION_TURN_COLUMNS}`,
+          [
+            input.turnId,
+            input.personaId,
+            input.assistantMessageId,
+            input.mode,
+            input.boundaryKind,
+            input.degradationReason,
+            input.retrievalMs,
+            input.firstSentenceMs,
+            input.totalMs,
+          ],
+        );
+        if (completed.length !== 1) throw new Error("conversation_turn_status_changed");
+        return mapConversationTurn(completed[0]);
+      });
+    },
+
+    async failConversationTurn(input): Promise<boolean> {
+      const rows = await sql.query<{ id: string }>(
+        `UPDATE conversation_turns
+         SET status = $3, degradation_reason = $4, total_ms = $5, updated_at = now()
+         WHERE id = $1 AND persona_id = $2 AND status = 'started'
+         RETURNING id`,
+        [
+          input.turnId,
+          input.personaId,
+          input.status,
+          input.degradationReason,
+          input.totalMs,
+        ],
+      );
+      return rows.length === 1;
+    },
+
+    async listMessageEvidence(
+      assistantMessageId: string,
+      personaId: string,
+    ): Promise<MessageEvidence[]> {
+      const rows = await sql.query<MessageEvidenceRow>(
+        `SELECT assistant_message_id, persona_id, item_kind, item_id, created_at
+         FROM message_evidence
+         WHERE assistant_message_id = $1 AND persona_id = $2
+         ORDER BY item_kind, item_id`,
+        [assistantMessageId, personaId],
+      );
+      return rows.map(mapMessageEvidence);
     },
 
     async insertMessage(input: InsertMessageInput): Promise<Message> {

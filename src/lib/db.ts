@@ -18,6 +18,10 @@ import {
   requirePersonaKnowledgeEditsAllowed,
 } from "./personaKnowledgeService";
 import type {
+  ConfirmedConversationKnowledge,
+  ConversationEmbeddingUpdate,
+  ConversationTurn,
+  ConversationTurnEvidence,
   CreatePersonaKnowledgeCandidateInput,
   CreatePersonaSourceInput,
   PersonaFact,
@@ -33,6 +37,7 @@ import type {
   CreateVoiceAuthorizationInput,
   VoiceAuthorization,
   InsertMemoryInput,
+  MessageEvidence,
 } from "./storage/types";
 
 const DATA_DIR = process.env.DATA_DIR || "./data";
@@ -469,7 +474,7 @@ const KNOWLEDGE_TABLES = {
   speech_style: "speech_style_items",
 } as const;
 
-const EMBEDDING_KNOWLEDGE_TABLES = {
+const EVIDENCE_TABLES = {
   fact: "persona_facts",
   relationship_memory: "relationship_memories",
 } as const;
@@ -824,12 +829,12 @@ export function setPersonaKnowledgeStatuses(
 
 function storeKnowledgeEmbeddingWithDb(
   database: Database.Database,
-  kind: keyof typeof EMBEDDING_KNOWLEDGE_TABLES,
+  kind: keyof typeof EVIDENCE_TABLES,
   id: string,
   personaId: string,
   vector: Float32Array,
 ): void {
-  const table = EMBEDDING_KNOWLEDGE_TABLES[kind];
+  const table = EVIDENCE_TABLES[kind];
   const result = database.prepare(
     `UPDATE ${table} SET embedding = ? WHERE id = ? AND persona_id = ?`,
   ).run(float32ToBuffer(vector), id, personaId);
@@ -1056,6 +1061,318 @@ export function loadMemoriesWithEmbeddings(
       content: r.content,
       embedding: bufToFloat32(r.embedding as Buffer),
     }));
+}
+
+function parseConversationEmbedding(value: unknown): Float32Array | null {
+  if (!Buffer.isBuffer(value) || value.byteLength !== EMBEDDING_DIM * 4) return null;
+  const parsed = new Float32Array(EMBEDDING_DIM);
+  for (let index = 0; index < EMBEDDING_DIM; index += 1) {
+    const number = value.readFloatLE(index * 4);
+    if (!Number.isFinite(number)) return null;
+    parsed[index] = number;
+  }
+  return parsed;
+}
+
+function isValidConversationEmbedding(value: Float32Array): boolean {
+  return value.length === EMBEDDING_DIM && Array.from(value).every(Number.isFinite);
+}
+
+function sqliteIso(value: string): string {
+  return new Date(value.endsWith("Z") ? value : `${value}Z`).toISOString();
+}
+
+function rowToConversationTurn(row: any): ConversationTurn {
+  return {
+    id: row.id,
+    personaId: row.persona_id,
+    userMessageId: row.user_message_id,
+    assistantMessageId: row.assistant_message_id,
+    mode: row.mode,
+    status: row.status,
+    boundaryKind: row.boundary_kind,
+    degradationReason: row.degradation_reason,
+    retrievalMs: row.retrieval_ms,
+    firstSentenceMs: row.first_sentence_ms,
+    totalMs: row.total_ms,
+    createdAt: sqliteIso(row.created_at),
+    updatedAt: sqliteIso(row.updated_at),
+  };
+}
+
+export function loadConfirmedConversationKnowledge(
+  personaId: string,
+): ConfirmedConversationKnowledge {
+  const database = getDb();
+  const facts = database.prepare(
+    `SELECT id, content, embedding, fact_type, fact_key
+     FROM persona_facts
+     WHERE persona_id = ? AND status = 'confirmed'
+     ORDER BY created_at, id`,
+  ).all(personaId) as any[];
+  const memories = database.prepare(
+    `SELECT id, content, embedding, occurred_at, location, participants
+     FROM relationship_memories
+     WHERE persona_id = ? AND status = 'confirmed'
+     ORDER BY created_at, id`,
+  ).all(personaId) as any[];
+  const styles = database.prepare(
+    `SELECT id, category, content, example
+     FROM speech_style_items
+     WHERE persona_id = ? AND status = 'confirmed'
+     ORDER BY created_at, id`,
+  ).all(personaId) as any[];
+  return {
+    evidence: [
+      ...facts.map((row) => ({
+        kind: "fact" as const,
+        id: row.id,
+        content: row.content,
+        embedding: parseConversationEmbedding(row.embedding),
+        factType: row.fact_type,
+        factKey: row.fact_key,
+      })),
+      ...memories.map((row) => ({
+        kind: "relationship_memory" as const,
+        id: row.id,
+        content: row.content,
+        embedding: parseConversationEmbedding(row.embedding),
+        occurredAt: row.occurred_at,
+        location: row.location,
+        participants: parseParticipants(row.participants),
+      })),
+    ],
+    styles: styles.map((row) => ({
+      id: row.id,
+      category: row.category,
+      content: row.content,
+      example: row.example,
+    })),
+  };
+}
+
+export function storeConfirmedConversationEmbeddings(
+  personaId: string,
+  updates: ConversationEmbeddingUpdate[],
+): void {
+  if (updates.some((update) => !isValidConversationEmbedding(update.embedding))) {
+    throw new Error("conversation_embedding_status_changed");
+  }
+  const database = getDb();
+  database.transaction(() => {
+    for (const update of updates) {
+      const table = EVIDENCE_TABLES[update.kind];
+      const changed = database.prepare(
+        `UPDATE ${table}
+         SET embedding = ?
+         WHERE id = ? AND persona_id = ? AND status = 'confirmed' AND embedding IS NULL`,
+      ).run(float32ToBuffer(update.embedding), update.id, personaId);
+      if (changed.changes === 1) continue;
+      const current = database.prepare(
+        `SELECT status, embedding FROM ${table} WHERE id = ? AND persona_id = ?`,
+      ).get(update.id, personaId) as { status: string; embedding: unknown } | undefined;
+      if (
+        current?.status !== "confirmed"
+        || parseConversationEmbedding(current.embedding) === null
+      ) {
+        throw new Error("conversation_embedding_status_changed");
+      }
+    }
+  })();
+}
+
+export function startConversationTurn(input: {
+  turnId: string;
+  personaId: string;
+  userMessageId: string;
+  content: string;
+}): ConversationTurn {
+  const database = getDb();
+  return database.transaction(() => {
+    const now = new Date().toISOString();
+    database.prepare(
+      `INSERT INTO messages (id, persona_id, role, content, created_at)
+       VALUES (?, ?, 'user', ?, ?)`,
+    ).run(input.userMessageId, input.personaId, input.content, now);
+    const row = database.prepare(
+      `INSERT INTO conversation_turns
+         (id, persona_id, user_message_id, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'started', ?, ?)
+       RETURNING *`,
+    ).get(input.turnId, input.personaId, input.userMessageId, now, now);
+    if (!row) throw new Error("conversation_turn_start_failed");
+    return rowToConversationTurn(row);
+  })();
+}
+
+export function bindConversationTurnEvidence(input: {
+  turnId: string;
+  personaId: string;
+  evidence: Array<{ kind: "fact" | "relationship_memory"; itemId: string }>;
+}): ConversationTurnEvidence[] {
+  const database = getDb();
+  return database.transaction(() => {
+    const turn = database.prepare(
+      `SELECT id FROM conversation_turns
+       WHERE id = ? AND persona_id = ? AND status = 'started'`,
+    ).get(input.turnId, input.personaId);
+    if (!turn) throw new Error("conversation_turn_status_changed");
+    const evidence = Array.from(
+      new Map(input.evidence.map((item) => [`${item.kind}:${item.itemId}`, item])).values(),
+    ).sort((left, right) =>
+      left.kind.localeCompare(right.kind) || left.itemId.localeCompare(right.itemId));
+
+    for (const item of evidence) {
+      const source = database.prepare(
+        `SELECT source.id
+         FROM persona_item_sources links
+         JOIN persona_sources source ON source.id = links.source_id
+         WHERE links.item_kind = ? AND links.item_id = ?
+           AND source.persona_id = ? AND source.status = 'ready'
+         ORDER BY source.id
+         LIMIT 1`,
+      ).get(item.kind, item.itemId, input.personaId);
+      if (!source) throw new Error("conversation_evidence_unavailable");
+    }
+    for (const item of evidence) {
+      const table = EVIDENCE_TABLES[item.kind];
+      const knowledge = database.prepare(
+        `SELECT id FROM ${table}
+         WHERE id = ? AND persona_id = ? AND status = 'confirmed'`,
+      ).get(item.itemId, input.personaId);
+      if (!knowledge) throw new Error("conversation_evidence_unavailable");
+    }
+
+    const now = new Date().toISOString();
+    const insert = database.prepare(
+      `INSERT INTO conversation_turn_evidence
+         (turn_id, persona_id, item_kind, item_id, created_at)
+       VALUES (?, ?, ?, ?, ?)
+       RETURNING turn_id, persona_id, item_kind, item_id, created_at`,
+    );
+    return evidence.map((item) => {
+      const row = insert.get(input.turnId, input.personaId, item.kind, item.itemId, now) as any;
+      return {
+        turnId: row.turn_id,
+        personaId: row.persona_id,
+        kind: row.item_kind,
+        itemId: row.item_id,
+        createdAt: sqliteIso(row.created_at),
+      };
+    });
+  })();
+}
+
+export function completeConversationTurn(input: {
+  turnId: string;
+  personaId: string;
+  assistantMessageId: string;
+  content: string;
+  mode: "grounded" | "companionship" | "boundary";
+  boundaryKind: ConversationTurn["boundaryKind"];
+  degradationReason: ConversationTurn["degradationReason"];
+  retrievalMs: number;
+  firstSentenceMs: number | null;
+  totalMs: number;
+}): ConversationTurn {
+  const database = getDb();
+  return database.transaction(() => {
+    const turn = database.prepare(
+      `SELECT id FROM conversation_turns
+       WHERE id = ? AND persona_id = ? AND status = 'started'`,
+    ).get(input.turnId, input.personaId);
+    if (!turn) throw new Error("conversation_turn_status_changed");
+    const evidence = database.prepare(
+      `SELECT item_kind, item_id FROM conversation_turn_evidence
+       WHERE turn_id = ? AND persona_id = ?
+       ORDER BY item_kind, item_id`,
+    ).all(input.turnId, input.personaId);
+    if (
+      (input.mode === "grounded" && evidence.length === 0)
+      || (input.mode !== "grounded" && evidence.length !== 0)
+    ) {
+      throw new Error("conversation_turn_evidence_mismatch");
+    }
+
+    const now = new Date().toISOString();
+    database.prepare(
+      `INSERT INTO messages (id, persona_id, role, content, created_at)
+       VALUES (?, ?, 'assistant', ?, ?)`,
+    ).run(input.assistantMessageId, input.personaId, input.content, now);
+    const copied = database.prepare(
+      `INSERT INTO message_evidence
+         (assistant_message_id, persona_id, item_kind, item_id, created_at)
+       SELECT ?, persona_id, item_kind, item_id, created_at
+       FROM conversation_turn_evidence
+       WHERE turn_id = ? AND persona_id = ?`,
+    ).run(input.assistantMessageId, input.turnId, input.personaId);
+    if (copied.changes !== evidence.length) throw new Error("conversation_evidence_persistence_failed");
+    const changed = database.prepare(
+      `UPDATE conversation_turns
+       SET assistant_message_id = ?, mode = ?, status = 'completed', boundary_kind = ?,
+           degradation_reason = ?, retrieval_ms = ?, first_sentence_ms = ?, total_ms = ?,
+           updated_at = ?
+       WHERE id = ? AND persona_id = ? AND status = 'started'`,
+    ).run(
+      input.assistantMessageId,
+      input.mode,
+      input.boundaryKind,
+      input.degradationReason,
+      input.retrievalMs,
+      input.firstSentenceMs,
+      input.totalMs,
+      now,
+      input.turnId,
+      input.personaId,
+    );
+    if (changed.changes !== 1) throw new Error("conversation_turn_status_changed");
+    const row = database.prepare(
+      "SELECT * FROM conversation_turns WHERE id = ? AND persona_id = ?",
+    ).get(input.turnId, input.personaId);
+    if (!row) throw new Error("conversation_turn_status_changed");
+    return rowToConversationTurn(row);
+  })();
+}
+
+export function failConversationTurn(input: {
+  turnId: string;
+  personaId: string;
+  status: "generation_failed" | "assistant_persistence_failed";
+  degradationReason: "model_failed" | "assistant_persistence_failed";
+  totalMs: number;
+}): boolean {
+  const now = new Date().toISOString();
+  const changed = getDb().prepare(
+    `UPDATE conversation_turns
+     SET status = ?, degradation_reason = ?, total_ms = ?, updated_at = ?
+     WHERE id = ? AND persona_id = ? AND status = 'started'`,
+  ).run(
+    input.status,
+    input.degradationReason,
+    input.totalMs,
+    now,
+    input.turnId,
+    input.personaId,
+  );
+  return changed.changes === 1;
+}
+
+export function listMessageEvidence(
+  assistantMessageId: string,
+  personaId: string,
+): MessageEvidence[] {
+  return (getDb().prepare(
+    `SELECT assistant_message_id, persona_id, item_kind, item_id, created_at
+     FROM message_evidence
+     WHERE assistant_message_id = ? AND persona_id = ?
+     ORDER BY item_kind, item_id`,
+  ).all(assistantMessageId, personaId) as any[]).map((row) => ({
+    assistantMessageId: row.assistant_message_id,
+    personaId: row.persona_id,
+    kind: row.item_kind,
+    itemId: row.item_id,
+    createdAt: sqliteIso(row.created_at),
+  }));
 }
 
 function bufToFloat32(buf: Buffer): Float32Array {

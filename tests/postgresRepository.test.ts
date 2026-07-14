@@ -857,3 +857,217 @@ it("revokes only unsupported persona knowledge for an owner-scoped source", asyn
     .filter((call) => /persona_sources|persona_item_sources|persona_facts|speech_style_items/.test(call.text))
     .every((call) => call.params.includes("persona-1") || call.text.includes("persona_item_sources")));
 });
+
+it("loads only confirmed conversation evidence and styles with nullable embeddings", async () => {
+  const fake = createFakeSql((text) => {
+    assert.match(text, /persona_id = \$1/);
+    assert.match(text, /status = 'confirmed'/);
+    if (text.includes("FROM persona_facts")) return [{
+      id: "fact-confirmed",
+      content: "她爱喝桂花茶。",
+      fact_type: "preference",
+      fact_key: "drink",
+      embedding: null,
+    }];
+    if (text.includes("FROM relationship_memories")) return [{
+      id: "memory-confirmed",
+      content: "一起喝茶。",
+      occurred_at: null,
+      location: null,
+      participants: ["user-1"],
+      embedding: null,
+    }];
+    if (text.includes("FROM speech_style_items")) return [{
+      id: "style-confirmed",
+      category: "tone",
+      content: "慢慢说",
+      example: null,
+    }];
+    throw new Error(`unexpected query: ${text}`);
+  });
+  const repo = createPostgresRepository(fake.executor);
+
+  const result = await repo.loadConfirmedConversationKnowledge("persona-1");
+
+  assert.deepEqual(result.evidence.map((item) => item.id), ["fact-confirmed", "memory-confirmed"]);
+  assert.ok(result.evidence.every((item) => item.embedding === null));
+  assert.deepEqual(result.styles.map((item) => item.id), ["style-confirmed"]);
+  assert.equal(fake.calls.length, 3);
+  assert.ok(fake.calls.slice(0, 2).every((call) => call.text.includes("embedding::text")));
+  assert.ok(fake.calls.every((call) => !call.text.includes("persona_sources")));
+  assert.ok(fake.calls.every((call) => !call.text.includes("listPersonaKnowledge")));
+});
+
+it("backfills confirmed embeddings with owner/status/null CAS and idempotent re-read", async () => {
+  const vector = new Float32Array(1024).fill(0.5);
+  const fake = createFakeSql((text, params) => {
+    if (text.includes("UPDATE persona_facts") && params[0] === "fact-null") {
+      return [{ id: "fact-null" }];
+    }
+    if (text.includes("UPDATE relationship_memories") && params[0] === "memory-raced") {
+      return [];
+    }
+    if (text.includes("SELECT status") && text.includes("relationship_memories")) {
+      return [{ status: "confirmed", embedding: `[${Array(1024).fill(0.5).join(",")}]` }];
+    }
+    return [];
+  });
+  const repo = createPostgresRepository(fake.executor);
+
+  await repo.storeConfirmedConversationEmbeddings("persona-1", [
+    { kind: "fact", id: "fact-null", embedding: vector },
+    { kind: "relationship_memory", id: "memory-raced", embedding: vector },
+  ]);
+
+  assert.equal(fake.transactions, 1);
+  const updates = fake.calls.filter((call) => call.text.includes("SET embedding"));
+  assert.equal(updates.length, 2);
+  for (const update of updates) {
+    assert.match(update.text, /persona_id = \$2/);
+    assert.match(update.text, /status = 'confirmed'/);
+    assert.match(update.text, /embedding IS NULL/);
+    assert.equal(update.params[1], "persona-1");
+  }
+  const reread = fake.calls.find((call) => call.text.includes("SELECT status"))!;
+  assert.match(reread.text, /WHERE id = \$1 AND persona_id = \$2/);
+  assert.deepEqual(reread.params, ["memory-raced", "persona-1"]);
+
+  const invalid = createFakeSql((text) => {
+    if (text.includes("UPDATE persona_facts")) return [];
+    if (text.includes("SELECT status")) return [{ status: "revoked", embedding: null }];
+    return [];
+  });
+  await assert.rejects(createPostgresRepository(invalid.executor)
+    .storeConfirmedConversationEmbeddings("persona-1", [
+      { kind: "fact", id: "fact-revoked", embedding: vector },
+    ]), /conversation_embedding_status_changed/);
+  assert.equal(invalid.transactions, 1);
+
+  const wrongSize = createFakeSql();
+  await assert.rejects(createPostgresRepository(wrongSize.executor)
+    .storeConfirmedConversationEmbeddings("persona-1", [
+      { kind: "fact", id: "fact-null", embedding: new Float32Array(1023) },
+    ]), /conversation_embedding_status_changed/);
+  assert.equal(wrongSize.calls.length, 0);
+});
+
+it("starts, binds, and completes a grounded turn in transactions with stable lock order", async () => {
+  const now = "2026-07-14T00:00:00.000Z";
+  const startedTurn = {
+    id: "turn-1",
+    persona_id: "persona-1",
+    user_message_id: "user-message-1",
+    assistant_message_id: null,
+    mode: null,
+    status: "started",
+    boundary_kind: null,
+    degradation_reason: null,
+    retrieval_ms: null,
+    first_sentence_ms: null,
+    total_ms: null,
+    created_at: now,
+    updated_at: now,
+  };
+  const fake = createFakeSql((text, params) => {
+    if (text.includes("INSERT INTO messages") && params[0] === "user-message-1") return [{
+      id: "user-message-1", persona_id: "persona-1", role: "user",
+      content: params[2], created_at: now,
+    }];
+    if (text.includes("INSERT INTO conversation_turns")) return [startedTurn];
+    if (text.includes("FROM conversation_turns") && text.includes("FOR UPDATE")) return [startedTurn];
+    if (text.includes("FROM persona_item_sources") && text.includes("source_id")) return [
+      { item_kind: "fact", item_id: "fact-confirmed", source_id: "source-b" },
+      { item_kind: "fact", item_id: "fact-confirmed", source_id: "source-a" },
+    ];
+    if (text.includes("FROM persona_sources") && text.includes("FOR UPDATE")) return [
+      { id: "source-a" }, { id: "source-b" },
+    ];
+    if (text.includes("FROM persona_facts") && text.includes("FOR UPDATE")) return [{ id: "fact-confirmed" }];
+    if (text.includes("INSERT INTO conversation_turn_evidence")) return [{
+      turn_id: "turn-1", persona_id: "persona-1", item_kind: "fact",
+      item_id: "fact-confirmed", created_at: now,
+    }];
+    if (text.includes("SELECT turn_id") && text.includes("conversation_turn_evidence")) return [{
+      turn_id: "turn-1", persona_id: "persona-1", item_kind: "fact",
+      item_id: "fact-confirmed", created_at: now,
+    }];
+    if (text.includes("INSERT INTO messages") && params[0] === "assistant-1") return [{
+      id: "assistant-1", persona_id: "persona-1", role: "assistant",
+      content: params[2], created_at: now,
+    }];
+    if (text.includes("INSERT INTO message_evidence")) return [{
+      assistant_message_id: "assistant-1", persona_id: "persona-1",
+      item_kind: "fact", item_id: "fact-confirmed", created_at: now,
+    }];
+    if (text.includes("UPDATE conversation_turns")) return [{
+      ...startedTurn,
+      assistant_message_id: "assistant-1",
+      mode: "grounded",
+      status: "completed",
+      retrieval_ms: 12,
+      first_sentence_ms: 40,
+      total_ms: 80,
+    }];
+    if (text.includes("FROM message_evidence")) return [{
+      assistant_message_id: "assistant-1", persona_id: "persona-1",
+      item_kind: "fact", item_id: "fact-confirmed", created_at: now,
+    }];
+    throw new Error(`unexpected query: ${text}`);
+  });
+  const repo = createPostgresRepository(fake.executor);
+
+  await repo.startConversationTurn({
+    turnId: "turn-1", personaId: "persona-1", userMessageId: "user-message-1",
+    content: "她喜欢喝什么？",
+  });
+  const bound = await repo.bindConversationTurnEvidence({
+    turnId: "turn-1", personaId: "persona-1",
+    evidence: [{ kind: "fact", itemId: "fact-confirmed" }],
+  });
+  assert.equal(bound.length, 1);
+  const completed = await repo.completeConversationTurn({
+    turnId: "turn-1", personaId: "persona-1", assistantMessageId: "assistant-1",
+    content: "她爱喝桂花茶。", mode: "grounded", boundaryKind: null,
+    degradationReason: null, retrievalMs: 12, firstSentenceMs: 40, totalMs: 80,
+  });
+  assert.equal(completed.status, "completed");
+  assert.equal((await repo.listMessageEvidence("assistant-1", "persona-1")).length, 1);
+  assert.equal(fake.transactions, 3);
+
+  const sourceLockIndex = fake.calls.findIndex((call) =>
+    call.text.includes("FROM persona_sources") && call.text.includes("FOR UPDATE"));
+  const itemLockIndex = fake.calls.findIndex((call) =>
+    call.text.includes("FROM persona_facts") && call.text.includes("FOR UPDATE"));
+  assert.ok(sourceLockIndex >= 0 && sourceLockIndex < itemLockIndex);
+  assert.match(fake.calls[sourceLockIndex].text, /ORDER BY id/);
+
+  const userInsert = fake.calls.find((call) =>
+    call.text.includes("INSERT INTO messages") && call.params[0] === "user-message-1")!;
+  assert.match(userInsert.text, /'user'/);
+  assert.deepEqual(userInsert.params, ["user-message-1", "persona-1", "她喜欢喝什么？"]);
+  const assistantInsert = fake.calls.find((call) =>
+    call.text.includes("INSERT INTO messages") && call.params[0] === "assistant-1")!;
+  assert.match(assistantInsert.text, /'assistant'/);
+  const completionUpdate = fake.calls.find((call) => call.text.includes("UPDATE conversation_turns"))!;
+  assert.match(completionUpdate.text, /id = \$1 AND persona_id = \$2 AND status = 'started'/);
+  assert.ok(fake.calls.some((call) =>
+    call.text.includes("INSERT INTO message_evidence") && call.text.includes("conversation_turn_evidence")));
+});
+
+it("fails only a matching started turn with owner/status compare-and-set", async () => {
+  const fake = createFakeSql((text) => text.includes("UPDATE conversation_turns")
+    ? [{ id: "turn-1" }]
+    : []);
+  const repo = createPostgresRepository(fake.executor);
+
+  assert.equal(await repo.failConversationTurn({
+    turnId: "turn-1",
+    personaId: "persona-1",
+    status: "generation_failed",
+    degradationReason: "model_failed",
+    totalMs: 10,
+  }), true);
+  const update = fake.calls[0];
+  assert.match(update.text, /WHERE id = \$1 AND persona_id = \$2 AND status = 'started'/);
+  assert.deepEqual(update.params, ["turn-1", "persona-1", "generation_failed", "model_failed", 10]);
+});

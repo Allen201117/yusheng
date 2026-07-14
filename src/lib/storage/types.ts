@@ -461,6 +461,51 @@ export interface AppRepository {
   insertMemories(inputs: InsertMemoryInput[]): Promise<void>;
   deleteMemory(id: string): Promise<boolean>;
   loadMemoriesWithEmbeddings(personaId: string): Promise<MemoryEmbedding[]>;
+  loadConfirmedConversationKnowledge(personaId: string): Promise<ConfirmedConversationKnowledge>;
+  storeConfirmedConversationEmbeddings(
+    personaId: string,
+    updates: ConversationEmbeddingUpdate[],
+  ): Promise<void>;
+  startConversationTurn(input: {
+    turnId: string;
+    personaId: string;
+    userMessageId: string;
+    content: string;
+  }): Promise<ConversationTurn>;
+  bindConversationTurnEvidence(input: {
+    turnId: string;
+    personaId: string;
+    evidence: Array<{ kind: GroundingEvidenceKind; itemId: string }>;
+  }): Promise<ConversationTurnEvidence[]>;
+  completeConversationTurn(input: {
+    turnId: string;
+    personaId: string;
+    assistantMessageId: string;
+    content: string;
+    mode: ConversationMode;
+    boundaryKind: ConversationBoundaryKind | null;
+    degradationReason: ConversationDegradationReason | null;
+    retrievalMs: number;
+    firstSentenceMs: number | null;
+    totalMs: number;
+  }): Promise<ConversationTurn>;
+  failConversationTurn(input: {
+    turnId: string;
+    personaId: string;
+    status: Extract<
+      ConversationTurnStatus,
+      "generation_failed" | "assistant_persistence_failed"
+    >;
+    degradationReason: Extract<
+      ConversationDegradationReason,
+      "model_failed" | "assistant_persistence_failed"
+    >;
+    totalMs: number;
+  }): Promise<boolean>;
+  listMessageEvidence(
+    assistantMessageId: string,
+    personaId: string,
+  ): Promise<MessageEvidence[]>;
   listMessages(personaId: string, limit?: number): Promise<Message[]>;
   insertMessage(input: InsertMessageInput): Promise<Message>;
 }

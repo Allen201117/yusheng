@@ -1,10 +1,13 @@
 import {
+  bindConversationTurnEvidence,
+  completeConversationTurn,
   countPersonasUsingVoice,
   createPersonaKnowledgeCandidates,
   createPersona,
   createUserByEmail,
   createVerificationCode,
   deleteMemory,
+  failConversationTurn,
   getDb,
   getMemoryById,
   getPersonaForUser,
@@ -14,10 +17,12 @@ import {
   insertMemories,
   insertMessage,
   listMemories,
+  listMessageEvidence,
   listMessages,
   listPersonas,
   listPersonaKnowledge,
   loadMemoriesWithEmbeddings,
+  loadConfirmedConversationKnowledge,
   findConfirmedFacts,
   getCurrentVoiceAuthorization,
   replaceVoiceAuthorization,
@@ -26,6 +31,8 @@ import {
   revokePersonaSource,
   setPersonaKnowledgeStatuses,
   setUserPassword,
+  startConversationTurn,
+  storeConfirmedConversationEmbeddings,
   verifyCode,
   updatePersonaKnowledgeCandidate,
 } from "../db";
@@ -142,6 +149,21 @@ export function createLocalRepository(): AppRepository {
     async deleteMemory(id) { return deleteMemory(id); },
     async loadMemoriesWithEmbeddings(personaId) {
       return loadMemoriesWithEmbeddings(personaId);
+    },
+    async loadConfirmedConversationKnowledge(personaId) {
+      return loadConfirmedConversationKnowledge(personaId);
+    },
+    async storeConfirmedConversationEmbeddings(personaId, updates) {
+      storeConfirmedConversationEmbeddings(personaId, updates);
+    },
+    async startConversationTurn(input) { return startConversationTurn(input); },
+    async bindConversationTurnEvidence(input) {
+      return bindConversationTurnEvidence(input);
+    },
+    async completeConversationTurn(input) { return completeConversationTurn(input); },
+    async failConversationTurn(input) { return failConversationTurn(input); },
+    async listMessageEvidence(assistantMessageId, personaId) {
+      return listMessageEvidence(assistantMessageId, personaId);
     },
     async listMessages(personaId, limit) { return listMessages(personaId, limit); },
     async insertMessage(input) { return insertMessage(input); },
