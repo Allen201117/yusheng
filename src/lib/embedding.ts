@@ -31,12 +31,48 @@ export async function embed(texts: string[]): Promise<Float32Array[]> {
     const err = await resp.text();
     throw new Error(`Embedding 调用失败 ${resp.status}: ${err}`);
   }
-  const json = (await resp.json()) as {
-    data: { embedding: number[]; index: number }[];
-  };
-  // 按 index 排序，确保和 input 顺序一致
-  const sorted = [...json.data].sort((a, b) => a.index - b.index);
-  return sorted.map((d) => Float32Array.from(d.embedding));
+  const json = (await resp.json()) as { data?: unknown };
+  if (!Array.isArray(json.data) || json.data.length !== texts.length) {
+    throw new Error("embedding_response_invalid:count");
+  }
+
+  const result: Array<Float32Array | undefined> = Array.from(
+    { length: texts.length },
+    () => undefined,
+  );
+  for (const item of json.data) {
+    if (typeof item !== "object" || item === null) {
+      throw new Error("embedding_response_invalid:structure");
+    }
+
+    const { embedding, index } = item as {
+      embedding?: unknown;
+      index?: unknown;
+    };
+    if (
+      !Number.isInteger(index) ||
+      (index as number) < 0 ||
+      (index as number) >= texts.length ||
+      result[index as number] !== undefined
+    ) {
+      throw new Error("embedding_response_invalid:index");
+    }
+    if (!Array.isArray(embedding)) {
+      throw new Error("embedding_response_invalid:structure");
+    }
+    if (embedding.length !== EMBEDDING_DIM) {
+      throw new Error(
+        `embedding_dimension_mismatch:${embedding.length}:${EMBEDDING_DIM}`,
+      );
+    }
+
+    result[index as number] = Float32Array.from(embedding);
+  }
+
+  if (result.some((embedding) => embedding === undefined)) {
+    throw new Error("embedding_response_invalid:incomplete");
+  }
+  return result as Float32Array[];
 }
 
 export async function embedOne(text: string): Promise<Float32Array> {
@@ -46,8 +82,11 @@ export async function embedOne(text: string): Promise<Float32Array> {
 
 /** 余弦相似度。两边都假设是 L2 归一化的（bge-m3 默认输出归一化，无需手动） */
 export function cosineSim(a: Float32Array, b: Float32Array): number {
-  const n = Math.min(a.length, b.length);
+  if (a.length === 0 || b.length === 0 || a.length !== b.length) {
+    throw new Error(`embedding_dimension_mismatch:${a.length}:${b.length}`);
+  }
+
   let dot = 0;
-  for (let i = 0; i < n; i++) dot += a[i] * b[i];
+  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
   return dot;
 }
