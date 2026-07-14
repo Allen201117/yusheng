@@ -386,6 +386,115 @@ export type CreateVoiceAuthorizationInput = Omit<
   "reviewedAt" | "revokedAt" | "createdAt"
 >;
 
+export type RestorationCohort = "living" | "deceased";
+
+export type ConversationSessionStatus = "active" | "rated" | "expired";
+
+export type TtsAttemptStatus = "started" | "completed" | "failed";
+
+export type PlaybackEventType =
+  | "audio_ready"
+  | "play_started"
+  | "play_completed"
+  | "play_failed";
+
+export type EvaluatorRelation = "self" | "family" | "friend" | "other";
+
+export type RestorationScores = {
+  voiceSimilarity: number;
+  expressionSimilarity: number;
+  emotionFit: number;
+  factTrust: number;
+  discomfort: number;
+  majorFabrication: boolean;
+  identityImpersonation: boolean;
+  authorizationViolation: boolean;
+};
+
+export type RestorationMetricRow = RestorationScores & {
+  sessionId: string;
+  evaluatorUserId: string;
+  cohort: RestorationCohort;
+};
+
+export type ConversationSession = {
+  id: string;
+  personaId: string;
+  evaluatorUserId: string;
+  voiceId: string;
+  voiceAuthorizationId: string;
+  cohort: RestorationCohort;
+  status: ConversationSessionStatus;
+  startedAt: string;
+  lastActivityAt: string;
+  ratedAt: string | null;
+};
+
+export type ConversationSentence = {
+  id: string;
+  sessionId: string;
+  turnId: string;
+  personaId: string;
+  sentenceIndex: number;
+  text: string;
+  emotion: string;
+  intensity: number;
+  speed: number;
+  pauseAfterMs: number;
+  plannerVersion: string;
+  createdAt: string;
+};
+
+export type TtsAttempt = {
+  id: string;
+  sentenceId: string;
+  sessionId: string;
+  turnId: string;
+  personaId: string;
+  voiceId: string;
+  attemptNo: number;
+  status: TtsAttemptStatus;
+  voiceSource: string | null;
+  providerVoiceId: string | null;
+  ttsModel: string;
+  ttsConfigVersion: string;
+  fellBack: boolean;
+  storageMs: number | null;
+  providerMs: number | null;
+  totalMs: number | null;
+  stableErrorCode: string | null;
+  createdAt: string;
+  completedAt: string | null;
+};
+
+export type PlaybackEvent = {
+  eventId: string;
+  ttsAttemptId: string;
+  eventType: PlaybackEventType;
+  clientElapsedMs: number;
+  receivedAt: string;
+};
+
+export type ConversationFeedback = RestorationScores & {
+  id: string;
+  sessionId: string;
+  personaId: string;
+  evaluatorUserId: string;
+  evaluatorRelation: EvaluatorRelation;
+  knowsVoiceOwner: true;
+  heardAllRounds: true;
+  comment: string | null;
+  createdAt: string;
+};
+
+export type FeedbackEligibility = {
+  completedAudibleTurnCount: number;
+  requiredAudibleTurnCount: 3;
+  eligible: boolean;
+  sessionStatus: ConversationSessionStatus;
+  alreadySubmitted: boolean;
+};
+
 export interface AppRepository {
   getUserByEmail(email: string): Promise<User | null>;
   createUserByEmail(email: string, passwordHash?: string): Promise<User>;
