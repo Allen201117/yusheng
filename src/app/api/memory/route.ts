@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { embed } from "@/lib/embedding";
 import { requireAuth } from "@/lib/guard";
 import { getRepository } from "@/lib/storage/repository";
+import { sha256Hex } from "@/lib/storage/checksum";
 
 export const runtime = "nodejs";
 
@@ -58,7 +59,17 @@ export async function POST(req: NextRequest) {
     const inserted: { id: string; content: string }[] = [];
     for (let i = 0; i < contents.length; i++) {
       const id = randomUUID();
-      await repository.insertMemory({ id, personaId, content: contents[i], embedding: vectors[i] });
+      const sourceId = randomUUID();
+      await repository.insertMemory({
+        id,
+        personaId,
+        content: contents[i],
+        embedding: vectors[i],
+        createdBy: auth.userId,
+        sourceId,
+        checksumAlgorithm: "sha256",
+        checksum: sha256Hex(Buffer.from(contents[i], "utf8")),
+      });
       inserted.push({ id, content: contents[i] });
     }
     return NextResponse.json({ ok: true, inserted });

@@ -36,6 +36,10 @@ export type InsertMemoryInput = {
   personaId: string;
   content: string;
   embedding: Float32Array;
+  createdBy: string;
+  sourceId: string;
+  checksumAlgorithm: "sha256";
+  checksum: string;
 };
 
 export type PersonaKnowledgeStatus =

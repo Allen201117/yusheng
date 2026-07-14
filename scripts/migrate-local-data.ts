@@ -344,8 +344,9 @@ async function insertReturningId(
 
 type ExistingUser = { id: string; email: string | null; phone: string | null };
 type ExistingVoice = { id: string; user_id: string; checksum_sha256: string };
+type ExistingPersona = { id: string; user_id: string; created_at: Date | string };
 
-async function migrateInventory(
+export async function migrateInventory(
   dataDir: string,
   inventory: LocalInventory,
   userMap: Record<string, string>,
@@ -466,7 +467,10 @@ async function migrateInventory(
     }
   }
 
-  const existingPersonas = new Set((await sql.query<{ id: string }>("SELECT id FROM personas")).map((row) => row.id));
+  const existingPersonaRows = await sql.query<ExistingPersona>(
+    "SELECT id, user_id, created_at FROM personas",
+  );
+  const existingPersonas = new Map(existingPersonaRows.map((persona) => [persona.id, persona]));
   for (const persona of inventory.personas) {
     const ownerId = resolvedUsers.get(persona.userId);
     const voiceId = resolvedVoices.get(persona.voiceId);
@@ -482,7 +486,13 @@ async function migrateInventory(
          ON CONFLICT (id) DO NOTHING RETURNING id`,
         [persona.id, ownerId, persona.name, persona.relation, voiceId, persona.personaDesc, persona.createdAt],
       );
-      existingPersonas.add(persona.id);
+      if (inserted) {
+        existingPersonas.set(persona.id, {
+          id: persona.id,
+          user_id: ownerId,
+          created_at: persona.createdAt,
+        });
+      }
       items.push({ entity: "persona", id: persona.id, status: inserted ? "imported" : "skipped", reason: inserted ? "inserted" : "id_exists" });
     } catch (error) {
       items.push({ entity: "persona", id: persona.id, status: "failed", reason: error instanceof Error ? error.message : String(error) });
@@ -490,19 +500,41 @@ async function migrateInventory(
   }
 
   for (const memory of inventory.memories) {
-    if (!existingPersonas.has(memory.personaId)) {
+    const persona = existingPersonas.get(memory.personaId);
+    if (!persona) {
       items.push({ entity: "memory", id: memory.id, status: "failed", reason: "missing_persona_dependency" });
       continue;
     }
     try {
       const vector = serializeEmbedding(memory.embedding);
-      const inserted = await insertReturningId(
-        sql,
-        `INSERT INTO memories (id, persona_id, content, embedding, created_at)
-         VALUES ($1, $2, $3, $4::vector, $5)
-         ON CONFLICT (id) DO NOTHING RETURNING id`,
-        [memory.id, memory.personaId, memory.content, vector, memory.createdAt],
-      );
+      const inserted = await sql.transaction(async (transaction) => {
+        const sourceId = `legacy-memory-source:${memory.personaId}`;
+        await transaction.query(
+          `INSERT INTO persona_sources
+             (id, persona_id, source_type, checksum_algorithm, checksum, status,
+              created_by, created_at)
+           VALUES ($1, $2, 'legacy_import', 'legacy_id', $1, 'ready', $3, $4)
+           ON CONFLICT (id) DO NOTHING`,
+          [sourceId, memory.personaId, persona.user_id, persona.created_at],
+        );
+        const memoryInserted = await insertReturningId(
+          transaction,
+          `INSERT INTO relationship_memories
+             (id, persona_id, content, participants, embedding, status,
+              confirmed_at, created_at, updated_at)
+           VALUES ($1, $2, $3, '[]'::jsonb, $4::vector, 'confirmed', $5, $5, $5)
+           ON CONFLICT (id) DO NOTHING RETURNING id`,
+          [memory.id, memory.personaId, memory.content, vector, memory.createdAt],
+        );
+        await transaction.query(
+          `INSERT INTO persona_item_sources
+             (item_kind, item_id, source_id, source_excerpt, created_at)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (item_kind, item_id, source_id) DO NOTHING`,
+          ["relationship_memory", memory.id, sourceId, memory.content, memory.createdAt],
+        );
+        return memoryInserted;
+      });
       items.push({ entity: "memory", id: memory.id, status: inserted ? "imported" : "skipped", reason: inserted ? "inserted" : "id_exists" });
     } catch (error) {
       items.push({ entity: "memory", id: memory.id, status: "failed", reason: error instanceof Error ? error.message : String(error) });

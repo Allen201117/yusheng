@@ -94,6 +94,100 @@ it("copies each legacy memory into confirmed persona knowledge only once", () =>
   });
 });
 
+it("uses confirmed relationship memories as the local runtime source of truth", () => {
+  const oldMemoryCount = (database.prepare("SELECT COUNT(*) AS count FROM memories").get() as { count: number }).count;
+  dbModule.insertMemory({
+    id: "manual-memory",
+    personaId: "persona-1",
+    content: "妈妈手写的菜谱",
+    embedding: Float32Array.from([0.75, 0.5]),
+    createdBy: "user-1",
+    sourceId: "manual-source",
+    checksumAlgorithm: "sha256",
+    checksum: "manual-checksum",
+  });
+
+  assert.equal(
+    (database.prepare("SELECT COUNT(*) AS count FROM memories").get() as { count: number }).count,
+    oldMemoryCount,
+  );
+  assert.equal(dbModule.listMemories("persona-1").some((memory) => memory.id === "manual-memory"), true);
+  assert.deepEqual(dbModule.getMemoryById("manual-memory"), {
+    id: "manual-memory",
+    personaId: "persona-1",
+    content: "妈妈手写的菜谱",
+  });
+  assert.deepEqual(
+    dbModule.loadMemoriesWithEmbeddings("persona-1")
+      .find((memory) => memory.id === "manual-memory")?.embedding,
+    Float32Array.from([0.75, 0.5]),
+  );
+
+  const source = database.prepare(
+    "SELECT persona_id, source_type, checksum_algorithm, checksum, status, created_by FROM persona_sources WHERE id = ?",
+  ).get("manual-source") as Record<string, unknown>;
+  assert.deepEqual(source, {
+    persona_id: "persona-1",
+    source_type: "manual_text",
+    checksum_algorithm: "sha256",
+    checksum: "manual-checksum",
+    status: "ready",
+    created_by: "user-1",
+  });
+  assert.equal(
+    (database.prepare(
+      "SELECT COUNT(*) AS count FROM persona_item_sources WHERE item_kind = 'relationship_memory' AND item_id = ? AND source_id = ?",
+    ).get("manual-memory", "manual-source") as { count: number }).count,
+    1,
+  );
+
+  dbModule.deleteMemory("manual-memory");
+  dbModule.deleteMemory("manual-memory");
+  assert.equal(dbModule.listMemories("persona-1").some((memory) => memory.id === "manual-memory"), false);
+  assert.equal(dbModule.loadMemoriesWithEmbeddings("persona-1").some((memory) => memory.id === "manual-memory"), false);
+  assert.equal(dbModule.getMemoryById("manual-memory"), null);
+  const revoked = database.prepare(
+    "SELECT status, confirmed_by, confirmed_at, revoked_at FROM relationship_memories WHERE id = ?",
+  ).get("manual-memory") as Record<string, unknown>;
+  assert.equal(revoked.status, "revoked");
+  assert.equal(revoked.confirmed_by, null);
+  assert.equal(revoked.confirmed_at, null);
+  assert.ok(revoked.revoked_at);
+});
+
+it("rolls back the source and memory when a runtime source link fails", () => {
+  database.exec(
+    `CREATE TEMP TRIGGER fail_manual_memory_link
+     BEFORE INSERT ON persona_item_sources
+     WHEN NEW.source_id = 'rollback-source'
+     BEGIN
+       SELECT RAISE(ABORT, 'forced link failure');
+     END`,
+  );
+
+  assert.throws(
+    () => dbModule.insertMemory({
+      id: "rollback-memory",
+      personaId: "persona-1",
+      content: "不应留下的记忆",
+      embedding: Float32Array.from([0.1, 0.2]),
+      createdBy: "user-1",
+      sourceId: "rollback-source",
+      checksumAlgorithm: "sha256",
+      checksum: "rollback-checksum",
+    }),
+    /forced link failure/,
+  );
+  assert.equal(
+    (database.prepare("SELECT COUNT(*) AS count FROM persona_sources WHERE id = ?").get("rollback-source") as { count: number }).count,
+    0,
+  );
+  assert.equal(
+    (database.prepare("SELECT COUNT(*) AS count FROM relationship_memories WHERE id = ?").get("rollback-memory") as { count: number }).count,
+    0,
+  );
+});
+
 it("persists persona knowledge atomically with scoped edits, status changes, and source revocation", () => {
   database.prepare(
     `INSERT INTO personas

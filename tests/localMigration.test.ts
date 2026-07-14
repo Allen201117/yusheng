@@ -8,9 +8,12 @@ import {
   classifyLocalVoice,
   createDryRunReport,
   inventoryLocalData,
+  migrateInventory,
   planVoiceMigration,
   resolveLocalVoiceOwner,
 } from "../scripts/migrate-local-data";
+import type { SqlExecutor } from "../src/lib/storage/postgres";
+import type { VoiceObjectStore } from "../src/lib/storage/voiceObjectStore";
 
 it("does not upload an object whose checksum already exists", () => {
   const plan = planVoiceMigration(
@@ -120,4 +123,106 @@ it("keeps a broken voice in the inventory as missing", async () => {
     createDryRunReport(dataDir, inventory).items.find((item) => item.entity === "database"),
     { entity: "database", id: path.join(dataDir, "yusheng.sqlite"), status: "missing", reason: "missing_sqlite" },
   );
+});
+
+it("migrates each legacy memory into a source, confirmed memory, and link transactionally", async () => {
+  const calls: Array<{ text: string; params: unknown[] }> = [];
+  const sources = new Set<string>();
+  const memories = new Set<string>();
+  const links = new Set<string>();
+  let transactions = 0;
+  const sql: SqlExecutor = {
+    async query<T extends Record<string, unknown>>(text: string, params: unknown[] = []) {
+      calls.push({ text, params });
+      if (text.includes("SELECT id, email, phone FROM users")) {
+        return [{ id: "mapped-owner", email: null, phone: null }] as unknown as T[];
+      }
+      if (text.includes("SELECT id, user_id, checksum_sha256 FROM voice_profiles")) {
+        return [{ id: "v1", user_id: "mapped-owner", checksum_sha256: "voice-checksum" }] as unknown as T[];
+      }
+      if (text.includes("SELECT id") && text.includes("FROM personas")) {
+        return [{ id: "p1", user_id: "owner-1", created_at: "2026-07-13T00:01:00.000Z" }] as unknown as T[];
+      }
+      if (text.includes("INSERT INTO persona_sources")) {
+        sources.add(String(params[0]));
+        return [] as T[];
+      }
+      if (text.includes("INSERT INTO relationship_memories")) {
+        const id = String(params[0]);
+        if (memories.has(id)) return [] as T[];
+        memories.add(id);
+        return [{ id }] as unknown as T[];
+      }
+      if (text.includes("INSERT INTO persona_item_sources")) {
+        links.add(`${params[0]}:${params[1]}:${params[2]}`);
+        return [] as T[];
+      }
+      return [] as T[];
+    },
+    async transaction<T>(work: (transaction: SqlExecutor) => Promise<T>) {
+      transactions += 1;
+      return work(sql);
+    },
+  };
+  const voiceStore = {} as VoiceObjectStore;
+  const inventory = {
+    databaseFound: true,
+    users: [],
+    personas: [{
+      id: "p1",
+      userId: "local-owner",
+      name: "妈妈",
+      relation: "母亲",
+      voiceId: "v1",
+      personaDesc: "温和",
+      createdAt: "2000-01-01T00:00:00.000Z",
+    }],
+    voices: [],
+    messages: [],
+    memories: [
+      {
+        id: "r1",
+        personaId: "p1",
+        content: "一起去海边",
+        embedding: Buffer.alloc(1024 * 4),
+        createdAt: "2026-07-13T00:02:00.000Z",
+      },
+      {
+        id: "missing-persona-memory",
+        personaId: "missing-persona",
+        content: "无归属",
+        embedding: null,
+        createdAt: "2026-07-13T00:03:00.000Z",
+      },
+    ],
+  };
+
+  const userMap = { "local-owner": "mapped-owner" };
+  const first = await migrateInventory("/tmp/yusheng", inventory, userMap, sql, voiceStore);
+  const second = await migrateInventory("/tmp/yusheng", inventory, userMap, sql, voiceStore);
+
+  assert.deepEqual(
+    first.items.find((item) => item.id === "r1"),
+    { entity: "memory", id: "r1", status: "imported", reason: "inserted" },
+  );
+  assert.deepEqual(
+    second.items.find((item) => item.id === "r1"),
+    { entity: "memory", id: "r1", status: "skipped", reason: "id_exists" },
+  );
+  assert.equal(first.items.find((item) => item.id === "missing-persona-memory")?.status, "failed");
+  assert.equal(transactions, 2);
+  assert.deepEqual([...sources], ["legacy-memory-source:p1"]);
+  assert.deepEqual([...memories], ["r1"]);
+  assert.deepEqual([...links], ["relationship_memory:r1:legacy-memory-source:p1"]);
+  const sourceCall = calls.find((call) => call.text.includes("INSERT INTO persona_sources"));
+  assert.deepEqual(sourceCall?.params, [
+    "legacy-memory-source:p1",
+    "p1",
+    "owner-1",
+    "2026-07-13T00:01:00.000Z",
+  ]);
+  assert.match(sourceCall?.text || "", /'legacy_import'[\s\S]*'legacy_id'[\s\S]*'ready'/);
+  const memoryCall = calls.find((call) => call.text.includes("INSERT INTO relationship_memories"));
+  assert.match(memoryCall?.text || "", /'confirmed'/);
+  assert.equal(calls.some((call) => call.text.includes("INSERT INTO memories")), false);
 });

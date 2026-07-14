@@ -260,18 +260,41 @@ it("deletes a persona for its owner in one transaction", async () => {
   assert.deepEqual(fake.calls.find((call) => call.text.includes("DELETE FROM personas"))?.params, ["persona-1", "user-1"]);
 });
 
-it("serializes memory vectors and restores them as Float32Array", async () => {
-  const fake = createFakeSql((text, params) => {
-    if (text.includes("INSERT INTO memories")) return [];
-    return [{ id: "memory-1", content: "一起去海边", embedding: "[0.25,0.5]" }];
+it("stores a confirmed memory, its source, and its link in one transaction", async () => {
+  const fake = createFakeSql((text) => {
+    if (text.includes("INSERT INTO persona_sources")) return [{ id: "source-1" }];
+    if (text.includes("INSERT INTO relationship_memories")) return [{ id: "memory-1" }];
+    if (text.includes("INSERT INTO persona_item_sources")) return [{ item_id: "memory-1" }];
+    if (text.includes("embedding::text")) {
+      return [{ id: "memory-1", content: "一起去海边", embedding: "[0.25,0.5]" }];
+    }
+    return [];
   });
   const repo = createPostgresRepository(fake.executor);
 
   await repo.insertMemory({
     id: "memory-1", personaId: "persona-1", content: "一起去海边",
     embedding: Float32Array.from([0.25, 0.5]),
+    createdBy: "user-1",
+    sourceId: "source-1",
+    checksumAlgorithm: "sha256",
+    checksum: "checksum-1",
   });
-  assert.equal(fake.calls[0].params[3], "[0.25,0.5]");
+  assert.equal(fake.transactions, 1);
+  const sourceInsert = fake.calls.find((call) => call.text.includes("INSERT INTO persona_sources"));
+  const memoryInsert = fake.calls.find((call) => call.text.includes("INSERT INTO relationship_memories"));
+  const linkInsert = fake.calls.find((call) => call.text.includes("INSERT INTO persona_item_sources"));
+  assert.ok(sourceInsert);
+  assert.deepEqual(sourceInsert.params, [
+    "source-1", "persona-1", "一起去海边", "sha256", "checksum-1", "user-1",
+  ]);
+  assert.ok(memoryInsert);
+  assert.match(memoryInsert.text, /'confirmed'/);
+  assert.ok(memoryInsert.params.includes("[0.25,0.5]"));
+  assert.ok(linkInsert);
+  assert.match(linkInsert.text, /'relationship_memory'/);
+  assert.equal(fake.calls.some((call) => call.text.includes("INSERT INTO memories")), false);
+
   const memories = await repo.loadMemoriesWithEmbeddings("persona-1");
   assert.deepEqual(Array.from(memories[0].embedding), [0.25, 0.5]);
 });
@@ -384,7 +407,7 @@ it("counts only the owner's personas using a voice", async () => {
   assert.deepEqual(fake.calls[0].params, ["voice-1", "user-1"]);
 });
 
-it("lists, gets and deletes memory records", async () => {
+it("lists and loads only confirmed relationship memories and soft-revokes them", async () => {
   const fake = createFakeSql((text) => {
     if (text.includes("SELECT id, persona_id, content, created_at")) {
       return [{ id: "memory-1", persona_id: "persona-1", content: "记忆", created_at: "2026-07-13T05:00:00.000Z" }];
@@ -398,7 +421,14 @@ it("lists, gets and deletes memory records", async () => {
   assert.equal((await repo.listMemories("persona-1"))[0].createdAt, "2026-07-13T05:00:00.000Z");
   assert.equal((await repo.getMemoryById("memory-1"))?.personaId, "persona-1");
   await repo.deleteMemory("memory-1");
-  assert.ok(fake.calls.some((call) => call.text.includes("DELETE FROM memories")));
+  const listCall = fake.calls.find((call) => call.text.includes("created_at"));
+  const getCall = fake.calls.find((call) => call.text.includes("SELECT id, persona_id, content") && !call.text.includes("created_at"));
+  const deleteCall = fake.calls.find((call) => call.text.includes("UPDATE relationship_memories"));
+  assert.match(listCall?.text || "", /FROM relationship_memories[\s\S]*status = 'confirmed'/);
+  assert.match(getCall?.text || "", /FROM relationship_memories[\s\S]*status <> 'revoked'/);
+  assert.match(deleteCall?.text || "", /status = 'revoked'/);
+  assert.match(deleteCall?.text || "", /status IN \('pending', 'confirmed', 'conflicted'\)/);
+  assert.equal(fake.calls.some((call) => /DELETE FROM (?:relationship_)?memories/.test(call.text)), false);
 });
 
 it("inserts a message with a generated timestamp", async () => {

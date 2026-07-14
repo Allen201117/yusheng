@@ -61,6 +61,18 @@ it("voice routes use the object store and data routes use the repository", async
   assert.doesNotMatch(personaKnowledgeImplementation, /\bgetDb\s*\(/);
 });
 
+it("manual memory ingestion creates server-owned confirmation audit fields", async () => {
+  const source = await readFile(
+    new URL("../src/app/api/memory/route.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /sourceId\s*=\s*randomUUID\(\)/);
+  assert.match(source, /createdBy:\s*auth\.userId/);
+  assert.match(source, /checksumAlgorithm:\s*["']sha256["']/);
+  assert.match(source, /sha256Hex\(Buffer\.from\(contents\[i\],\s*["']utf8["']\)\)/);
+  assert.doesNotMatch(source, /body\.(?:status|confirmedBy|sourceId|checksum)/);
+});
+
 it("routes use the provider preset fast path and provider-aware deletion lifecycle", async () => {
   const tts = await readFile(
     new URL("../src/app/api/tts/route.ts", import.meta.url),
