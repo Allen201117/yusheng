@@ -38,11 +38,27 @@ it("voice routes use the object store and data routes use the repository", async
     assert.match(source, /getVoiceObjectStore/, route);
   }
 
-  const repositoryRoutes = durableRoutes.filter((route) => route !== "voice/upload/route.ts");
+  const repositoryRoutes = durableRoutes.filter(
+    (route) => route !== "voice/upload/route.ts" && route !== "persona-knowledge/route.ts",
+  );
   for (const route of repositoryRoutes) {
     const source = await readFile(new URL(`../src/app/api/${route}`, import.meta.url), "utf8");
     assert.match(source, /getRepository/, route);
   }
+
+  const personaKnowledgeRoute = await readFile(
+    new URL("../src/app/api/persona-knowledge/route.ts", import.meta.url),
+    "utf8",
+  );
+  const personaKnowledgeImplementation = await readFile(
+    new URL("../src/lib/personaKnowledgeRoute.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(personaKnowledgeRoute, /createPersonaKnowledgeHandlers/);
+  assert.doesNotMatch(personaKnowledgeRoute, /@\/lib\/(db|voiceStore)/);
+  assert.match(personaKnowledgeImplementation, /getRepository/);
+  assert.doesNotMatch(personaKnowledgeImplementation, /@\/lib\/(db|voiceStore)/);
+  assert.doesNotMatch(personaKnowledgeImplementation, /\bgetDb\s*\(/);
 });
 
 it("routes use the provider preset fast path and provider-aware deletion lifecycle", async () => {

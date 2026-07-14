@@ -7,7 +7,7 @@ import {
   parseCreateKnowledgeBody,
   parseRevokeSourceBody,
   parseReviewKnowledgeBody,
-} from "../src/app/api/persona-knowledge/route";
+} from "../src/lib/personaKnowledgeRoute";
 import { sha256Hex } from "../src/lib/storage/checksum";
 import type { AppRepository, PersonaKnowledgeBundle } from "../src/lib/storage/types";
 
@@ -35,20 +35,33 @@ function expectBad(fn: () => unknown, pattern?: RegExp) {
 }
 
 it("declares all handlers and uses only the authenticated repository boundary", async () => {
-  const source = await readFile(
+  const routeSource = await readFile(
     new URL("../src/app/api/persona-knowledge/route.ts", import.meta.url),
     "utf8",
   );
+  const implementationSource = await readFile(
+    new URL("../src/lib/personaKnowledgeRoute.ts", import.meta.url),
+    "utf8",
+  );
   for (const handler of ["GET", "POST", "PATCH", "DELETE"]) {
-    assert.match(source, new RegExp(`export async function ${handler}\\b`));
+    assert.match(routeSource, new RegExp(`export async function ${handler}\\b`));
   }
-  assert.match(source, /requireAuth/);
-  assert.match(source, /getRepository/);
-  assert.match(source, /getPersonaForUser\(personaId, auth\.userId\)/);
-  assert.match(source, /createPersonaKnowledgeCandidates/);
-  assert.match(source, /reviewPersonaKnowledge/);
-  assert.doesNotMatch(source, /@\/lib\/(db|voiceStore)/);
-  assert.doesNotMatch(source, /\bgetDb\s*\(/);
+  const routeExports = [...routeSource.matchAll(
+    /export\s+(?:const|async\s+function|function|type|interface|class)\s+(\w+)/g,
+  )].map((match) => match[1]).sort();
+  assert.deepEqual(routeExports, ["DELETE", "GET", "PATCH", "POST", "runtime"].sort());
+  assert.match(routeSource, /createPersonaKnowledgeHandlers/);
+  assert.doesNotMatch(routeSource, /@\/lib\/(db|voiceStore)/);
+  assert.doesNotMatch(routeSource, /\bgetDb\s*\(/);
+
+  assert.match(implementationSource, /requireAuth/);
+  assert.match(implementationSource, /getRepository/);
+  assert.match(implementationSource, /getPersonaForUser\(personaId, auth\.userId\)/);
+  assert.match(implementationSource, /createPersonaKnowledgeCandidates/);
+  assert.match(implementationSource, /reviewPersonaKnowledge/);
+  assert.doesNotMatch(implementationSource, /@\/lib\/(db|voiceStore)/);
+  assert.doesNotMatch(implementationSource, /\bgetDb\s*\(/);
+  assert.doesNotMatch(implementationSource, /export async function (?:GET|POST|PATCH|DELETE)\b/);
 });
 
 it("parses all three candidate kinds and supplies safe client defaults", () => {
@@ -285,7 +298,7 @@ it("rejects invalid review identity, enum, transition shape, and server fields",
 
 it("route source shows server-generated ownership and audit fields", async () => {
   const source = await readFile(
-    new URL("../src/app/api/persona-knowledge/route.ts", import.meta.url),
+    new URL("../src/lib/personaKnowledgeRoute.ts", import.meta.url),
     "utf8",
   );
   assert.match(source, /randomUUID\(\)/);
