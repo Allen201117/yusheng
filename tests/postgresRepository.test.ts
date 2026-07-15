@@ -96,6 +96,19 @@ it("adds owner-scoped auditable voice authorization records", async () => {
   assert.match(sql, /WHERE status IN \('pending_review', 'approved'\)/);
 });
 
+it("adds reviewer audit fields and a pending-review operator index", async () => {
+  const sql = await readFile(
+    new URL("../migrations/008_voice_authorization_review.sql", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS reviewed_by text/);
+  assert.match(sql, /reviewed_at IS NOT NULL/);
+  assert.match(sql, /reviewed_by IS NOT NULL/);
+  assert.match(sql, /policy:self/);
+  assert.match(sql, /WHERE status = 'pending_review'/);
+});
+
 it("adds persona knowledge tables and idempotently copies legacy memories", async () => {
   const sql = await readFile(
     new URL("../migrations/004_persona_knowledge.sql", import.meta.url),
@@ -679,10 +692,13 @@ it("replaces, reads and revokes owner-scoped voice authorization atomically", as
     notice_version: "voice-authorization-2026-07-13",
     separate_consent_confirmed: true, third_party_processing_confirmed: true,
     synthetic_disclosure_confirmed: true,
-    attested_at: "2026-07-13T09:00:00.000Z", reviewed_at: null,
+    attested_at: "2026-07-13T09:00:00.000Z", reviewed_at: "2026-07-13T09:00:00.000Z",
+    reviewed_by: "policy:self",
     revoked_at: null, created_at: "2026-07-13T09:00:00.000Z",
   };
   const fake = createFakeSql((text) => {
+    if (text.includes("FROM voice_profiles") && text.includes("FOR UPDATE")) return [{ id: "voice-1" }];
+    if (text.trimStart().startsWith("SELECT") && text.includes("FROM voice_authorizations") && text.includes("FOR UPDATE")) return [];
     if (text.includes("INSERT INTO voice_authorizations")) return [row];
     if (text.includes("UPDATE voice_authorizations") && text.includes("RETURNING")) {
       return [{ ...row, status: "revoked", revoked_at: "2026-07-13T09:01:00.000Z" }];
@@ -697,6 +713,7 @@ it("replaces, reads and revokes owner-scoped voice authorization atomically", as
     noticeVersion: "voice-authorization-2026-07-13",
     separateConsentConfirmed: true, thirdPartyProcessingConfirmed: true,
     syntheticDisclosureConfirmed: true, attestedAt: "2026-07-13T09:00:00.000Z",
+    reviewedAt: "2026-07-13T09:00:00.000Z", reviewedBy: "policy:self",
   };
 
   assert.equal((await repo.replaceVoiceAuthorization(input)).status, "approved");
@@ -706,6 +723,99 @@ it("replaces, reads and revokes owner-scoped voice authorization atomically", as
   assert.ok(fake.calls
     .filter((call) => call.text.includes("voice_authorizations"))
     .every((call) => call.params.includes("user-1")));
+});
+
+it("reviews a pending authorization with voice-owner lock ordering and CAS", async () => {
+  const pending = {
+    id: "auth-review", voice_id: "voice-review", user_id: "user-review",
+    speaker_status: "deceased", basis: "close_relative_request",
+    status: "pending_review", reason_code: "manual_review_required",
+    notice_version: "voice-authorization-2026-07-13",
+    separate_consent_confirmed: true, third_party_processing_confirmed: true,
+    synthetic_disclosure_confirmed: true,
+    attested_at: "2026-07-13T09:00:00.000Z", reviewed_at: null, reviewed_by: null,
+    revoked_at: null, created_at: "2026-07-13T09:00:00.000Z",
+  };
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM voice_authorizations") && !text.includes("FOR UPDATE")) return [pending];
+    if (text.includes("FROM voice_profiles") && text.includes("FOR UPDATE")) return [{ id: "voice-review" }];
+    if (text.includes("FROM voice_authorizations") && text.includes("FOR UPDATE")) return [pending];
+    if (text.includes("UPDATE voice_authorizations") && text.includes("status = 'pending_review'")) {
+      return [{ ...pending, status: "approved", reason_code: "evidence_verified", reviewed_at: "2026-07-15T01:00:00.000Z", reviewed_by: "operator-1" }];
+    }
+    return [];
+  });
+  const repo = createPostgresRepository(fake.executor);
+  const result = await repo.reviewVoiceAuthorization({
+    authorizationId: "auth-review", decision: "approve", reviewerId: "operator-1",
+    reason: "evidence_verified", reviewedAt: "2026-07-15T01:00:00.000Z",
+  });
+
+  assert.equal(result.status, "reviewed");
+  if (result.status === "reviewed") {
+    assert.equal(result.authorization.reviewedBy, "operator-1");
+    assert.equal(result.authorization.voiceId, "voice-review");
+    assert.equal(result.authorization.userId, "user-review");
+  }
+  const voiceLock = fake.calls.findIndex((call) => call.text.includes("FROM voice_profiles") && call.text.includes("FOR UPDATE"));
+  const authorizationLock = fake.calls.findIndex((call) => call.text.includes("FROM voice_authorizations") && call.text.includes("FOR UPDATE"));
+  const cas = fake.calls.findIndex((call) => call.text.includes("UPDATE voice_authorizations") && call.text.includes("status = 'pending_review'"));
+  assert.ok(voiceLock >= 0 && voiceLock < authorizationLock && authorizationLock < cas);
+  assert.deepEqual(fake.calls[voiceLock].params, ["voice-review", "user-review"]);
+  assert.deepEqual(fake.calls[cas].params, [
+    "auth-review", "approved", "evidence_verified", "2026-07-15T01:00:00.000Z", "operator-1",
+  ]);
+});
+
+it("stably rejects operator review of a terminal authorization without mutation", async () => {
+  const terminal = {
+    id: "auth-terminal", voice_id: "voice-1", user_id: "user-1", speaker_status: "living",
+    basis: "self", status: "approved", reason_code: null,
+    notice_version: "voice-authorization-2026-07-13",
+    separate_consent_confirmed: true, third_party_processing_confirmed: true,
+    synthetic_disclosure_confirmed: true,
+    attested_at: "2026-07-13T09:00:00.000Z", reviewed_at: "2026-07-13T09:00:00.000Z",
+    reviewed_by: "policy:self", revoked_at: null, created_at: "2026-07-13T09:00:00.000Z",
+  };
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM voice_authorizations") && !text.includes("FOR UPDATE")) return [terminal];
+    if (text.includes("FROM voice_profiles")) return [{ id: "voice-1" }];
+    if (text.includes("FROM voice_authorizations") && text.includes("FOR UPDATE")) return [terminal];
+    return [];
+  });
+  const result = await createPostgresRepository(fake.executor).reviewVoiceAuthorization({
+    authorizationId: "auth-terminal", decision: "reject", reviewerId: "operator-1",
+    reason: "invalid_evidence", reviewedAt: "2026-07-15T01:00:00.000Z",
+  });
+  assert.deepEqual(result, { status: "not_pending" });
+  assert.equal(fake.calls.some((call) => call.text.includes("UPDATE voice_authorizations")), false);
+});
+
+it("locks and rejects a concurrent authorization relabel before replacing the pending record", async () => {
+  const pending = {
+    id: "auth-pending", voice_id: "voice-1", user_id: "user-1", speaker_status: "deceased",
+    basis: "close_relative_request", status: "pending_review", reason_code: "manual_review_required",
+    notice_version: "voice-authorization-2026-07-13",
+    separate_consent_confirmed: true, third_party_processing_confirmed: true,
+    synthetic_disclosure_confirmed: true, attested_at: "2026-07-15T00:00:00.000Z",
+    reviewed_at: null, reviewed_by: null, revoked_at: null, created_at: "2026-07-15T00:00:00.000Z",
+  };
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM voice_profiles") && text.includes("FOR UPDATE")) return [{ id: "voice-1" }];
+    if (text.includes("FROM voice_authorizations") && text.includes("FOR UPDATE")) return [pending];
+    return [];
+  });
+  const repo = createPostgresRepository(fake.executor);
+  await assert.rejects(repo.replaceVoiceAuthorization({
+    id: "auth-bypass", voiceId: "voice-1", userId: "user-1", speakerStatus: "living",
+    basis: "self", status: "approved", reasonCode: null,
+    noticeVersion: "voice-authorization-2026-07-13", separateConsentConfirmed: true,
+    thirdPartyProcessingConfirmed: true, syntheticDisclosureConfirmed: true,
+    attestedAt: "2026-07-15T00:01:00.000Z", reviewedAt: "2026-07-15T00:01:00.000Z",
+    reviewedBy: "policy:self",
+  }), /authorization_classification_locked/);
+  assert.equal(fake.calls.some((call) => call.text.includes("INSERT INTO voice_authorizations")), false);
+  assert.equal(fake.calls.some((call) => call.text.startsWith("UPDATE voice_authorizations")), false);
 });
 
 it("updates a password by normalized email", async () => {

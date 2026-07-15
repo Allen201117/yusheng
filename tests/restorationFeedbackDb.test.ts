@@ -52,12 +52,12 @@ beforeEach(() => {
     INSERT INTO voice_authorizations
       (id, voice_id, user_id, speaker_status, basis, status, notice_version,
        separate_consent_confirmed, third_party_processing_confirmed,
-       synthetic_disclosure_confirmed, attested_at, created_at)
+       synthetic_disclosure_confirmed, attested_at, created_at, reviewed_at, reviewed_by)
     VALUES
       ('auth-1', 'voice-1', 'user-1', 'living', 'self', 'approved', 'notice-v1',
-       1, 1, 1, '${NOW}', '${NOW}'),
+       1, 1, 1, '${NOW}', '${NOW}', '${NOW}', 'policy:self'),
       ('auth-2', 'voice-2', 'user-2', 'deceased', 'close_relative_request', 'approved', 'notice-v1',
-       1, 1, 1, '${NOW}', '${NOW}');
+       1, 1, 1, '${NOW}', '${NOW}', '${NOW}', 'operator:fixture');
   `);
 });
 
@@ -474,10 +474,10 @@ it("rotates sessions with exact approved authorization snapshots and rejects rev
     `INSERT INTO voice_authorizations
        (id, voice_id, user_id, speaker_status, basis, status, notice_version,
         separate_consent_confirmed, third_party_processing_confirmed,
-        synthetic_disclosure_confirmed, attested_at, created_at)
+        synthetic_disclosure_confirmed, attested_at, created_at, reviewed_at, reviewed_by)
      VALUES ('auth-1b', 'voice-1', 'user-1', 'living', 'self', 'approved', 'notice-v1',
-             1, 1, 1, ?, ?)`,
-  ).run(NOW, NOW);
+             1, 1, 1, ?, ?, ?, 'policy:self')`,
+  ).run(NOW, NOW, NOW);
   const rotated = await repository.getOrStartConversationSession({
     proposedSessionId: "session-auth-1b",
     personaId: "persona-1",
@@ -501,10 +501,10 @@ it("rotates sessions with exact approved authorization snapshots and rejects rev
     `INSERT INTO voice_authorizations
        (id, voice_id, user_id, speaker_status, basis, status, notice_version,
         separate_consent_confirmed, third_party_processing_confirmed,
-        synthetic_disclosure_confirmed, attested_at, created_at)
+        synthetic_disclosure_confirmed, attested_at, created_at, reviewed_at, reviewed_by)
      VALUES ('auth-deceased', 'voice-1', 'user-1', 'deceased', 'close_relative_request',
-             'approved', 'notice-v1', 1, 1, 1, ?, ?)`,
-  ).run(NOW, NOW);
+             'approved', 'notice-v1', 1, 1, 1, ?, ?, ?, 'operator:fixture')`,
+  ).run(NOW, NOW, NOW);
   const cohortRotated = await repository.getOrStartConversationSession({
     proposedSessionId: "session-deceased",
     personaId: "persona-1",

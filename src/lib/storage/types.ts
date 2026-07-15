@@ -381,14 +381,27 @@ export type VoiceAuthorization = VoiceAuthorizationAttestation & {
   noticeVersion: string;
   attestedAt: string;
   reviewedAt: string | null;
+  reviewedBy: string | null;
   revokedAt: string | null;
   createdAt: string;
 };
 
 export type CreateVoiceAuthorizationInput = Omit<
   VoiceAuthorization,
-  "reviewedAt" | "revokedAt" | "createdAt"
+  "revokedAt" | "createdAt"
 >;
+
+export type ReviewVoiceAuthorizationInput = {
+  authorizationId: string;
+  decision: "approve" | "reject";
+  reviewerId: string;
+  reason: string;
+  reviewedAt: string;
+};
+
+export type ReviewVoiceAuthorizationResult =
+  | { status: "reviewed"; authorization: VoiceAuthorization }
+  | { status: "not_found" | "not_pending" };
 
 export type RestorationCohort = "living" | "deceased";
 
@@ -534,6 +547,9 @@ export interface AppRepository {
     voiceId: string,
     userId: string,
   ): Promise<VoiceAuthorization | null>;
+  reviewVoiceAuthorization(
+    input: ReviewVoiceAuthorizationInput,
+  ): Promise<ReviewVoiceAuthorizationResult>;
   createPersonaKnowledgeCandidates(input: {
     source: CreatePersonaSourceInput;
     candidates: CreatePersonaKnowledgeCandidateInput[];

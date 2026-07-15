@@ -44,6 +44,8 @@ import type {
   RelationshipMemory,
   SpeechStyleItem,
   CreateVoiceAuthorizationInput,
+  ReviewVoiceAuthorizationInput,
+  ReviewVoiceAuthorizationResult,
   VoiceAuthorization,
   InsertMemoryInput,
   GroundingEvidenceKind,
@@ -69,6 +71,7 @@ export function getDb(): Database.Database {
   initSchema(_db);
   migrateUserColumn(_db);
   migratePersonaFactEmbedding(_db);
+  migrateVoiceAuthorizationReviewSchema(_db);
   migrateRestorationFeedbackSchema(_db);
   migrateLegacyPersonaKnowledge(_db);
   return _db;
@@ -137,8 +140,13 @@ function initSchema(db: Database.Database) {
       synthetic_disclosure_confirmed      INTEGER NOT NULL,
       attested_at                         TEXT NOT NULL,
       reviewed_at                         TEXT,
+      reviewed_by                         TEXT,
       revoked_at                          TEXT,
-      created_at                          TEXT NOT NULL
+      created_at                          TEXT NOT NULL,
+      CHECK (
+        status NOT IN ('approved','rejected')
+        OR (reviewed_at IS NOT NULL AND reviewed_by IS NOT NULL AND length(trim(reviewed_by)) > 0)
+      )
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_authorizations_one_active
       ON voice_authorizations(voice_id, user_id)
@@ -297,6 +305,47 @@ function migratePersonaFactEmbedding(db: Database.Database) {
   if (!columns.some((column) => column.name === "embedding")) {
     db.exec("ALTER TABLE persona_facts ADD COLUMN embedding BLOB");
   }
+}
+
+/** Add explicit reviewer identity to both fresh and legacy local databases. */
+export function migrateVoiceAuthorizationReviewSchema(db: Database.Database) {
+  const columns = db.pragma("table_info(voice_authorizations)") as { name: string }[];
+  if (!columns.some((column) => column.name === "reviewed_by")) {
+    db.exec("ALTER TABLE voice_authorizations ADD COLUMN reviewed_by TEXT");
+  }
+  db.exec(`
+    UPDATE voice_authorizations
+    SET reviewed_at = COALESCE(reviewed_at, attested_at),
+        reviewed_by = COALESCE(NULLIF(trim(reviewed_by), ''),
+          CASE WHEN status = 'approved' AND speaker_status = 'living' AND basis = 'self'
+            THEN 'policy:self' ELSE 'policy:legacy' END)
+    WHERE (
+        status IN ('approved','rejected')
+        OR (status = 'revoked' AND speaker_status = 'living' AND basis = 'self')
+      )
+      AND (reviewed_at IS NULL OR reviewed_by IS NULL OR trim(reviewed_by) = '');
+
+    CREATE INDEX IF NOT EXISTS idx_voice_authorizations_pending_review
+      ON voice_authorizations(created_at, id) WHERE status = 'pending_review';
+
+    CREATE TRIGGER IF NOT EXISTS trg_voice_authorizations_review_audit_insert
+    BEFORE INSERT ON voice_authorizations
+    FOR EACH ROW
+    WHEN NEW.status IN ('approved','rejected')
+      AND (NEW.reviewed_at IS NULL OR NEW.reviewed_by IS NULL OR length(trim(NEW.reviewed_by)) = 0)
+    BEGIN
+      SELECT RAISE(ABORT, 'voice_authorization_review_audit_required');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_voice_authorizations_review_audit_update
+    BEFORE UPDATE OF status, reviewed_at, reviewed_by ON voice_authorizations
+    FOR EACH ROW
+    WHEN NEW.status IN ('approved','rejected')
+      AND (NEW.reviewed_at IS NULL OR NEW.reviewed_by IS NULL OR length(trim(NEW.reviewed_by)) = 0)
+    BEGIN
+      SELECT RAISE(ABORT, 'voice_authorization_review_audit_required');
+    END;
+  `);
 }
 
 /** Add the restoration-feedback schema without rewriting legacy conversation turns. */
@@ -2377,6 +2426,7 @@ function rowToVoiceAuthorization(row: any): VoiceAuthorization {
     syntheticDisclosureConfirmed: Boolean(row.synthetic_disclosure_confirmed),
     attestedAt: row.attested_at,
     reviewedAt: row.reviewed_at,
+    reviewedBy: row.reviewed_by,
     revokedAt: row.revoked_at,
     createdAt: row.created_at,
   };
@@ -2388,6 +2438,13 @@ export function replaceVoiceAuthorization(
   const database = getDb();
   return database.transaction(() => {
     const now = new Date().toISOString();
+    const prior = getCurrentVoiceAuthorization(input.voiceId, input.userId);
+    if (prior) {
+      if (prior.speakerStatus !== input.speakerStatus || prior.basis !== input.basis) {
+        throw new Error("authorization_classification_locked");
+      }
+      if (prior.status !== "revoked") throw new Error("authorization_state_changed");
+    }
     database.prepare(
       `UPDATE voice_authorizations
        SET status = 'revoked', revoked_at = ?
@@ -2398,8 +2455,8 @@ export function replaceVoiceAuthorization(
       `INSERT INTO voice_authorizations
          (id, voice_id, user_id, speaker_status, basis, status, reason_code,
           notice_version, separate_consent_confirmed, third_party_processing_confirmed,
-          synthetic_disclosure_confirmed, attested_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          synthetic_disclosure_confirmed, attested_at, created_at, reviewed_at, reviewed_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       input.id,
       input.voiceId,
@@ -2414,9 +2471,11 @@ export function replaceVoiceAuthorization(
       Number(input.syntheticDisclosureConfirmed),
       input.attestedAt,
       now,
+      input.reviewedAt,
+      input.reviewedBy,
     );
     return getCurrentVoiceAuthorization(input.voiceId, input.userId)!;
-  })();
+  }).immediate();
 }
 
 export function getCurrentVoiceAuthorization(
@@ -2439,7 +2498,7 @@ export function revokeVoiceAuthorization(
   const database = getDb();
   const current = getCurrentVoiceAuthorization(voiceId, userId);
   if (!current) return null;
-  if (current.status !== "revoked") {
+  if (current.status === "pending_review" || current.status === "approved") {
     database.prepare(
       `UPDATE voice_authorizations
        SET status = 'revoked', revoked_at = ?
@@ -2447,4 +2506,29 @@ export function revokeVoiceAuthorization(
     ).run(new Date().toISOString(), current.id, userId);
   }
   return getCurrentVoiceAuthorization(voiceId, userId);
+}
+
+export function reviewVoiceAuthorization(
+  input: ReviewVoiceAuthorizationInput,
+): ReviewVoiceAuthorizationResult {
+  const database = getDb();
+  return database.transaction(() => {
+    const current = database.prepare(
+      "SELECT * FROM voice_authorizations WHERE id = ?",
+    ).get(input.authorizationId) as any;
+    if (!current) return { status: "not_found" as const };
+    if (current.status !== "pending_review") return { status: "not_pending" as const };
+
+    const nextStatus = input.decision === "approve" ? "approved" : "rejected";
+    const changed = database.prepare(
+      `UPDATE voice_authorizations
+       SET status = ?, reason_code = ?, reviewed_at = ?, reviewed_by = ?
+       WHERE id = ? AND status = 'pending_review'`,
+    ).run(nextStatus, input.reason, input.reviewedAt, input.reviewerId, input.authorizationId);
+    if (changed.changes !== 1) return { status: "not_pending" as const };
+    const reviewed = database.prepare(
+      "SELECT * FROM voice_authorizations WHERE id = ?",
+    ).get(input.authorizationId) as any;
+    return { status: "reviewed" as const, authorization: rowToVoiceAuthorization(reviewed) };
+  }).immediate();
 }

@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import AppShell from "@/components/AppShell";
+import { mapVoiceAuthorizationStatus } from "@/lib/voiceAuthorizationClient";
+import type { VoiceAuthorizationStatus } from "@/lib/storage/types";
 
 type VoiceMeta = { voiceId: string; promptText: string; createdAt: string };
 
@@ -16,6 +18,12 @@ export default function PersonaNewPage() {
   const [personaDesc, setPersonaDesc] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [authorization, setAuthorization] = useState<{
+    status: VoiceAuthorizationStatus;
+    reasonCode: string | null;
+  } | null>(null);
+  const [authorizationLoading, setAuthorizationLoading] = useState(false);
+  const [authorizationVoiceId, setAuthorizationVoiceId] = useState("");
 
   useEffect(() => {
     fetch("/api/voice/upload")
@@ -27,11 +35,25 @@ export default function PersonaNewPage() {
       .catch(() => {});
   }, []);
 
+  useEffect(() => {
+    if (!voiceId) { setAuthorization(null); setAuthorizationVoiceId(""); return; }
+    let active = true;
+    setAuthorizationLoading(true);
+    setAuthorization(null);
+    fetch(`/api/voice/authorization?voiceId=${encodeURIComponent(voiceId)}`)
+      .then(async (response) => response.status === 404 ? null : (await response.json()).authorization || null)
+      .then((value) => { if (active) { setAuthorization(value); setAuthorizationVoiceId(voiceId); } })
+      .catch(() => { if (active) { setAuthorization(null); setAuthorizationVoiceId(voiceId); } })
+      .finally(() => { if (active) setAuthorizationLoading(false); });
+    return () => { active = false; };
+  }, [voiceId]);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault(); setError("");
     if (!name.trim() || !relation.trim() || !voiceId) {
       setError("姓名、关系、参考声音都必须填"); return;
     }
+    if (!canCreate) { setError("声音授权尚未通过"); return; }
     setSubmitting(true);
     try {
       const r = await fetch("/api/persona", {
@@ -47,6 +69,10 @@ export default function PersonaNewPage() {
   }
 
   const step = voices.length === 0 ? 0 : 1;
+  const authorizationDisplay = mapVoiceAuthorizationStatus(authorization);
+  const canCreate = authorizationVoiceId === voiceId
+    && authorizationDisplay.canContinue
+    && !authorizationLoading;
 
   return (
     <AppShell>
@@ -89,6 +115,9 @@ export default function PersonaNewPage() {
                   </option>
                 ))}
               </select>
+              <span style={{ color: "var(--text-hint)", fontSize: 11, marginTop: 4, display: "block" }}>
+                {authorizationLoading ? "正在读取授权状态…" : authorizationDisplay.label}
+              </span>
             </label>
 
             <label className="y-label" style={{ marginTop: 16 }}>
@@ -101,8 +130,8 @@ export default function PersonaNewPage() {
               </span>
             </label>
 
-            <button type="submit" disabled={submitting} className="y-btn" style={{ marginTop: 16, width: "100%" }}>
-              {submitting ? "创建中…" : "创建并去录入记忆"}
+            <button type="submit" disabled={submitting || !canCreate} className="y-btn" style={{ marginTop: 16, width: "100%" }}>
+              {submitting ? "创建中…" : canCreate ? "创建并去录入记忆" : "声音授权通过后可创建"}
             </button>
           </form>
         </div>

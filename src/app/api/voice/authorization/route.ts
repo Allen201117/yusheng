@@ -3,6 +3,7 @@ import { requireAuth } from "@/lib/guard";
 import { getRepository } from "@/lib/storage/repository";
 import { getVoiceObjectStore } from "@/lib/storage/voiceObjectStore";
 import type {
+  VoiceAuthorization,
   VoiceAuthorizationBasis,
   VoiceSpeakerStatus,
 } from "@/lib/storage/types";
@@ -21,12 +22,29 @@ const AUTHORIZATION_BASES = new Set<VoiceAuthorizationBasis>([
   "close_relative_request",
 ]);
 
+function toClientAuthorization(authorization: VoiceAuthorization) {
+  return {
+    id: authorization.id,
+    voiceId: authorization.voiceId,
+    speakerStatus: authorization.speakerStatus,
+    basis: authorization.basis,
+    status: authorization.status,
+    reasonCode: authorization.reasonCode,
+    noticeVersion: authorization.noticeVersion,
+    attestedAt: authorization.attestedAt,
+    reviewedAt: authorization.reviewedAt,
+    revokedAt: authorization.revokedAt,
+  };
+}
+
 export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if ("error" in auth) return auth.error;
   const voiceId = (req.nextUrl.searchParams.get("voiceId") || "").trim();
   if (!voiceId) return NextResponse.json({ error: "缺少 voiceId" }, { status: 400 });
 
+  const voice = await getVoiceObjectStore().getMeta(voiceId, auth.userId);
+  if (!voice) return NextResponse.json({ error: "声音不存在或不属于你" }, { status: 404 });
   const authorization = await getRepository().getCurrentVoiceAuthorization(
     voiceId,
     auth.userId,
@@ -34,7 +52,11 @@ export async function GET(req: NextRequest) {
   if (!authorization) {
     return NextResponse.json({ error: "授权记录不存在" }, { status: 404 });
   }
-  return NextResponse.json({ authorization });
+  return NextResponse.json({
+    authorization: toClientAuthorization(authorization),
+    presetStatus: voice.providerVoiceStatus,
+    ...(voice.providerVoiceErrorCode ? { presetErrorCode: voice.providerVoiceErrorCode } : {}),
+  });
 }
 
 export async function POST(req: NextRequest) {
@@ -82,7 +104,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       ok: true,
       status: result.status,
-      authorization: result.authorization,
+      authorization: toClientAuthorization(result.authorization),
       cleanupPending: result.cleanupPending,
     }, { status: result.cleanupPending ? 202 : 200 });
   }
@@ -91,7 +113,7 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     ok: true,
     status: result.status,
-    authorization: result.authorization,
+    authorization: toClientAuthorization(result.authorization),
     presetStatus,
     ...(presetStatus === "failed" ? { presetErrorCode: result.preset.errorCode } : {}),
   }, { status: presetStatus === "failed" ? 202 : 200 });

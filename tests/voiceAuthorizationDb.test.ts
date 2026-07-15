@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 
 let dataDir = "";
 let db: typeof import("../src/lib/db");
@@ -25,6 +26,7 @@ it("persists and revokes the current local voice authorization", () => {
     noticeVersion: "voice-authorization-2026-07-13",
     separateConsentConfirmed: true, thirdPartyProcessingConfirmed: true,
     syntheticDisclosureConfirmed: true, attestedAt: "2026-07-13T09:00:00.000Z",
+    reviewedAt: "2026-07-13T09:00:00.000Z", reviewedBy: "policy:self",
   };
 
   assert.equal(db.replaceVoiceAuthorization(input).status, "approved");
@@ -41,6 +43,91 @@ it("supports the explicit local development user without a users row", () => {
     noticeVersion: "voice-authorization-2026-07-13",
     separateConsentConfirmed: true, thirdPartyProcessingConfirmed: true,
     syntheticDisclosureConfirmed: true, attestedAt: "2026-07-13T09:00:00.000Z",
+    reviewedAt: "2026-07-13T09:00:00.000Z", reviewedBy: "policy:self",
   });
   assert.equal(authorization.userId, "__dev__");
+});
+
+it("atomically reviews only pending local authorizations and records the reviewer", () => {
+  const pending = db.replaceVoiceAuthorization({
+    id: "auth-review", voiceId: "voice-review", userId: "__dev__",
+    speakerStatus: "deceased", basis: "close_relative_request", status: "pending_review",
+    reasonCode: "manual_review_required", noticeVersion: "voice-authorization-2026-07-13",
+    separateConsentConfirmed: true, thirdPartyProcessingConfirmed: true,
+    syntheticDisclosureConfirmed: true, attestedAt: "2026-07-15T00:00:00.000Z",
+    reviewedAt: null, reviewedBy: null,
+  });
+  assert.equal(pending.reviewedBy, null);
+  const reviewed = db.reviewVoiceAuthorization({
+    authorizationId: pending.id, decision: "approve", reviewerId: "operator-1",
+    reason: "evidence_verified", reviewedAt: "2026-07-15T01:00:00.000Z",
+  });
+  assert.equal(reviewed.status, "reviewed");
+  if (reviewed.status === "reviewed") {
+    assert.equal(reviewed.authorization.status, "approved");
+    assert.equal(reviewed.authorization.reviewedBy, "operator-1");
+    assert.equal(reviewed.authorization.reasonCode, "evidence_verified");
+  }
+  assert.deepEqual(db.reviewVoiceAuthorization({
+    authorizationId: pending.id, decision: "reject", reviewerId: "operator-2",
+    reason: "late_rejection", reviewedAt: "2026-07-15T02:00:00.000Z",
+  }), { status: "not_pending" });
+  assert.deepEqual(db.reviewVoiceAuthorization({
+    authorizationId: "missing", decision: "approve", reviewerId: "operator-1",
+    reason: "ok", reviewedAt: "2026-07-15T01:00:00.000Z",
+  }), { status: "not_found" });
+});
+
+it("prevents a local pending authorization from being relabeled during replacement", () => {
+  db.replaceVoiceAuthorization({
+    id: "auth-locked", voiceId: "voice-locked", userId: "__dev__",
+    speakerStatus: "deceased", basis: "close_relative_request", status: "pending_review",
+    reasonCode: "manual_review_required", noticeVersion: "voice-authorization-2026-07-13",
+    separateConsentConfirmed: true, thirdPartyProcessingConfirmed: true,
+    syntheticDisclosureConfirmed: true, attestedAt: "2026-07-15T00:00:00.000Z",
+    reviewedAt: null, reviewedBy: null,
+  });
+  assert.throws(() => db.replaceVoiceAuthorization({
+    id: "auth-bypass", voiceId: "voice-locked", userId: "__dev__",
+    speakerStatus: "living", basis: "self", status: "approved", reasonCode: null,
+    noticeVersion: "voice-authorization-2026-07-13", separateConsentConfirmed: true,
+    thirdPartyProcessingConfirmed: true, syntheticDisclosureConfirmed: true,
+    attestedAt: "2026-07-15T00:01:00.000Z", reviewedAt: "2026-07-15T00:01:00.000Z",
+    reviewedBy: "policy:self",
+  }), /authorization_classification_locked/);
+  assert.equal(db.getCurrentVoiceAuthorization("voice-locked", "__dev__")?.status, "pending_review");
+});
+
+it("idempotently upgrades a legacy SQLite authorization table", () => {
+  const legacy = new Database(":memory:");
+  try {
+    legacy.exec(`
+      CREATE TABLE voice_authorizations (
+        id TEXT PRIMARY KEY, voice_id TEXT NOT NULL, user_id TEXT NOT NULL,
+        speaker_status TEXT NOT NULL, basis TEXT NOT NULL, status TEXT NOT NULL,
+        reason_code TEXT, notice_version TEXT NOT NULL,
+        separate_consent_confirmed INTEGER NOT NULL,
+        third_party_processing_confirmed INTEGER NOT NULL,
+        synthetic_disclosure_confirmed INTEGER NOT NULL,
+        attested_at TEXT NOT NULL, reviewed_at TEXT, revoked_at TEXT, created_at TEXT NOT NULL
+      );
+      INSERT INTO voice_authorizations VALUES (
+        'legacy-auth','legacy-voice','legacy-user','living','self','approved',NULL,'legacy',
+        1,1,1,'2026-01-01T00:00:00.000Z',NULL,NULL,'2026-01-01T00:00:00.000Z'
+      );
+    `);
+    db.migrateVoiceAuthorizationReviewSchema(legacy);
+    db.migrateVoiceAuthorizationReviewSchema(legacy);
+    const columns = legacy.pragma("table_info(voice_authorizations)") as { name: string }[];
+    assert.equal(columns.filter((column) => column.name === "reviewed_by").length, 1);
+    const row = legacy.prepare(
+      "SELECT reviewed_at, reviewed_by FROM voice_authorizations WHERE id = 'legacy-auth'",
+    ).get() as { reviewed_at: string; reviewed_by: string };
+    assert.deepEqual(row, {
+      reviewed_at: "2026-01-01T00:00:00.000Z",
+      reviewed_by: "policy:self",
+    });
+  } finally {
+    legacy.close();
+  }
 });

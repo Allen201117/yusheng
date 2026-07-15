@@ -7,6 +7,15 @@ import {
   MAX_REFERENCE_AUDIO_DURATION_SEC,
   MAX_VOICE_MATERIAL_TOTAL_DURATION_SEC,
 } from "@/lib/voiceLimits";
+import type {
+  VoiceAuthorization,
+  VoiceAuthorizationBasis,
+  VoiceSpeakerStatus,
+} from "@/lib/storage/types";
+import {
+  buildVoiceAuthorizationPayload,
+  mapVoiceAuthorizationStatus,
+} from "@/lib/voiceAuthorizationClient";
 
 type VoiceMeta = {
   voiceId: string;
@@ -54,9 +63,22 @@ export default function VoiceNewPage() {
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const authorizationRequestRef = useRef(0);
   const [audioUrl, setAudioUrl] = useState("");
   const prevAudioUrlRef = useRef<string>("");
   const [transcribing, setTranscribing] = useState(false);
+  const [speakerStatus, setSpeakerStatus] = useState<VoiceSpeakerStatus>("living");
+  const [authorizationBasis, setAuthorizationBasis] = useState<VoiceAuthorizationBasis>("self");
+  const [separateConsentConfirmed, setSeparateConsentConfirmed] = useState(false);
+  const [thirdPartyProcessingConfirmed, setThirdPartyProcessingConfirmed] = useState(false);
+  const [syntheticDisclosureConfirmed, setSyntheticDisclosureConfirmed] = useState(false);
+  const [authorization, setAuthorization] = useState<Pick<
+    VoiceAuthorization,
+    "status" | "reasonCode" | "speakerStatus" | "basis"
+  > | null>(null);
+  const [authorizationLoading, setAuthorizationLoading] = useState(false);
+  const [authorizationVoiceId, setAuthorizationVoiceId] = useState("");
+  const [presetState, setPresetState] = useState<{ status: string | null; errorCode: string | null }>({ status: null, errorCode: null });
 
   // 录音
   const [recording, setRecording] = useState(false);
@@ -145,6 +167,106 @@ export default function VoiceNewPage() {
   }
   useEffect(() => { refreshVoices(); }, []);
 
+  async function refreshAuthorization(voiceId: string) {
+    const requestId = ++authorizationRequestRef.current;
+    if (!voiceId) {
+      setAuthorization(null);
+      setAuthorizationVoiceId("");
+      setAuthorizationLoading(false);
+      return;
+    }
+    setAuthorizationLoading(true);
+    setAuthorization(null);
+    setPresetState({ status: null, errorCode: null });
+    try {
+      const response = await fetch(`/api/voice/authorization?voiceId=${encodeURIComponent(voiceId)}`);
+      if (requestId !== authorizationRequestRef.current) return;
+      if (response.status === 404) { setAuthorizationVoiceId(voiceId); return; }
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error("授权状态读取失败");
+      setAuthorization(body.authorization || null);
+      if (body.authorization) {
+        setSpeakerStatus(body.authorization.speakerStatus);
+        setAuthorizationBasis(body.authorization.basis);
+      }
+      setAuthorizationVoiceId(voiceId);
+      setPresetState({ status: body.presetStatus || null, errorCode: body.presetErrorCode || null });
+    } catch {
+      if (requestId !== authorizationRequestRef.current) return;
+      setError("授权状态读取失败，请稍后重试");
+      setAuthorization(null);
+      setAuthorizationVoiceId(voiceId);
+    } finally {
+      if (requestId === authorizationRequestRef.current) setAuthorizationLoading(false);
+    }
+  }
+
+  useEffect(() => { void refreshAuthorization(selectedVoiceId); }, [selectedVoiceId]);
+
+  async function handleAuthorizationSubmit(e: React.FormEvent) {
+    e.preventDefault(); setError("");
+    if (!selectedVoiceId) return setError("请先选择一段参考声音");
+    const voiceId = selectedVoiceId;
+    const requestId = ++authorizationRequestRef.current;
+    setAuthorizationLoading(true);
+    try {
+      const response = await fetch("/api/voice/authorization", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildVoiceAuthorizationPayload({
+          voiceId,
+          speakerStatus,
+          basis: authorizationBasis,
+          separateConsentConfirmed,
+          thirdPartyProcessingConfirmed,
+          syntheticDisclosureConfirmed,
+        })),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (requestId !== authorizationRequestRef.current) return;
+      if (!response.ok) throw new Error(body.reasonCode || body.error || "授权提交失败");
+      setAuthorization(body.authorization || null);
+      if (body.authorization) {
+        setSpeakerStatus(body.authorization.speakerStatus);
+        setAuthorizationBasis(body.authorization.basis);
+      }
+      setAuthorizationVoiceId(voiceId);
+      setPresetState({ status: body.presetStatus || null, errorCode: body.presetErrorCode || null });
+      if (body.presetStatus === "failed") setError(`授权已通过，但音色创建失败：${body.presetErrorCode || "preset_failed"}`);
+    } catch (err) {
+      if (requestId !== authorizationRequestRef.current) return;
+      setError(err instanceof Error ? err.message : "授权提交失败");
+    } finally {
+      if (requestId === authorizationRequestRef.current) setAuthorizationLoading(false);
+    }
+  }
+
+  async function handleAuthorizationRevoke() {
+    if (!selectedVoiceId) return;
+    const voiceId = selectedVoiceId;
+    const requestId = ++authorizationRequestRef.current;
+    setError(""); setAuthorizationLoading(true);
+    try {
+      const response = await fetch(`/api/voice/authorization?voiceId=${encodeURIComponent(voiceId)}`, { method: "DELETE" });
+      const body = await response.json().catch(() => ({}));
+      if (requestId !== authorizationRequestRef.current) return;
+      if (!response.ok) throw new Error(body.error || "授权撤回失败");
+      if (authorization && authorizationVoiceId === voiceId) {
+        setAuthorization({
+          ...authorization,
+          status: body.status === "rejected" ? "rejected" : "revoked",
+          reasonCode: body.status === "rejected" ? authorization.reasonCode : null,
+        });
+      }
+      setPresetState({ status: body.cleanupPending ? "failed" : "not_created", errorCode: body.cleanupPending ? "cleanup_pending" : null });
+      if (body.cleanupPending) setError("授权已撤回，供应商音色仍在清理中");
+    } catch (err) {
+      if (requestId !== authorizationRequestRef.current) return;
+      setError(err instanceof Error ? err.message : "授权撤回失败");
+      setAuthorizationLoading(false);
+    }
+  }
+
   async function handleTranscribe() {
     if (audioFiles.length !== 1) return setError("自动识别请先选择单个音频文件。多段素材上传时可留空，系统会逐段识别。");
     const audioFile = audioFiles[0].file;
@@ -213,6 +335,13 @@ export default function VoiceNewPage() {
     const m = Math.floor(s / 60), sec = s % 60;
     return `${m}:${sec.toString().padStart(2, "0")}`;
   };
+  const authorizationDisplay = mapVoiceAuthorizationStatus(authorization);
+  const canContinue = authorizationVoiceId === selectedVoiceId
+    && authorizationDisplay.canContinue
+    && !authorizationLoading;
+  const canSubmitAuthorization = !authorization
+    || authorization.status === "revoked"
+    || (authorization.status === "approved" && presetState.status === "failed");
 
   return (
     <AppShell>
@@ -329,18 +458,15 @@ export default function VoiceNewPage() {
         )}
       </div>
 
-      {/* Step 2: 试听 */}
       <div className="y-card">
         <div className="y-step">
           <span className="y-step-num">2</span>
-          <span className="y-step-label">试听克隆效果</span>
+          <span className="y-step-label">确认声音授权</span>
         </div>
         {voices.length === 0 ? (
-          <div className="y-empty-warm" style={{ padding: "var(--sp-lg) 0" }}>
-            <p style={{ color: "var(--text-hint)", fontSize: 13, margin: 0 }}>上传音频后在这里试听</p>
-          </div>
+          <p style={{ color: "var(--text-hint)", fontSize: 13 }}>先上传一段声音，再提交这一段声音的授权。</p>
         ) : (
-          <form onSubmit={handleTest}>
+          <form onSubmit={handleAuthorizationSubmit}>
             <label className="y-label">
               选择录音
               <select value={selectedVoiceId} onChange={(e) => setSelectedVoiceId(e.target.value)}
@@ -352,13 +478,82 @@ export default function VoiceNewPage() {
                 ))}
               </select>
             </label>
-            <label className="y-label" style={{ marginTop: 16 }}>
+            <p style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+              当前声音：{authorizationLoading ? "读取中…" : authorizationDisplay.label}
+              {authorizationDisplay.errorCode ? ` · ${authorizationDisplay.errorCode}` : ""}
+              {presetState.status === "failed" ? ` · 音色创建失败：${presetState.errorCode || "preset_failed"}` : ""}
+            </p>
+            <label className="y-label" style={{ marginTop: 12 }}>
+              声音主人是否健在
+              <select value={speakerStatus} onChange={(e) => {
+                const next = e.target.value as VoiceSpeakerStatus;
+                setSpeakerStatus(next);
+                setAuthorizationBasis(next === "living" ? "self" : "close_relative_request");
+              }} disabled={Boolean(authorization)} className="y-select" style={{ marginTop: 6 }}>
+                <option value="living">健在</option>
+                <option value="deceased">已故</option>
+              </select>
+            </label>
+            <label className="y-label" style={{ marginTop: 12 }}>
+              授权依据
+              <select value={authorizationBasis} onChange={(e) => setAuthorizationBasis(e.target.value as VoiceAuthorizationBasis)} disabled={Boolean(authorization)} className="y-select" style={{ marginTop: 6 }}>
+                {speakerStatus === "living" ? <>
+                  <option value="self">这是我本人的声音</option>
+                  <option value="speaker_separate_consent">声音主人已单独同意</option>
+                  <option value="legal_representative">我是合法代理人</option>
+                </> : <>
+                  <option value="close_relative_request">我是近亲属并提出申请</option>
+                  <option value="legal_representative">我有合法代理依据</option>
+                </>}
+              </select>
+            </label>
+            {[
+              [separateConsentConfirmed, setSeparateConsentConfirmed, "我确认有权提交并处理这段声音"],
+              [thirdPartyProcessingConfirmed, setThirdPartyProcessingConfirmed, "我同意将声音交给第三方服务生成合成语音"],
+              [syntheticDisclosureConfirmed, setSyntheticDisclosureConfirmed, "我知道系统输出是 AI 合成语音，不代表声音主人的真实意志"],
+            ].map(([checked, setter, label]) => (
+              <label key={String(label)} style={{ display: "flex", gap: 8, marginTop: 12, color: "var(--text-secondary)", fontSize: 13 }}>
+                <input type="checkbox" checked={checked as boolean} onChange={(e) => (setter as (value: boolean) => void)(e.target.checked)} />
+                <span>{String(label)}</span>
+              </label>
+            ))}
+            <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+              <button type="submit" disabled={authorizationLoading || !canSubmitAuthorization} className="y-btn">
+                {authorizationLoading ? "处理中…" : authorization?.status === "revoked" ? "重新提交授权" : presetState.status === "failed" ? "重试创建音色" : "提交授权"}
+              </button>
+              {authorization && (
+                authorization.status === "approved"
+                || authorization.status === "pending_review"
+                || (authorization.status === "rejected" && presetState.status === "failed")
+              ) && (
+                <button type="button" onClick={handleAuthorizationRevoke} disabled={authorizationLoading} className="y-btn-ghost">
+                  {authorization.status === "rejected" ? "重试清理音色" : "撤回授权"}
+                </button>
+              )}
+            </div>
+          </form>
+        )}
+      </div>
+
+      {/* Step 3: 试听 */}
+      <div className="y-card">
+        <div className="y-step">
+          <span className="y-step-num">3</span>
+          <span className="y-step-label">试听克隆效果</span>
+        </div>
+        {voices.length === 0 ? (
+          <div className="y-empty-warm" style={{ padding: "var(--sp-lg) 0" }}>
+            <p style={{ color: "var(--text-hint)", fontSize: 13, margin: 0 }}>上传音频后在这里试听</p>
+          </div>
+        ) : (
+          <form onSubmit={handleTest}>
+            <label className="y-label">
               试听文本
               <textarea value={text} onChange={(e) => setText(e.target.value)} rows={2}
                 className="y-textarea" style={{ marginTop: 6 }} />
             </label>
-            <button type="submit" disabled={generating} className="y-btn" style={{ marginTop: 12 }}>
-              {generating ? "生成中…" : "试听"}
+            <button type="submit" disabled={generating || !canContinue} className="y-btn" style={{ marginTop: 12 }}>
+              {generating ? "生成中…" : canContinue ? "试听" : "授权通过后可试听"}
             </button>
             {audioUrl && (
               <audio ref={audioRef} src={audioUrl} controls style={{ marginTop: 12, width: "100%" }} />
@@ -368,9 +563,13 @@ export default function VoiceNewPage() {
       </div>
 
       <div style={{ textAlign: "center", marginTop: 8 }}>
-        <Link href="/persona/new" className="y-btn-ghost" style={{ fontSize: 13 }}>
-          上传好了，去创建人物 →
-        </Link>
+        {canContinue ? (
+          <Link href="/persona/new" className="y-btn-ghost" style={{ fontSize: 13 }}>
+            授权通过，去创建人物 →
+          </Link>
+        ) : (
+          <span style={{ color: "var(--text-hint)", fontSize: 13 }}>授权通过后才能创建可对话人物</span>
+        )}
       </div>
 
       {error && <div className="y-error">{error}</div>}

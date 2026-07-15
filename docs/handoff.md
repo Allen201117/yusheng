@@ -10,7 +10,7 @@
 当前核心流程：
 
 ```text
-登录 -> 上传或录制参考声音 -> 创建人物 -> 录入记忆 -> 流式文字对话 -> 克隆声音朗读
+登录 -> 上传或录制参考声音 -> 逐声音提交授权 -> 授权通过 -> 创建人物 -> 录入记忆 -> 流式文字对话 -> 克隆声音朗读
 ```
 
 授权策略的规则依据是《个人信息保护法》对生物识别敏感信息和单独同意的要求，以及《互联网信息服务深度合成管理规定》对人声编辑告知、单独同意和合成标识的要求。这些后端控制不等于已完成法律合规审查。
@@ -64,6 +64,7 @@ migrations/002_provider_voice_lifecycle.sql 供应商音色状态机
 scripts/apply-migrations.ts               幂等 schema migration
 scripts/migrate-local-data.ts             SQLite + 本地声音盘点和迁移
 scripts/report-restoration-feedback.ts    只输出健在/逝者聚合指标的运营命令
+scripts/review-voice-authorization.ts     受控人工授权审核命令（不是公开 HTTP 接口）
 src/lib/storage/config.ts                 生产存储强制保护
 src/lib/storage/repository.ts             本地/云 repository 选择
 src/lib/storage/postgresRepository.ts     Neon 数据访问
@@ -134,9 +135,9 @@ NODE_ENV=production STORAGE_BACKEND=local \
 - 本地真实模型行为探针已记录在 `docs/verification/persona-behavior-baseline.md`；舞台说明从 9/10 降为 0/10，本人/复活问题已改为固定 AI 披露。20 次模型请求的首句延迟 P50 1.852s、P95 4.083s、最慢 7.484s，所以 4 秒目标尚未稳定达成。这不等于真实音频和 20 轮用户验收。
 - Vercel Sensitive 变量通过 `env pull` 时会被脱敏为空，不能用拉取文件判定 Key 是否存在。Preview `SILICONFLOW_API_KEY` 已从项目本地秘密重新写入为 Sensitive；Production 没有改动。两者是否可用都必须由真实 deployment 请求证明。
 - 供应商预置音色状态机、TTS 快路径、失效 URI 的一次动态回退和可重试删除已有代码；只有当前 `approved` 授权可触发预置音色。
-- 授权记录、撤回和受控预置 API 已有后端；只有健在本人会自动 approved，亲友与逝者均待人工审核。已有授权记录一旦为 pending/revoked 就禁止 TTS；开关关闭时只兼容“完全没有授权记录”的旧声音。当前没有功能客户端，Production 不得设置 `VOICE_AUTH_ENFORCEMENT=enabled`。
+- 声音上传页已有逐声音授权提交、状态查询和撤回闭环；创建人物的页面和 API 都要求当前声音为 approved。只有健在本人三项确认齐全时自动 approved 并创建预置音色；健在第三人和逝者均进入 pending_review，必须使用受控 operator CLI 审核。人工审核记录 `reviewed_at` 和 `reviewed_by`，只允许 pending 的原子一次性决策；没有公开 admin HTTP route。操作边界见 `docs/operator/voice-authorization-review.md`。
 - SiliconFlow 用户预置音色需供应商账号完成实名认证；当前尚无真实成功证据。
-- 健在第三人授权证据核验、逝者场景人工审核、删除完成凭证和用户可见的 AI 合成标识仍未完成。
+- 健在第三人和逝者的线下证据收集/核验规范、删除完成凭证以及真实环境人工审核仍未完成；CLI 只是受控执行面，不等于合规审查完成。进入 2+2 前必须先做 1+1 彩排。
 - 三层人物知识、confirmed-only 检索、grounded/companionship/boundary 路由、消息级 evidence、非视觉浏览器播放 telemetry、评分资格和健在/逝者聚合报告已本地落地。`play_started` 只证明客户端报告开始播放，TTS 成功不等于已播放/已听完。真实 Preview 浏览器 + provider + DB readback、有效还原真实用户样本和 AI 候选提取仍未完成。详见 `docs/verification/restoration-feedback.md`。
 - 真实模型虚构数据探针与确定性单测分开记录，两者都不能替代认识声音主人的人评价“是不是像”。
 - 本地测试、类型检查和构建通过只证明当前代码库门禁，不授权推送、Preview 或 Production 发布。
@@ -147,7 +148,7 @@ NODE_ENV=production STORAGE_BACKEND=local \
 1. 所有业务 API 先执行 `requireAuth()`，再访问用户数据。
 2. 人物、声音查询必须带 `userId`；不得只凭可枚举 ID 返回数据。
 3. 参考声音必须使用 Private Blob；不得生成公开 Blob URL。
-4. 创建人物前必须确认 voice 属于当前用户。
+4. 创建人物前必须确认 voice 属于当前用户，且当前授权状态为 approved。
 5. 删除人物后，只有该用户没有其他人物复用声音时才删除原文件；供应商删除失败必须返回 `cleanupPending`，并可通过已鉴权的 `DELETE /api/voice/upload?id=...` 重试。
 6. `AUTH_MODE=disabled` 只允许本地演示与测试。
 7. 不把密钥、迁移报告或真实声音样本提交到 Git。

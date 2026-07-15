@@ -62,6 +62,7 @@ const authorization = (status: VoiceAuthorization["status"] = "approved"): Voice
   noticeVersion: "v1",
   attestedAt: "2026-07-14T09:00:00.000Z",
   reviewedAt: "2026-07-14T09:00:00.000Z",
+  reviewedBy: "policy:self",
   revokedAt: status === "revoked" ? "2026-07-14T10:00:00.000Z" : null,
   createdAt: "2026-07-14T09:00:00.000Z",
 });

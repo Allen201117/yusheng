@@ -76,10 +76,10 @@ function resetConversationFixtures() {
     `INSERT INTO voice_authorizations
        (id, voice_id, user_id, speaker_status, basis, status, notice_version,
         separate_consent_confirmed, third_party_processing_confirmed,
-        synthetic_disclosure_confirmed, attested_at, created_at)
+        synthetic_disclosure_confirmed, attested_at, created_at, reviewed_at, reviewed_by)
      VALUES ('auth-1', 'voice-1', 'user-1', 'living', 'self', 'approved', 'notice-v1',
-             1, 1, 1, ?, ?)`,
-  ).run(now, now);
+             1, 1, 1, ?, ?, ?, 'policy:self')`,
+  ).run(now, now, now);
   database.prepare(
     `INSERT INTO conversation_sessions
        (id, persona_id, evaluator_user_id, voice_id, voice_authorization_id,

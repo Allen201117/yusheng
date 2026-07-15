@@ -36,7 +36,16 @@ export async function POST(req: NextRequest) {
   const voice = await getVoiceObjectStore().getMeta(voiceId, auth.userId);
   if (!voice) return NextResponse.json({ error: "voiceId 不存在或不属于你" }, { status: 404 });
 
-  const persona = await getRepository().createPersona({
+  const repository = getRepository();
+  const authorization = await repository.getCurrentVoiceAuthorization(voiceId, auth.userId);
+  if (authorization?.status !== "approved") {
+    return NextResponse.json(
+      { error: "声音授权尚未通过", reasonCode: "VOICE_AUTHORIZATION_REQUIRED" },
+      { status: 403 },
+    );
+  }
+
+  const persona = await repository.createPersona({
     id: randomUUID(),
     userId: auth.userId,
     name,

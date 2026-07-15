@@ -28,6 +28,20 @@ it("routes use the async persistence boundary instead of local SQLite or files",
   }
 });
 
+it("keeps manual voice review off the public HTTP route surface", async () => {
+  const publicRoutes = durableRoutes.join("\n");
+  assert.doesNotMatch(publicRoutes, /review|admin/);
+  const route = await readFile(
+    new URL("../src/app/api/voice/authorization/route.ts", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(route, /reviewVoiceAuthorization|reviewStoredVoiceAuthorization/);
+  assert.match(route, /toClientAuthorization/);
+  assert.doesNotMatch(route, /reviewedBy:\s*authorization\.reviewedBy/);
+  assert.match(route, /presetStatus/);
+  assert.match(route, /presetErrorCode/);
+});
+
 it("voice routes use the object store and data routes use the repository", async () => {
   const voiceRoutes = [
     "voice/upload/route.ts",
@@ -171,6 +185,10 @@ it("routes use the provider preset fast path and provider-aware deletion lifecyc
     new URL("../src/app/api/persona/route.ts", import.meta.url),
     "utf8",
   );
+  const personaPage = await readFile(
+    new URL("../src/app/persona/new/page.tsx", import.meta.url),
+    "utf8",
+  );
 
   assert.match(tts, /resolveVoiceSynthesisSource/);
   assert.match(tts, /resolveTtsVoiceId/);
@@ -178,6 +196,12 @@ it("routes use the provider preset fast path and provider-aware deletion lifecyc
   assert.match(tts, /getCurrentVoiceAuthorization/);
   assert.match(tts, /canSynthesizeVoice/);
   assert.match(tts, /isVoiceAuthorizationEnforced/);
+  assert.match(persona, /getCurrentVoiceAuthorization/);
+  assert.match(persona, /authorization\?\.status !== ["']approved["']/);
+  assert.match(persona, /VOICE_AUTHORIZATION_REQUIRED/);
+  assert.match(personaPage, /api\/voice\/authorization\?voiceId=/);
+  assert.match(personaPage, /authorizationVoiceId === voiceId/);
+  assert.match(personaPage, /disabled=\{submitting \|\| !canCreate\}/);
   assert.match(tts, /sanitizeSpeechText/);
   assert.match(tts, /text:\s*spokenText/);
   const ttsVoiceBinding = await readFile(

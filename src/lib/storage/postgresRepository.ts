@@ -22,6 +22,8 @@ import type {
   CreatePersonaInput,
   CreatePersonaSourceInput,
   CreateVoiceAuthorizationInput,
+  ReviewVoiceAuthorizationInput,
+  ReviewVoiceAuthorizationResult,
   CreateVoiceProfileInput,
   InsertMemoryInput,
   InsertMessageInput,
@@ -299,6 +301,7 @@ type VoiceAuthorizationRow = {
   synthetic_disclosure_confirmed: boolean;
   attested_at: Date | string;
   reviewed_at: Date | string | null;
+  reviewed_by: string | null;
   revoked_at: Date | string | null;
   created_at: Date | string;
 };
@@ -678,6 +681,7 @@ function mapVoiceAuthorization(row: VoiceAuthorizationRow): VoiceAuthorization {
     syntheticDisclosureConfirmed: row.synthetic_disclosure_confirmed,
     attestedAt: toIsoString(row.attested_at),
     reviewedAt: row.reviewed_at ? toIsoString(row.reviewed_at) : null,
+    reviewedBy: row.reviewed_by,
     revokedAt: row.revoked_at ? toIsoString(row.revoked_at) : null,
     createdAt: toIsoString(row.created_at),
   };
@@ -686,7 +690,7 @@ function mapVoiceAuthorization(row: VoiceAuthorizationRow): VoiceAuthorization {
 const VOICE_AUTHORIZATION_COLUMNS = `
   id, voice_id, user_id, speaker_status, basis, status, reason_code, notice_version,
   separate_consent_confirmed, third_party_processing_confirmed,
-  synthetic_disclosure_confirmed, attested_at, reviewed_at, revoked_at, created_at
+  synthetic_disclosure_confirmed, attested_at, reviewed_at, reviewed_by, revoked_at, created_at
 `;
 
 function parseVector(value: string | number[]): Float32Array {
@@ -1094,6 +1098,29 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       input: CreateVoiceAuthorizationInput,
     ): Promise<VoiceAuthorization> {
       return sql.transaction(async (transaction) => {
+        const owner = await transaction.query<{ id: string }>(
+          `SELECT id FROM voice_profiles
+           WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+           FOR UPDATE`,
+          [input.voiceId, input.userId],
+        );
+        if (!owner[0]) throw new Error("voice_not_found");
+        const priorRows = await transaction.query<VoiceAuthorizationRow>(
+          `SELECT ${VOICE_AUTHORIZATION_COLUMNS}
+           FROM voice_authorizations
+           WHERE voice_id = $1 AND user_id = $2
+           ORDER BY created_at DESC, id DESC
+           LIMIT 1
+           FOR UPDATE`,
+          [input.voiceId, input.userId],
+        );
+        const prior = priorRows[0];
+        if (prior) {
+          if (prior.speaker_status !== input.speakerStatus || prior.basis !== input.basis) {
+            throw new Error("authorization_classification_locked");
+          }
+          if (prior.status !== "revoked") throw new Error("authorization_state_changed");
+        }
         await transaction.query(
           `UPDATE voice_authorizations
            SET status = 'revoked', revoked_at = now()
@@ -1105,8 +1132,9 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
           `INSERT INTO voice_authorizations
              (id, voice_id, user_id, speaker_status, basis, status, reason_code,
               notice_version, separate_consent_confirmed,
-              third_party_processing_confirmed, synthetic_disclosure_confirmed, attested_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+              third_party_processing_confirmed, synthetic_disclosure_confirmed, attested_at,
+              reviewed_at, reviewed_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
            RETURNING ${VOICE_AUTHORIZATION_COLUMNS}`,
           [
             input.id,
@@ -1121,6 +1149,8 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
             input.thirdPartyProcessingConfirmed,
             input.syntheticDisclosureConfirmed,
             input.attestedAt,
+            input.reviewedAt,
+            input.reviewedBy,
           ],
         );
         if (!rows[0]) throw new Error("Failed to create voice authorization");
@@ -1133,22 +1163,81 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
     },
 
     async revokeVoiceAuthorization(voiceId, userId): Promise<VoiceAuthorization | null> {
-      const rows = await sql.query<VoiceAuthorizationRow>(
-        `UPDATE voice_authorizations
-         SET status = 'revoked', revoked_at = now()
-         WHERE id = (
-           SELECT id FROM voice_authorizations
+      return sql.transaction(async (transaction) => {
+        await transaction.query(
+          `SELECT id FROM voice_profiles
+           WHERE id = $1 AND user_id = $2
+           FOR UPDATE`,
+          [voiceId, userId],
+        );
+        const rows = await transaction.query<VoiceAuthorizationRow>(
+          `UPDATE voice_authorizations
+           SET status = 'revoked', revoked_at = now()
+           WHERE id = (
+             SELECT id FROM voice_authorizations
+             WHERE voice_id = $1 AND user_id = $2
+               AND status IN ('pending_review', 'approved')
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1
+             FOR UPDATE
+           )
+           RETURNING ${VOICE_AUTHORIZATION_COLUMNS}`,
+          [voiceId, userId],
+        );
+        if (rows[0]) return mapVoiceAuthorization(rows[0]);
+        const current = await transaction.query<VoiceAuthorizationRow>(
+          `SELECT ${VOICE_AUTHORIZATION_COLUMNS}
+           FROM voice_authorizations
            WHERE voice_id = $1 AND user_id = $2
-             AND status IN ('pending_review', 'approved')
            ORDER BY created_at DESC, id DESC
-           LIMIT 1
-           FOR UPDATE
-         )
-         RETURNING ${VOICE_AUTHORIZATION_COLUMNS}`,
-        [voiceId, userId],
-      );
-      if (rows[0]) return mapVoiceAuthorization(rows[0]);
-      return getCurrentVoiceAuthorizationForUser(voiceId, userId);
+           LIMIT 1`,
+          [voiceId, userId],
+        );
+        return current[0] ? mapVoiceAuthorization(current[0]) : null;
+      });
+    },
+
+    async reviewVoiceAuthorization(
+      input: ReviewVoiceAuthorizationInput,
+    ): Promise<ReviewVoiceAuthorizationResult> {
+      return sql.transaction(async (transaction) => {
+        const snapshots = await transaction.query<VoiceAuthorizationRow>(
+          `SELECT ${VOICE_AUTHORIZATION_COLUMNS}
+           FROM voice_authorizations WHERE id = $1`,
+          [input.authorizationId],
+        );
+        const snapshot = snapshots[0];
+        if (!snapshot) return { status: "not_found" as const };
+
+        const voice = await transaction.query<{ id: string }>(
+          `SELECT id FROM voice_profiles
+           WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+           FOR UPDATE`,
+          [snapshot.voice_id, snapshot.user_id],
+        );
+        if (!voice[0]) return { status: "not_found" as const };
+
+        const locked = await transaction.query<VoiceAuthorizationRow>(
+          `SELECT ${VOICE_AUTHORIZATION_COLUMNS}
+           FROM voice_authorizations
+           WHERE id = $1 AND voice_id = $2 AND user_id = $3
+           FOR UPDATE`,
+          [input.authorizationId, snapshot.voice_id, snapshot.user_id],
+        );
+        if (!locked[0]) return { status: "not_found" as const };
+        if (locked[0].status !== "pending_review") return { status: "not_pending" as const };
+
+        const nextStatus = input.decision === "approve" ? "approved" : "rejected";
+        const rows = await transaction.query<VoiceAuthorizationRow>(
+          `UPDATE voice_authorizations
+           SET status = $2, reason_code = $3, reviewed_at = $4, reviewed_by = $5
+           WHERE id = $1 AND status = 'pending_review'
+           RETURNING ${VOICE_AUTHORIZATION_COLUMNS}`,
+          [input.authorizationId, nextStatus, input.reason, input.reviewedAt, input.reviewerId],
+        );
+        if (!rows[0]) return { status: "not_pending" as const };
+        return { status: "reviewed" as const, authorization: mapVoiceAuthorization(rows[0]) };
+      });
     },
 
     async createPersonaKnowledgeCandidates(input: {

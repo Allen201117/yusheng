@@ -36,6 +36,7 @@ import {
   getCurrentVoiceAuthorization,
   getOrStartConversationSession,
   replaceVoiceAuthorization,
+  reviewVoiceAuthorization,
   reviewPersonaKnowledgeAtomically,
   revokeVoiceAuthorization,
   revokePersonaSource,
@@ -131,6 +132,9 @@ export function createLocalRepository(): AppRepository {
     },
     async revokeVoiceAuthorization(voiceId, userId) {
       return revokeVoiceAuthorization(voiceId, userId);
+    },
+    async reviewVoiceAuthorization(input) {
+      return reviewVoiceAuthorization(input);
     },
     async createPersonaKnowledgeCandidates(input) {
       return createPersonaKnowledgeCandidates(input);

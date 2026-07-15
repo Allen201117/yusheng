@@ -29,11 +29,12 @@ function fixture(ownerMatch = true, storedVoice = voice) {
     },
   } as unknown as VoiceObjectStore;
   const repository = {
-    async replaceVoiceAuthorization(input: Omit<VoiceAuthorization, "reviewedAt" | "revokedAt" | "createdAt">) {
+    async replaceVoiceAuthorization(input: Omit<VoiceAuthorization, "revokedAt" | "createdAt">) {
       calls.push(`auth:store:${input.status}`);
       authorization = {
         ...input,
-        reviewedAt: null,
+        reviewedAt: input.reviewedAt,
+        reviewedBy: input.reviewedBy,
         revokedAt: null,
         createdAt: input.attestedAt,
       };
@@ -43,6 +44,9 @@ function fixture(ownerMatch = true, storedVoice = voice) {
     async revokeVoiceAuthorization() {
       calls.push("auth:revoke");
       if (!authorization) return null;
+      if (authorization.status !== "approved" && authorization.status !== "pending_review") {
+        return authorization;
+      }
       authorization = {
         ...authorization,
         status: "revoked",
@@ -115,6 +119,8 @@ it("stores self authorization before provisioning a reusable voice", async () =>
   });
 
   assert.equal(result.status, "approved");
+  assert.equal(f.authorization?.reviewedBy, "policy:self");
+  assert.equal(f.authorization?.reviewedAt, f.authorization?.attestedAt);
   assert.deepEqual(f.calls, [
     "voice:owner-check",
     "auth:store:approved",
@@ -138,6 +144,29 @@ it("stores living third-party and deceased requests as pending without provider 
     assert.equal(result.status, "pending_review");
     assert.deepEqual(f.calls, ["voice:owner-check", "auth:store:pending_review"]);
   }
+});
+
+it("cannot relabel a pending deceased voice as living self to bypass review", async () => {
+  const f = fixture();
+  f.setAuthorization({
+    id: "auth-pending", voiceId: "voice-1", userId: "user-1", speakerStatus: "deceased",
+    basis: "close_relative_request", status: "pending_review", reasonCode: "manual_review_required",
+    noticeVersion: "voice-authorization-2026-07-13", ...confirmed,
+    attestedAt: "2026-07-13T10:00:00.000Z", reviewedAt: null, reviewedBy: null,
+    revokedAt: null, createdAt: "2026-07-13T10:00:00.000Z",
+  });
+  const result = await submitVoiceAuthorization({
+    voiceId: "voice-1", userId: "user-1", speakerStatus: "living", basis: "self", ...confirmed,
+  }, {
+    repository: f.repository,
+    store: f.store,
+    provision: async () => { throw new Error("must not run"); },
+  });
+  assert.deepEqual(result, {
+    status: "rejected",
+    reasonCode: "authorization_classification_locked",
+  });
+  assert.deepEqual(f.calls, ["voice:owner-check"]);
 });
 
 it("revokes an existing provider preset when a replacement authorization is pending", async () => {
@@ -176,6 +205,7 @@ it("persists revocation before provider cleanup and reports retryable cleanup", 
     basis: "self", status: "approved", reasonCode: null,
     noticeVersion: "voice-authorization-2026-07-13", ...confirmed,
     attestedAt: "2026-07-13T10:00:00.000Z", reviewedAt: null,
+    reviewedBy: null,
     revokedAt: null, createdAt: "2026-07-13T10:00:00.000Z",
   });
   const result = await revokeStoredVoiceAuthorization("voice-1", "user-1", {
@@ -190,4 +220,23 @@ it("persists revocation before provider cleanup and reports retryable cleanup", 
   assert.deepEqual(result, { status: "revoked", cleanupPending: true });
   assert.deepEqual(f.calls, ["voice:owner-check", "auth:revoke", "provider:revoke"]);
   assert.equal(f.authorization?.status, "revoked");
+});
+
+it("retries preset cleanup for a rejected authorization without rewriting its audit decision", async () => {
+  const f = fixture();
+  f.setAuthorization({
+    id: "auth-rejected", voiceId: "voice-1", userId: "user-1", speakerStatus: "deceased",
+    basis: "close_relative_request", status: "rejected", reasonCode: "insufficient_evidence",
+    noticeVersion: "voice-authorization-2026-07-13", ...confirmed,
+    attestedAt: "2026-07-13T10:00:00.000Z", reviewedAt: "2026-07-13T11:00:00.000Z",
+    reviewedBy: "operator-1", revokedAt: null, createdAt: "2026-07-13T10:00:00.000Z",
+  });
+  const result = await revokeStoredVoiceAuthorization("voice-1", "user-1", {
+    repository: f.repository,
+    store: f.store,
+    revokePreset: async () => { f.calls.push("provider:revoke"); return "revoked"; },
+  });
+  assert.equal(result.status, "rejected");
+  assert.equal(f.authorization?.status, "rejected");
+  assert.deepEqual(f.calls, ["voice:owner-check", "auth:revoke", "provider:revoke"]);
 });
