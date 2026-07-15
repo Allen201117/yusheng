@@ -129,7 +129,7 @@ function insertAudibleTurn(input: {
   mode?: "grounded" | "companionship" | "boundary";
   status?: "completed" | "generation_failed";
   speechTrackingFailed?: boolean;
-  attemptStatus?: "completed" | "failed";
+  attemptStatus?: "started" | "completed" | "failed";
   played?: boolean;
 }) {
   const sentenceId = input.sentenceId || `sentence-${input.turnId}`;
@@ -965,6 +965,46 @@ it("blocks rating while a session turn is still active and allows retry after it
   assert.equal((await repository.getFeedbackEligibility("session-1", "user-1"))?.eligible, true);
   const saved = await repository.submitConversationFeedback(VALID_FEEDBACK);
   assert.equal(saved.id, "feedback-submitted");
+});
+
+it("blocks rating during speech synthesis and allows retry after the attempt fails", async () => {
+  insertSession();
+  for (const turnId of ["turn-heard-1", "turn-heard-2", "turn-heard-3"]) {
+    insertAudibleTurn({ turnId });
+  }
+  insertAudibleTurn({
+    turnId: "turn-synthesizing",
+    attemptStatus: "started",
+    played: false,
+  });
+
+  assert.deepEqual(await repository.getFeedbackEligibility("session-1", "user-1"), {
+    completedAudibleTurnCount: 3,
+    requiredAudibleTurnCount: 3,
+    eligible: false,
+    sessionStatus: "active",
+    alreadySubmitted: false,
+  });
+  await assert.rejects(repository.submitConversationFeedback(VALID_FEEDBACK), (error: unknown) => {
+    assert.equal((error as Error).message, "feedback_session_not_eligible");
+    assert.equal((error as { completedAudibleTurnCount: number }).completedAudibleTurnCount, 3);
+    return true;
+  });
+  assert.equal(
+    (database.prepare("SELECT status FROM conversation_sessions WHERE id = 'session-1'").get() as { status: string }).status,
+    "active",
+  );
+  assert.equal(
+    await repository.failTtsAttempt({
+      id: "attempt-turn-synthesizing",
+      evaluatorUserId: "user-1",
+      stableErrorCode: "provider_timeout",
+      totalMs: 100,
+    }),
+    true,
+  );
+  assert.equal((await repository.getFeedbackEligibility("session-1", "user-1"))?.eligible, true);
+  assert.equal((await repository.submitConversationFeedback(VALID_FEEDBACK)).id, "feedback-submitted");
 });
 
 it("does not turn three attempts from only two turns into three audible turns", async () => {

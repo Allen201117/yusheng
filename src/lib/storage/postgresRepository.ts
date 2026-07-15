@@ -2159,6 +2159,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
         already_submitted: boolean;
         completed_audible_turn_count: number | string;
         has_no_started_turn: boolean;
+        has_no_started_attempt: boolean;
       }>(
         `WITH owned_session AS (
            SELECT id, persona_id, evaluator_user_id, status
@@ -2194,7 +2195,13 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
                   SELECT 1 FROM conversation_turns started
                   WHERE started.session_id = owned.id AND started.persona_id = owned.persona_id
                     AND started.status = 'started'
-                ) AS has_no_started_turn
+                ) AS has_no_started_turn,
+                NOT EXISTS (
+                  SELECT 1 FROM tts_attempts started_attempt
+                  WHERE started_attempt.session_id = owned.id
+                    AND started_attempt.persona_id = owned.persona_id
+                    AND started_attempt.status = 'started'
+                ) AS has_no_started_attempt
          FROM owned_session owned`,
         [sessionId, evaluatorUserId],
       );
@@ -2207,6 +2214,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
         eligible: rows[0].status === "active"
           && !alreadySubmitted
           && Boolean(rows[0].has_no_started_turn)
+          && Boolean(rows[0].has_no_started_attempt)
           && count >= 3,
         sessionStatus: rows[0].status,
         alreadySubmitted,
@@ -2246,13 +2254,20 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
           const rows = await transaction.query<{
             count: number | string;
             has_started_turn: boolean;
+            has_started_attempt: boolean;
           }>(
             `SELECT COUNT(DISTINCT turn.id) AS count,
                     EXISTS (
                       SELECT 1 FROM conversation_turns started
                       WHERE started.session_id = $1 AND started.persona_id = $2
                         AND started.status = 'started'
-                    ) AS has_started_turn
+                    ) AS has_started_turn,
+                    EXISTS (
+                      SELECT 1 FROM tts_attempts started_attempt
+                      WHERE started_attempt.session_id = $1
+                        AND started_attempt.persona_id = $2
+                        AND started_attempt.status = 'started'
+                    ) AS has_started_attempt
              FROM conversation_turns turn
              WHERE turn.session_id = $1 AND turn.persona_id = $2
                AND turn.status = 'completed'
@@ -2273,6 +2288,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
           return {
             count: Number(rows[0]?.count || 0),
             hasStartedTurn: Boolean(rows[0]?.has_started_turn),
+            hasStartedAttempt: Boolean(rows[0]?.has_started_attempt),
           };
         };
 
@@ -2328,7 +2344,12 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
         if (existing.length > 0) throw new Error("feedback_already_submitted");
 
         const evidence = await loadQualification(session);
-        if (session.status !== "active" || evidence.count < 3 || evidence.hasStartedTurn) {
+        if (
+          session.status !== "active"
+          || evidence.count < 3
+          || evidence.hasStartedTurn
+          || evidence.hasStartedAttempt
+        ) {
           throw Object.assign(new Error("feedback_session_not_eligible"), {
             completedAudibleTurnCount: evidence.count,
             requiredAudibleTurnCount: 3,

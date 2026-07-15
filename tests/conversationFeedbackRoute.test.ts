@@ -242,6 +242,14 @@ it("maps duplicate and insufficient evidence to stable narrow errors", async () 
     completedAudibleTurnCount: 3,
     requiredAudibleTurnCount: 3,
   });
+
+  const synthesizing = fixture({ repositoryError: Object.assign(
+    new Error("feedback_session_not_eligible"),
+    { completedAudibleTurnCount: 3, requiredAudibleTurnCount: 3 },
+  ) });
+  const synthesizingResponse = await synthesizing.handlers.POST(request("POST", VALID_BODY));
+  assert.equal(synthesizingResponse.status, 422);
+  assert.equal((await synthesizingResponse.json()).code, "FEEDBACK_SESSION_NOT_ELIGIBLE");
 });
 
 it("red lines override high scores and generic failures never leak feedback", async () => {

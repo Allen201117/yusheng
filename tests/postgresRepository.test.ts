@@ -1714,6 +1714,7 @@ it("reads only owner-scoped feedback eligibility from distinct audible turns", a
         already_submitted: false,
         completed_audible_turn_count: "3",
         has_no_started_turn: true,
+        has_no_started_attempt: true,
       }];
     }
     throw new Error(`unexpected query: ${text}`);
@@ -1737,6 +1738,7 @@ it("reads only owner-scoped feedback eligibility from distinct audible turns", a
   assert.match(count.text, /playback\.event_type = 'play_started'/);
   assert.match(count.text, /status = 'started'/);
   assert.match(count.text, /NOT EXISTS|has_started_turn/);
+  assert.match(count.text, /tts_attempts[\s\S]*status = 'started'/);
   assert.doesNotMatch(count.text, /play_completed/);
   assert.deepEqual(count.params, ["session-1", "user-1"]);
   assertContiguousPostgresPlaceholders(count);
@@ -1790,7 +1792,9 @@ it("atomically submits feedback using only the locked session identity snapshot"
     if (text.includes("FROM personas") && text.includes("FOR UPDATE")) return [{ id: "persona-server" }];
     if (text.includes("FROM conversation_sessions") && text.includes("FOR UPDATE")) return [session];
     if (text.includes("SELECT id FROM conversation_feedback")) return [];
-    if (text.includes("COUNT(DISTINCT turn.id)")) return [{ count: 3, has_started_turn: false }];
+    if (text.includes("COUNT(DISTINCT turn.id)")) {
+      return [{ count: 3, has_started_turn: false, has_started_attempt: false }];
+    }
     if (text.includes("INSERT INTO conversation_feedback")) return [feedback];
     if (text.includes("UPDATE conversation_sessions")) return [{ id: "session-1" }];
     throw new Error(`unexpected query: ${text}`);
@@ -1818,6 +1822,7 @@ it("atomically submits feedback using only the locked session identity snapshot"
   const count = fake.calls.find((call) => call.text.includes("COUNT(DISTINCT turn.id)"))!;
   assert.match(count.text, /COUNT\(DISTINCT turn\.id\)/);
   assert.match(count.text, /status = 'started'/);
+  assert.match(count.text, /tts_attempts[\s\S]*status = 'started'/);
   assert.deepEqual(count.params, ["session-1", "persona-server"]);
   const insert = fake.calls.find((call) => call.text.includes("INSERT INTO conversation_feedback"))!;
   assert.deepEqual(insert.params.slice(0, 5), [
@@ -1861,7 +1866,9 @@ it("rejects duplicate or insufficient feedback before insertion", async () => {
     if (text.includes("FROM conversation_sessions")) return [session];
     if (text.includes("FROM personas")) return [{ id: "persona-1" }];
     if (text.includes("SELECT id FROM conversation_feedback")) return [];
-    if (text.includes("COUNT(DISTINCT turn.id)")) return [{ count: 2, has_started_turn: false }];
+    if (text.includes("COUNT(DISTINCT turn.id)")) {
+      return [{ count: 2, has_started_turn: false, has_started_attempt: false }];
+    }
     throw new Error(`unexpected query: ${text}`);
   });
   await assert.rejects(
@@ -1893,7 +1900,9 @@ it("blocks Postgres feedback while any turn in the locked session is started", a
     if (text.includes("FROM conversation_sessions")) return [session];
     if (text.includes("FROM personas")) return [{ id: "persona-1" }];
     if (text.includes("SELECT id FROM conversation_feedback")) return [];
-    if (text.includes("COUNT(DISTINCT turn.id)")) return [{ count: 3, has_started_turn: true }];
+    if (text.includes("COUNT(DISTINCT turn.id)")) {
+      return [{ count: 3, has_started_turn: true, has_started_attempt: false }];
+    }
     throw new Error(`unexpected query: ${text}`);
   });
   await assert.rejects(
@@ -1933,7 +1942,9 @@ it("maps a concurrent session status change without feedback to not eligible", a
       if (sessionReads === 2) return [];
       return [{ status: "expired", already_submitted: false }];
     }
-    if (text.includes("COUNT(DISTINCT turn.id)")) return [{ count: 3, has_started_turn: false }];
+    if (text.includes("COUNT(DISTINCT turn.id)")) {
+      return [{ count: 3, has_started_turn: false, has_started_attempt: false }];
+    }
     throw new Error(`unexpected query: ${text}`);
   });
   await assert.rejects(
@@ -1945,6 +1956,43 @@ it("maps a concurrent session status change without feedback to not eligible", a
     },
   );
   assert.equal(fake.calls.some((call) => call.text.includes("INSERT INTO conversation_feedback")), false);
+});
+
+it("blocks Postgres feedback while speech synthesis is still started", async () => {
+  const now = "2026-07-15T00:00:00.000Z";
+  const session = {
+    id: "session-1",
+    persona_id: "persona-1",
+    evaluator_user_id: "user-1",
+    voice_id: "voice-1",
+    voice_authorization_id: "auth-1",
+    cohort: "living",
+    status: "active",
+    started_at: now,
+    last_activity_at: now,
+    rated_at: null,
+  };
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM conversation_sessions")) return [session];
+    if (text.includes("FROM personas")) return [{ id: "persona-1" }];
+    if (text.includes("SELECT id FROM conversation_feedback")) return [];
+    if (text.includes("COUNT(DISTINCT turn.id)")) {
+      return [{ count: 3, has_started_turn: false, has_started_attempt: true }];
+    }
+    throw new Error(`unexpected query: ${text}`);
+  });
+  await assert.rejects(
+    createPostgresRepository(fake.executor).submitConversationFeedback(POSTGRES_FEEDBACK_INPUT),
+    (error: unknown) => {
+      assert.equal((error as Error).message, "feedback_session_not_eligible");
+      assert.equal((error as { completedAudibleTurnCount: number }).completedAudibleTurnCount, 3);
+      return true;
+    },
+  );
+  const qualification = fake.calls.find((call) => call.text.includes("COUNT(DISTINCT turn.id)"))!;
+  assert.match(qualification.text, /tts_attempts[\s\S]*status = 'started'/);
+  assert.equal(fake.calls.some((call) => call.text.includes("INSERT INTO conversation_feedback")), false);
+  assert.equal(fake.calls.some((call) => call.text.includes("UPDATE conversation_sessions")), false);
 });
 
 it("locks the persona before persisting a null-session boundary turn", async () => {
