@@ -6,6 +6,8 @@ import {
   completeTtsAttempt,
   failTtsAttempt,
   recordPlaybackEvent,
+  getFeedbackEligibility,
+  submitConversationFeedback,
   completeConversationTurn,
   countPersonasUsingVoice,
   createPersonaKnowledgeCandidates,
@@ -179,6 +181,12 @@ export function createLocalRepository(): AppRepository {
     async completeTtsAttempt(input) { return completeTtsAttempt(input); },
     async failTtsAttempt(input) { return failTtsAttempt(input); },
     async recordPlaybackEvent(input) { return recordPlaybackEvent(input); },
+    async getFeedbackEligibility(sessionId, evaluatorUserId) {
+      return getFeedbackEligibility(sessionId, evaluatorUserId);
+    },
+    async submitConversationFeedback(input) {
+      return submitConversationFeedback(input);
+    },
     async failConversationTurn(input) { return failConversationTurn(input); },
     async listMessageEvidence(assistantMessageId, personaId) {
       return listMessageEvidence(assistantMessageId, personaId);

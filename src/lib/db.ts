@@ -21,8 +21,12 @@ import type {
   ConfirmedConversationKnowledge,
   ConversationEmbeddingUpdate,
   ConversationSession,
+  ConversationFeedback,
   ConversationSentence,
+  EvaluatorRelation,
+  FeedbackEligibility,
   PlaybackEvent,
+  RestorationScores,
   TtsAttempt,
   ConversationTurn,
   ConversationTurnEvidence,
@@ -2023,6 +2027,156 @@ export function recordPlaybackEvent(input: {
       return { event: rowToPlaybackEvent(byAttemptType), created: false };
     }
     throw new Error("playback_event_conflict");
+  }).immediate();
+}
+
+function completedAudibleTurnCount(
+  database: Database.Database,
+  sessionId: string,
+  evaluatorUserId: string,
+): number {
+  const row = database.prepare(
+    `SELECT COUNT(DISTINCT turn.id) AS count
+     FROM conversation_turns turn
+     JOIN conversation_sessions sessions
+       ON sessions.id = turn.session_id AND sessions.persona_id = turn.persona_id
+     WHERE turn.session_id = ? AND sessions.evaluator_user_id = ?
+       AND turn.status = 'completed'
+       AND turn.mode IN ('grounded', 'companionship')
+       AND turn.speech_tracking_failed = 0
+       AND EXISTS (
+         SELECT 1
+         FROM tts_attempts attempt
+         JOIN playback_events playback
+           ON playback.tts_attempt_id = attempt.id AND playback.event_type = 'play_started'
+         WHERE attempt.session_id = turn.session_id
+           AND attempt.turn_id = turn.id
+           AND attempt.persona_id = turn.persona_id
+           AND attempt.status = 'completed'
+       )`,
+  ).get(sessionId, evaluatorUserId) as { count: number };
+  return Number(row.count);
+}
+
+function feedbackNotEligibleError(completedAudibleTurnCount: number): Error {
+  return Object.assign(new Error("feedback_session_not_eligible"), {
+    completedAudibleTurnCount,
+    requiredAudibleTurnCount: 3,
+  });
+}
+
+function rowToConversationFeedback(row: any): ConversationFeedback {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    personaId: row.persona_id,
+    evaluatorUserId: row.evaluator_user_id,
+    evaluatorRelation: row.evaluator_relation,
+    knowsVoiceOwner: true,
+    heardAllRounds: true,
+    voiceSimilarity: Number(row.voice_similarity),
+    expressionSimilarity: Number(row.expression_similarity),
+    emotionFit: Number(row.emotion_fit),
+    factTrust: Number(row.fact_trust),
+    discomfort: Number(row.discomfort),
+    majorFabrication: Boolean(row.major_fabrication),
+    identityImpersonation: Boolean(row.identity_impersonation),
+    authorizationViolation: Boolean(row.authorization_violation),
+    comment: row.comment,
+    createdAt: sqliteIso(row.created_at),
+  };
+}
+
+export function getFeedbackEligibility(
+  sessionId: string,
+  evaluatorUserId: string,
+): FeedbackEligibility | null {
+  const database = getDb();
+  const session = database.prepare(
+    `SELECT status FROM conversation_sessions
+     WHERE id = ? AND evaluator_user_id = ?`,
+  ).get(sessionId, evaluatorUserId) as { status: FeedbackEligibility["sessionStatus"] } | undefined;
+  if (!session) return null;
+  const alreadySubmitted = Boolean(database.prepare(
+    `SELECT 1 FROM conversation_feedback
+     WHERE session_id = ? AND evaluator_user_id = ?`,
+  ).get(sessionId, evaluatorUserId));
+  const count = completedAudibleTurnCount(database, sessionId, evaluatorUserId);
+  return {
+    completedAudibleTurnCount: count,
+    requiredAudibleTurnCount: 3,
+    eligible: session.status === "active" && !alreadySubmitted && count >= 3,
+    sessionStatus: session.status,
+    alreadySubmitted,
+  };
+}
+
+export function submitConversationFeedback(input: {
+  id: string;
+  sessionId: string;
+  evaluatorUserId: string;
+  evaluatorRelation: EvaluatorRelation;
+  knowsVoiceOwner: true;
+  heardAllRounds: true;
+  scores: RestorationScores;
+  comment: string | null;
+}): ConversationFeedback {
+  const database = getDb();
+  return database.transaction(() => {
+    const session = database.prepare(
+      `SELECT id, persona_id, evaluator_user_id, cohort, status
+       FROM conversation_sessions
+       WHERE id = ? AND evaluator_user_id = ?`,
+    ).get(input.sessionId, input.evaluatorUserId) as {
+      id: string;
+      persona_id: string;
+      evaluator_user_id: string;
+      cohort: "living" | "deceased";
+      status: "active" | "rated" | "expired";
+    } | undefined;
+    if (!session) throw new Error("feedback_session_forbidden");
+
+    const existing = database.prepare(
+      `SELECT 1 FROM conversation_feedback
+       WHERE session_id = ? AND evaluator_user_id = ?`,
+    ).get(input.sessionId, input.evaluatorUserId);
+    if (existing) throw new Error("feedback_already_submitted");
+
+    const count = completedAudibleTurnCount(database, input.sessionId, input.evaluatorUserId);
+    if (session.status !== "active" || count < 3) throw feedbackNotEligibleError(count);
+
+    const row = database.prepare(
+      `INSERT INTO conversation_feedback
+         (id, session_id, persona_id, evaluator_user_id, evaluator_relation,
+          knows_voice_owner, heard_all_rounds, voice_similarity,
+          expression_similarity, emotion_fit, fact_trust, discomfort,
+          major_fabrication, identity_impersonation, authorization_violation, comment)
+       VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       RETURNING *`,
+    ).get(
+      input.id,
+      session.id,
+      session.persona_id,
+      session.evaluator_user_id,
+      input.evaluatorRelation,
+      input.scores.voiceSimilarity,
+      input.scores.expressionSimilarity,
+      input.scores.emotionFit,
+      input.scores.factTrust,
+      input.scores.discomfort,
+      input.scores.majorFabrication ? 1 : 0,
+      input.scores.identityImpersonation ? 1 : 0,
+      input.scores.authorizationViolation ? 1 : 0,
+      input.comment,
+    );
+    if (!row) throw new Error("feedback_persistence_failed");
+    const rated = database.prepare(
+      `UPDATE conversation_sessions
+       SET status = 'rated', rated_at = ?
+       WHERE id = ? AND evaluator_user_id = ? AND status = 'active'`,
+    ).run(new Date().toISOString(), session.id, session.evaluator_user_id);
+    if (rated.changes !== 1) throw new Error("feedback_session_status_changed");
+    return rowToConversationFeedback(row);
   }).immediate();
 }
 

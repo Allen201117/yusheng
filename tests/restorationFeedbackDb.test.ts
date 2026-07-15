@@ -122,6 +122,95 @@ function insertAttempt(id = "attempt-1", attemptNo = 1, sentenceId = "sentence-1
   ).run(id, sentenceId, attemptNo, NOW, NOW);
 }
 
+function insertAudibleTurn(input: {
+  turnId: string;
+  sentenceId?: string;
+  attemptId?: string;
+  mode?: "grounded" | "companionship" | "boundary";
+  status?: "completed" | "generation_failed";
+  speechTrackingFailed?: boolean;
+  attemptStatus?: "completed" | "failed";
+  played?: boolean;
+}) {
+  const sentenceId = input.sentenceId || `sentence-${input.turnId}`;
+  const attemptId = input.attemptId || `attempt-${input.turnId}`;
+  const userMessageId = `user-${input.turnId}`;
+  const assistantMessageId = `assistant-${input.turnId}`;
+  database.prepare(
+    `INSERT INTO messages (id, persona_id, role, content, created_at)
+     VALUES (?, 'persona-1', 'user', '你好', ?)`,
+  ).run(userMessageId, NOW);
+  if ((input.status || "completed") === "completed") {
+    database.prepare(
+      `INSERT INTO messages (id, persona_id, role, content, created_at)
+       VALUES (?, 'persona-1', 'assistant', '我在', ?)`,
+    ).run(assistantMessageId, NOW);
+  }
+  database.prepare(
+    `INSERT INTO conversation_turns
+       (id, session_id, persona_id, user_message_id, assistant_message_id, mode,
+        status, boundary_kind, total_ms, speech_tracking_failed, created_at, updated_at)
+     VALUES (?, 'session-1', 'persona-1', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    input.turnId,
+    userMessageId,
+    (input.status || "completed") === "completed" ? assistantMessageId : null,
+    input.mode || "companionship",
+    input.status || "completed",
+    input.mode === "boundary" ? "identity" : null,
+    (input.status || "completed") === "completed" ? 20 : null,
+    input.speechTrackingFailed ? 1 : 0,
+    NOW,
+    NOW,
+  );
+  database.prepare(
+    `INSERT INTO conversation_sentences
+       (id, session_id, turn_id, persona_id, sentence_index, text, emotion,
+        intensity, speed, pause_after_ms, planner_version, created_at)
+     VALUES (?, 'session-1', ?, 'persona-1', 0, '我在', 'warm', 50, 1, 300, 'v1', ?)`,
+  ).run(sentenceId, input.turnId, NOW);
+  database.prepare(
+    `INSERT INTO tts_attempts
+       (id, sentence_id, session_id, turn_id, persona_id, voice_id, attempt_no,
+        status, voice_source, tts_model, tts_config_version, created_at, completed_at)
+     VALUES (?, ?, 'session-1', ?, 'persona-1', 'voice-1', 1, ?, 'dynamic', 'v1', 'v1', ?, ?)`,
+  ).run(
+    attemptId,
+    sentenceId,
+    input.turnId,
+    input.attemptStatus || "completed",
+    NOW,
+    (input.attemptStatus || "completed") === "completed" ? NOW : null,
+  );
+  if (input.played !== false) {
+    database.prepare(
+      `INSERT INTO playback_events
+         (event_id, tts_attempt_id, event_type, client_elapsed_ms, received_at)
+       VALUES (?, ?, 'play_started', 10, ?)`,
+    ).run(`event-${attemptId}`, attemptId, NOW);
+  }
+}
+
+const VALID_FEEDBACK = {
+  id: "feedback-submitted",
+  sessionId: "session-1",
+  evaluatorUserId: "user-1",
+  evaluatorRelation: "family" as const,
+  knowsVoiceOwner: true as const,
+  heardAllRounds: true as const,
+  scores: {
+    voiceSimilarity: 5,
+    expressionSimilarity: 4,
+    emotionFit: 4,
+    factTrust: 5,
+    discomfort: 2,
+    majorFabrication: false,
+    identityImpersonation: false,
+    authorizationViolation: false,
+  },
+  comment: "像本人",
+};
+
 it("creates all restoration feedback tables and legacy-safe turn columns", () => {
   const tables = database.prepare(
     `SELECT name FROM sqlite_master
@@ -809,6 +898,113 @@ it("accepts one attested bounded feedback row per session and evaluator", () => 
   assert.throws(
     () => insert.run("feedback-long-comment", 1, 1, 4, "x".repeat(1001), NOW),
     /CHECK constraint failed/,
+  );
+});
+
+it("counts distinct completed audible turns and excludes ineligible evidence", async () => {
+  insertSession();
+  insertAudibleTurn({ turnId: "turn-good-1" });
+  insertAudibleTurn({ turnId: "turn-good-2", mode: "grounded" });
+  insertAudibleTurn({ turnId: "turn-boundary", mode: "boundary" });
+  insertAudibleTurn({ turnId: "turn-failed", status: "generation_failed" });
+  insertAudibleTurn({ turnId: "turn-unplayed", played: false });
+  insertAudibleTurn({ turnId: "turn-tts-failed", attemptStatus: "failed", played: false });
+  insertAudibleTurn({ turnId: "turn-tracking-failed", speechTrackingFailed: true });
+  const firstEligibility = await repository.getFeedbackEligibility("session-1", "user-1");
+  assert.deepEqual(firstEligibility, {
+    completedAudibleTurnCount: 2,
+    requiredAudibleTurnCount: 3,
+    eligible: false,
+    sessionStatus: "active",
+    alreadySubmitted: false,
+  });
+  await assert.rejects(repository.submitConversationFeedback(VALID_FEEDBACK), (error: unknown) => {
+    assert.equal((error as Error).message, "feedback_session_not_eligible");
+    assert.equal((error as { completedAudibleTurnCount: number }).completedAudibleTurnCount, 2);
+    assert.equal((error as { requiredAudibleTurnCount: number }).requiredAudibleTurnCount, 3);
+    return true;
+  });
+
+  insertAudibleTurn({ turnId: "turn-good-3" });
+  assert.equal((await repository.getFeedbackEligibility("session-1", "user-1"))?.eligible, true);
+});
+
+it("does not turn three attempts from only two turns into three audible turns", async () => {
+  insertSession();
+  insertAudibleTurn({ turnId: "turn-one" });
+  insertAudibleTurn({ turnId: "turn-two" });
+  database.prepare(
+    `INSERT INTO tts_attempts
+       (id, sentence_id, session_id, turn_id, persona_id, voice_id, attempt_no,
+        status, voice_source, tts_model, tts_config_version, created_at, completed_at)
+     VALUES ('attempt-turn-two-retry', 'sentence-turn-two', 'session-1', 'turn-two',
+             'persona-1', 'voice-1', 2, 'completed', 'dynamic', 'v1', 'v1', ?, ?)`,
+  ).run(NOW, NOW);
+  database.prepare(
+    `INSERT INTO playback_events
+       (event_id, tts_attempt_id, event_type, client_elapsed_ms, received_at)
+     VALUES ('event-turn-two-retry', 'attempt-turn-two-retry', 'play_started', 12, ?)`,
+  ).run(NOW);
+  assert.equal(
+    (await repository.getFeedbackEligibility("session-1", "user-1"))?.completedAudibleTurnCount,
+    2,
+  );
+});
+
+it("submits immutable owner-scoped feedback and rates the server-owned session", async () => {
+  insertSession();
+  for (const turnId of ["turn-a", "turn-b", "turn-c"]) insertAudibleTurn({ turnId });
+  assert.equal(await repository.getFeedbackEligibility("session-1", "user-2"), null);
+  await assert.rejects(repository.submitConversationFeedback({
+    ...VALID_FEEDBACK,
+    evaluatorUserId: "user-2",
+  }), /feedback_session_forbidden/);
+
+  const saved = await repository.submitConversationFeedback(VALID_FEEDBACK);
+  assert.equal(saved.personaId, "persona-1");
+  assert.equal(saved.evaluatorUserId, "user-1");
+  assert.equal(saved.comment, "像本人");
+  assert.deepEqual(database.prepare(
+    `SELECT cohort, status, rated_at IS NOT NULL AS has_rated_at
+     FROM conversation_sessions WHERE id = 'session-1'`,
+  ).get(), { cohort: "living", status: "rated", has_rated_at: 1 });
+  assert.deepEqual(await repository.getFeedbackEligibility("session-1", "user-1"), {
+    completedAudibleTurnCount: 3,
+    requiredAudibleTurnCount: 3,
+    eligible: false,
+    sessionStatus: "rated",
+    alreadySubmitted: true,
+  });
+  await assert.rejects(repository.submitConversationFeedback({
+    ...VALID_FEEDBACK,
+    id: "feedback-second",
+  }), /feedback_already_submitted/);
+  assert.equal(
+    (database.prepare("SELECT COUNT(*) AS count FROM conversation_feedback").get() as { count: number }).count,
+    1,
+  );
+});
+
+it("rolls feedback insertion back when rating the session fails", async () => {
+  insertSession();
+  for (const turnId of ["turn-r1", "turn-r2", "turn-r3"]) insertAudibleTurn({ turnId });
+  database.exec(`
+    CREATE TRIGGER reject_rating_for_test
+    BEFORE UPDATE OF status ON conversation_sessions
+    WHEN NEW.status = 'rated'
+    BEGIN
+      SELECT RAISE(ABORT, 'rating rejected');
+    END;
+  `);
+  await assert.rejects(repository.submitConversationFeedback(VALID_FEEDBACK), /rating rejected/);
+  database.exec("DROP TRIGGER reject_rating_for_test");
+  assert.equal(
+    (database.prepare("SELECT COUNT(*) AS count FROM conversation_feedback").get() as { count: number }).count,
+    0,
+  );
+  assert.equal(
+    (database.prepare("SELECT status FROM conversation_sessions WHERE id = 'session-1'").get() as { status: string }).status,
+    "active",
   );
 });
 

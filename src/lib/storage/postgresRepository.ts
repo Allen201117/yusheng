@@ -12,6 +12,7 @@ import type {
   ConfirmedConversationKnowledge,
   ConversationEmbeddingUpdate,
   ConversationSession,
+  ConversationFeedback,
   ConversationSentence,
   PlaybackEvent,
   TtsAttempt,
@@ -25,6 +26,8 @@ import type {
   InsertMemoryInput,
   InsertMessageInput,
   GroundingEvidenceKind,
+  EvaluatorRelation,
+  FeedbackEligibility,
   Memory,
   MemoryEmbedding,
   Message,
@@ -41,6 +44,7 @@ import type {
   PersonaSource,
   RelationshipMemory,
   RestorationCohort,
+  RestorationScores,
   SpeechStyleItem,
   User,
   VoiceAuthorization,
@@ -222,6 +226,26 @@ type ConversationSessionRow = {
   started_at: Date | string;
   last_activity_at: Date | string;
   rated_at: Date | string | null;
+};
+
+type ConversationFeedbackRow = {
+  id: string;
+  session_id: string;
+  persona_id: string;
+  evaluator_user_id: string;
+  evaluator_relation: EvaluatorRelation;
+  knows_voice_owner: boolean;
+  heard_all_rounds: boolean;
+  voice_similarity: number | string;
+  expression_similarity: number | string;
+  emotion_fit: number | string;
+  fact_trust: number | string;
+  discomfort: number | string;
+  major_fabrication: boolean;
+  identity_impersonation: boolean;
+  authorization_violation: boolean;
+  comment: string | null;
+  created_at: Date | string;
 };
 
 type ConversationTurnEvidenceRow = {
@@ -774,6 +798,28 @@ function mapConversationSession(row: ConversationSessionRow): ConversationSessio
     startedAt: toIsoString(row.started_at),
     lastActivityAt: toIsoString(row.last_activity_at),
     ratedAt: row.rated_at === null ? null : toIsoString(row.rated_at),
+  };
+}
+
+function mapConversationFeedback(row: ConversationFeedbackRow): ConversationFeedback {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    personaId: row.persona_id,
+    evaluatorUserId: row.evaluator_user_id,
+    evaluatorRelation: row.evaluator_relation,
+    knowsVoiceOwner: true,
+    heardAllRounds: true,
+    voiceSimilarity: Number(row.voice_similarity),
+    expressionSimilarity: Number(row.expression_similarity),
+    emotionFit: Number(row.emotion_fit),
+    factTrust: Number(row.fact_trust),
+    discomfort: Number(row.discomfort),
+    majorFabrication: Boolean(row.major_fabrication),
+    identityImpersonation: Boolean(row.identity_impersonation),
+    authorizationViolation: Boolean(row.authorization_violation),
+    comment: row.comment,
+    createdAt: toIsoString(row.created_at),
   };
 }
 
@@ -2101,6 +2147,154 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
           return { event: mapPlaybackEvent(byAttemptType), created: false };
         }
         throw new Error("playback_event_conflict");
+      });
+    },
+
+    async getFeedbackEligibility(
+      sessionId: string,
+      evaluatorUserId: string,
+    ): Promise<FeedbackEligibility | null> {
+      const sessions = await sql.query<{ status: FeedbackEligibility["sessionStatus"] }>(
+        `SELECT status FROM conversation_sessions
+         WHERE id = $1 AND evaluator_user_id = $2`,
+        [sessionId, evaluatorUserId],
+      );
+      if (sessions.length !== 1) return null;
+      const existing = await sql.query<{ exists: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM conversation_feedback
+           WHERE session_id = $1 AND evaluator_user_id = $2
+         ) AS exists`,
+        [sessionId, evaluatorUserId],
+      );
+      const counts = await sql.query<{ count: number | string }>(
+        `SELECT COUNT(DISTINCT turn.id) AS count
+         FROM conversation_turns turn
+         JOIN conversation_sessions sessions
+           ON sessions.id = turn.session_id AND sessions.persona_id = turn.persona_id
+         WHERE turn.session_id = $1 AND sessions.evaluator_user_id = $2
+           AND turn.status = 'completed'
+           AND turn.mode IN ('grounded', 'companionship')
+           AND turn.speech_tracking_failed = false
+           AND EXISTS (
+             SELECT 1
+             FROM tts_attempts attempt
+             JOIN playback_events playback
+               ON playback.tts_attempt_id = attempt.id AND playback.event_type = 'play_started'
+             WHERE attempt.session_id = turn.session_id
+               AND attempt.turn_id = turn.id
+               AND attempt.persona_id = turn.persona_id
+               AND attempt.status = 'completed'
+           )`,
+        [sessionId, evaluatorUserId],
+      );
+      const count = Number(counts[0]?.count || 0);
+      const alreadySubmitted = Boolean(existing[0]?.exists);
+      return {
+        completedAudibleTurnCount: count,
+        requiredAudibleTurnCount: 3,
+        eligible: sessions[0].status === "active" && !alreadySubmitted && count >= 3,
+        sessionStatus: sessions[0].status,
+        alreadySubmitted,
+      };
+    },
+
+    async submitConversationFeedback(input: {
+      id: string;
+      sessionId: string;
+      evaluatorUserId: string;
+      evaluatorRelation: EvaluatorRelation;
+      knowsVoiceOwner: true;
+      heardAllRounds: true;
+      scores: RestorationScores;
+      comment: string | null;
+    }): Promise<ConversationFeedback> {
+      return sql.transaction(async (transaction) => {
+        const sessions = await transaction.query<ConversationSessionRow>(
+          `SELECT id, persona_id, evaluator_user_id, voice_id, voice_authorization_id,
+                  cohort, status, started_at, last_activity_at, rated_at
+           FROM conversation_sessions
+           WHERE id = $1 AND evaluator_user_id = $2
+           FOR UPDATE`,
+          [input.sessionId, input.evaluatorUserId],
+        );
+        if (sessions.length !== 1) throw new Error("feedback_session_forbidden");
+        const session = sessions[0];
+
+        const existing = await transaction.query<{ id: string }>(
+          `SELECT id FROM conversation_feedback
+           WHERE session_id = $1 AND evaluator_user_id = $2`,
+          [session.id, session.evaluator_user_id],
+        );
+        if (existing.length > 0) throw new Error("feedback_already_submitted");
+
+        const counts = await transaction.query<{ count: number | string }>(
+          `SELECT COUNT(DISTINCT turn.id) AS count
+           FROM conversation_turns turn
+           WHERE turn.session_id = $1 AND turn.persona_id = $2
+             AND turn.status = 'completed'
+             AND turn.mode IN ('grounded', 'companionship')
+             AND turn.speech_tracking_failed = false
+             AND EXISTS (
+               SELECT 1
+               FROM tts_attempts attempt
+               JOIN playback_events playback
+                 ON playback.tts_attempt_id = attempt.id AND playback.event_type = 'play_started'
+               WHERE attempt.session_id = turn.session_id
+                 AND attempt.turn_id = turn.id
+                 AND attempt.persona_id = turn.persona_id
+                 AND attempt.status = 'completed'
+             )`,
+          [session.id, session.persona_id],
+        );
+        const count = Number(counts[0]?.count || 0);
+        if (session.status !== "active" || count < 3) {
+          throw Object.assign(new Error("feedback_session_not_eligible"), {
+            completedAudibleTurnCount: count,
+            requiredAudibleTurnCount: 3,
+          });
+        }
+
+        const rows = await transaction.query<ConversationFeedbackRow>(
+          `INSERT INTO conversation_feedback
+             (id, session_id, persona_id, evaluator_user_id, evaluator_relation,
+              knows_voice_owner, heard_all_rounds, voice_similarity,
+              expression_similarity, emotion_fit, fact_trust, discomfort,
+              major_fabrication, identity_impersonation, authorization_violation, comment)
+           VALUES ($1, $2, $3, $4, $5, true, true, $6, $7, $8, $9, $10,
+                   $11, $12, $13, $14)
+           RETURNING id, session_id, persona_id, evaluator_user_id, evaluator_relation,
+                     knows_voice_owner, heard_all_rounds, voice_similarity,
+                     expression_similarity, emotion_fit, fact_trust, discomfort,
+                     major_fabrication, identity_impersonation, authorization_violation,
+                     comment, created_at`,
+          [
+            input.id,
+            session.id,
+            session.persona_id,
+            session.evaluator_user_id,
+            input.evaluatorRelation,
+            input.scores.voiceSimilarity,
+            input.scores.expressionSimilarity,
+            input.scores.emotionFit,
+            input.scores.factTrust,
+            input.scores.discomfort,
+            input.scores.majorFabrication,
+            input.scores.identityImpersonation,
+            input.scores.authorizationViolation,
+            input.comment,
+          ],
+        );
+        if (rows.length !== 1) throw new Error("feedback_persistence_failed");
+        const rated = await transaction.query<{ id: string }>(
+          `UPDATE conversation_sessions
+           SET status = 'rated', rated_at = now()
+           WHERE id = $1 AND evaluator_user_id = $2 AND status = 'active'
+           RETURNING id`,
+          [session.id, session.evaluator_user_id],
+        );
+        if (rated.length !== 1) throw new Error("feedback_session_status_changed");
+        return mapConversationFeedback(rows[0]);
       });
     },
 

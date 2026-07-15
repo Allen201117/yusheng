@@ -659,6 +659,20 @@ export interface AppRepository {
     eventType: PlaybackEventType;
     clientElapsedMs: number;
   }): Promise<{ event: PlaybackEvent; created: boolean }>;
+  getFeedbackEligibility(
+    sessionId: string,
+    evaluatorUserId: string,
+  ): Promise<FeedbackEligibility | null>;
+  submitConversationFeedback(input: {
+    id: string;
+    sessionId: string;
+    evaluatorUserId: string;
+    evaluatorRelation: EvaluatorRelation;
+    knowsVoiceOwner: true;
+    heardAllRounds: true;
+    scores: RestorationScores;
+    comment: string | null;
+  }): Promise<ConversationFeedback>;
   failConversationTurn(input: {
     turnId: string;
     personaId: string;
