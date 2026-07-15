@@ -228,6 +228,20 @@ it("maps duplicate and insufficient evidence to stable narrow errors", async () 
     completedAudibleTurnCount: 2,
     requiredAudibleTurnCount: 3,
   });
+
+  const activeTurnError = Object.assign(new Error("feedback_session_not_eligible"), {
+    completedAudibleTurnCount: 3,
+    requiredAudibleTurnCount: 3,
+  });
+  const activeTurn = fixture({ repositoryError: activeTurnError });
+  const activeTurnResponse = await activeTurn.handlers.POST(request("POST", VALID_BODY));
+  assert.equal(activeTurnResponse.status, 422);
+  assert.deepEqual(await activeTurnResponse.json(), {
+    error: "该会话还不满足评价条件",
+    code: "FEEDBACK_SESSION_NOT_ELIGIBLE",
+    completedAudibleTurnCount: 3,
+    requiredAudibleTurnCount: 3,
+  });
 });
 
 it("red lines override high scores and generic failures never leak feedback", async () => {

@@ -2158,6 +2158,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
         status: FeedbackEligibility["sessionStatus"];
         already_submitted: boolean;
         completed_audible_turn_count: number | string;
+        has_no_started_turn: boolean;
       }>(
         `WITH owned_session AS (
            SELECT id, persona_id, evaluator_user_id, status
@@ -2188,7 +2189,12 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
                         AND attempt.persona_id = turn.persona_id
                         AND attempt.status = 'completed'
                     )
-                ) AS completed_audible_turn_count
+                ) AS completed_audible_turn_count,
+                NOT EXISTS (
+                  SELECT 1 FROM conversation_turns started
+                  WHERE started.session_id = owned.id AND started.persona_id = owned.persona_id
+                    AND started.status = 'started'
+                ) AS has_no_started_turn
          FROM owned_session owned`,
         [sessionId, evaluatorUserId],
       );
@@ -2198,7 +2204,10 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       return {
         completedAudibleTurnCount: count,
         requiredAudibleTurnCount: 3,
-        eligible: rows[0].status === "active" && !alreadySubmitted && count >= 3,
+        eligible: rows[0].status === "active"
+          && !alreadySubmitted
+          && Boolean(rows[0].has_no_started_turn)
+          && count >= 3,
         sessionStatus: rows[0].status,
         alreadySubmitted,
       };
@@ -2233,6 +2242,40 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
         );
         if (personas.length !== 1) throw new Error("feedback_session_forbidden");
 
+        const loadQualification = async (session: ConversationSessionRow) => {
+          const rows = await transaction.query<{
+            count: number | string;
+            has_started_turn: boolean;
+          }>(
+            `SELECT COUNT(DISTINCT turn.id) AS count,
+                    EXISTS (
+                      SELECT 1 FROM conversation_turns started
+                      WHERE started.session_id = $1 AND started.persona_id = $2
+                        AND started.status = 'started'
+                    ) AS has_started_turn
+             FROM conversation_turns turn
+             WHERE turn.session_id = $1 AND turn.persona_id = $2
+               AND turn.status = 'completed'
+               AND turn.mode IN ('grounded', 'companionship')
+               AND turn.speech_tracking_failed = false
+               AND EXISTS (
+                 SELECT 1
+                 FROM tts_attempts attempt
+                 JOIN playback_events playback
+                   ON playback.tts_attempt_id = attempt.id AND playback.event_type = 'play_started'
+                 WHERE attempt.session_id = turn.session_id
+                   AND attempt.turn_id = turn.id
+                   AND attempt.persona_id = turn.persona_id
+                   AND attempt.status = 'completed'
+               )`,
+            [session.id, session.persona_id],
+          );
+          return {
+            count: Number(rows[0]?.count || 0),
+            hasStartedTurn: Boolean(rows[0]?.has_started_turn),
+          };
+        };
+
         const sessions = await transaction.query<ConversationSessionRow>(
           `SELECT id, persona_id, evaluator_user_id, voice_id, voice_authorization_id,
                   cohort, status, started_at, last_activity_at, rated_at
@@ -2252,13 +2295,28 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
           ],
         );
         if (sessions.length !== 1) {
-          const concurrentFeedback = await transaction.query<{ id: string }>(
-            `SELECT id FROM conversation_feedback
-             WHERE session_id = $1 AND evaluator_user_id = $2`,
+          const current = await transaction.query<{
+            status: FeedbackEligibility["sessionStatus"];
+            already_submitted: boolean;
+          }>(
+            `SELECT sessions.status,
+                    EXISTS (
+                      SELECT 1 FROM conversation_feedback feedback
+                      WHERE feedback.session_id = sessions.id
+                        AND feedback.evaluator_user_id = sessions.evaluator_user_id
+                    ) AS already_submitted
+             FROM conversation_sessions sessions
+             WHERE sessions.id = $1 AND sessions.evaluator_user_id = $2
+             FOR UPDATE`,
             [identity.id, identity.evaluator_user_id],
           );
-          if (concurrentFeedback.length > 0) throw new Error("feedback_already_submitted");
-          throw new Error("feedback_session_status_changed");
+          if (current.length !== 1) throw new Error("feedback_session_forbidden");
+          if (current[0].already_submitted) throw new Error("feedback_already_submitted");
+          const evidence = await loadQualification(identity);
+          throw Object.assign(new Error("feedback_session_not_eligible"), {
+            completedAudibleTurnCount: evidence.count,
+            requiredAudibleTurnCount: 3,
+          });
         }
         const session = sessions[0];
 
@@ -2269,29 +2327,10 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
         );
         if (existing.length > 0) throw new Error("feedback_already_submitted");
 
-        const counts = await transaction.query<{ count: number | string }>(
-          `SELECT COUNT(DISTINCT turn.id) AS count
-           FROM conversation_turns turn
-           WHERE turn.session_id = $1 AND turn.persona_id = $2
-             AND turn.status = 'completed'
-             AND turn.mode IN ('grounded', 'companionship')
-             AND turn.speech_tracking_failed = false
-             AND EXISTS (
-               SELECT 1
-               FROM tts_attempts attempt
-               JOIN playback_events playback
-                 ON playback.tts_attempt_id = attempt.id AND playback.event_type = 'play_started'
-               WHERE attempt.session_id = turn.session_id
-                 AND attempt.turn_id = turn.id
-                 AND attempt.persona_id = turn.persona_id
-                 AND attempt.status = 'completed'
-             )`,
-          [session.id, session.persona_id],
-        );
-        const count = Number(counts[0]?.count || 0);
-        if (session.status !== "active" || count < 3) {
+        const evidence = await loadQualification(session);
+        if (session.status !== "active" || evidence.count < 3 || evidence.hasStartedTurn) {
           throw Object.assign(new Error("feedback_session_not_eligible"), {
-            completedAudibleTurnCount: count,
+            completedAudibleTurnCount: evidence.count,
             requiredAudibleTurnCount: 3,
           });
         }

@@ -929,6 +929,44 @@ it("counts distinct completed audible turns and excludes ineligible evidence", a
   assert.equal((await repository.getFeedbackEligibility("session-1", "user-1"))?.eligible, true);
 });
 
+it("blocks rating while a session turn is still active and allows retry after it fails", async () => {
+  insertSession();
+  for (const turnId of ["turn-done-1", "turn-done-2", "turn-done-3"]) {
+    insertAudibleTurn({ turnId });
+  }
+  insertTurn("turn-in-flight");
+
+  assert.deepEqual(await repository.getFeedbackEligibility("session-1", "user-1"), {
+    completedAudibleTurnCount: 3,
+    requiredAudibleTurnCount: 3,
+    eligible: false,
+    sessionStatus: "active",
+    alreadySubmitted: false,
+  });
+  await assert.rejects(repository.submitConversationFeedback(VALID_FEEDBACK), (error: unknown) => {
+    assert.equal((error as Error).message, "feedback_session_not_eligible");
+    assert.equal((error as { completedAudibleTurnCount: number }).completedAudibleTurnCount, 3);
+    return true;
+  });
+  assert.equal(
+    (database.prepare("SELECT status FROM conversation_sessions WHERE id = 'session-1'").get() as { status: string }).status,
+    "active",
+  );
+  assert.equal(
+    (database.prepare("SELECT COUNT(*) AS count FROM conversation_feedback").get() as { count: number }).count,
+    0,
+  );
+
+  database.prepare(
+    `UPDATE conversation_turns
+     SET status = 'generation_failed', degradation_reason = 'model_failed', total_ms = 10
+     WHERE id = 'turn-in-flight' AND status = 'started'`,
+  ).run();
+  assert.equal((await repository.getFeedbackEligibility("session-1", "user-1"))?.eligible, true);
+  const saved = await repository.submitConversationFeedback(VALID_FEEDBACK);
+  assert.equal(saved.id, "feedback-submitted");
+});
+
 it("does not turn three attempts from only two turns into three audible turns", async () => {
   insertSession();
   insertAudibleTurn({ turnId: "turn-one" });

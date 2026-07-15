@@ -2030,32 +2030,45 @@ export function recordPlaybackEvent(input: {
   }).immediate();
 }
 
-function completedAudibleTurnCount(
+function feedbackEvidenceSummary(
   database: Database.Database,
   sessionId: string,
   evaluatorUserId: string,
-): number {
+): { count: number; hasStartedTurn: boolean } {
   const row = database.prepare(
-    `SELECT COUNT(DISTINCT turn.id) AS count
-     FROM conversation_turns turn
-     JOIN conversation_sessions sessions
-       ON sessions.id = turn.session_id AND sessions.persona_id = turn.persona_id
-     WHERE turn.session_id = ? AND sessions.evaluator_user_id = ?
-       AND turn.status = 'completed'
-       AND turn.mode IN ('grounded', 'companionship')
-       AND turn.speech_tracking_failed = 0
-       AND EXISTS (
-         SELECT 1
-         FROM tts_attempts attempt
-         JOIN playback_events playback
-           ON playback.tts_attempt_id = attempt.id AND playback.event_type = 'play_started'
-         WHERE attempt.session_id = turn.session_id
-           AND attempt.turn_id = turn.id
-           AND attempt.persona_id = turn.persona_id
-           AND attempt.status = 'completed'
-       )`,
-  ).get(sessionId, evaluatorUserId) as { count: number };
-  return Number(row.count);
+    `SELECT (
+       SELECT COUNT(DISTINCT turn.id)
+       FROM conversation_turns turn
+       JOIN conversation_sessions sessions
+         ON sessions.id = turn.session_id AND sessions.persona_id = turn.persona_id
+       WHERE turn.session_id = ? AND sessions.evaluator_user_id = ?
+         AND turn.status = 'completed'
+         AND turn.mode IN ('grounded', 'companionship')
+         AND turn.speech_tracking_failed = 0
+         AND EXISTS (
+           SELECT 1
+           FROM tts_attempts attempt
+           JOIN playback_events playback
+             ON playback.tts_attempt_id = attempt.id AND playback.event_type = 'play_started'
+           WHERE attempt.session_id = turn.session_id
+             AND attempt.turn_id = turn.id
+             AND attempt.persona_id = turn.persona_id
+             AND attempt.status = 'completed'
+         )
+     ) AS count,
+     EXISTS (
+       SELECT 1
+       FROM conversation_turns started
+       JOIN conversation_sessions sessions
+         ON sessions.id = started.session_id AND sessions.persona_id = started.persona_id
+       WHERE started.session_id = ? AND sessions.evaluator_user_id = ?
+         AND started.status = 'started'
+     ) AS has_started_turn`,
+  ).get(sessionId, evaluatorUserId, sessionId, evaluatorUserId) as {
+    count: number;
+    has_started_turn: number;
+  };
+  return { count: Number(row.count), hasStartedTurn: Boolean(row.has_started_turn) };
 }
 
 function feedbackNotEligibleError(completedAudibleTurnCount: number): Error {
@@ -2092,21 +2105,60 @@ export function getFeedbackEligibility(
   evaluatorUserId: string,
 ): FeedbackEligibility | null {
   const database = getDb();
-  const session = database.prepare(
-    `SELECT status FROM conversation_sessions
-     WHERE id = ? AND evaluator_user_id = ?`,
-  ).get(sessionId, evaluatorUserId) as { status: FeedbackEligibility["sessionStatus"] } | undefined;
-  if (!session) return null;
-  const alreadySubmitted = Boolean(database.prepare(
-    `SELECT 1 FROM conversation_feedback
-     WHERE session_id = ? AND evaluator_user_id = ?`,
-  ).get(sessionId, evaluatorUserId));
-  const count = completedAudibleTurnCount(database, sessionId, evaluatorUserId);
+  const row = database.prepare(
+    `WITH owned_session AS (
+       SELECT id, persona_id, evaluator_user_id, status
+       FROM conversation_sessions
+       WHERE id = ? AND evaluator_user_id = ?
+     )
+     SELECT owned.status,
+            EXISTS (
+              SELECT 1 FROM conversation_feedback feedback
+              WHERE feedback.session_id = owned.id
+                AND feedback.evaluator_user_id = owned.evaluator_user_id
+            ) AS already_submitted,
+            (
+              SELECT COUNT(DISTINCT turn.id)
+              FROM conversation_turns turn
+              WHERE turn.session_id = owned.id AND turn.persona_id = owned.persona_id
+                AND turn.status = 'completed'
+                AND turn.mode IN ('grounded', 'companionship')
+                AND turn.speech_tracking_failed = 0
+                AND EXISTS (
+                  SELECT 1
+                  FROM tts_attempts attempt
+                  JOIN playback_events playback
+                    ON playback.tts_attempt_id = attempt.id
+                   AND playback.event_type = 'play_started'
+                  WHERE attempt.session_id = turn.session_id
+                    AND attempt.turn_id = turn.id
+                    AND attempt.persona_id = turn.persona_id
+                    AND attempt.status = 'completed'
+                )
+            ) AS completed_audible_turn_count,
+            NOT EXISTS (
+              SELECT 1 FROM conversation_turns started
+              WHERE started.session_id = owned.id AND started.persona_id = owned.persona_id
+                AND started.status = 'started'
+            ) AS has_no_started_turn
+     FROM owned_session owned`,
+  ).get(sessionId, evaluatorUserId) as {
+    status: FeedbackEligibility["sessionStatus"];
+    already_submitted: number;
+    completed_audible_turn_count: number;
+    has_no_started_turn: number;
+  } | undefined;
+  if (!row) return null;
+  const alreadySubmitted = Boolean(row.already_submitted);
+  const count = Number(row.completed_audible_turn_count);
   return {
     completedAudibleTurnCount: count,
     requiredAudibleTurnCount: 3,
-    eligible: session.status === "active" && !alreadySubmitted && count >= 3,
-    sessionStatus: session.status,
+    eligible: row.status === "active"
+      && !alreadySubmitted
+      && Boolean(row.has_no_started_turn)
+      && count >= 3,
+    sessionStatus: row.status,
     alreadySubmitted,
   };
 }
@@ -2142,8 +2194,10 @@ export function submitConversationFeedback(input: {
     ).get(input.sessionId, input.evaluatorUserId);
     if (existing) throw new Error("feedback_already_submitted");
 
-    const count = completedAudibleTurnCount(database, input.sessionId, input.evaluatorUserId);
-    if (session.status !== "active" || count < 3) throw feedbackNotEligibleError(count);
+    const evidence = feedbackEvidenceSummary(database, input.sessionId, input.evaluatorUserId);
+    if (session.status !== "active" || evidence.count < 3 || evidence.hasStartedTurn) {
+      throw feedbackNotEligibleError(evidence.count);
+    }
 
     const row = database.prepare(
       `INSERT INTO conversation_feedback
