@@ -13,21 +13,43 @@ type ParsedReviewArgs = {
 
 type ParseResult = { ok: true; value: ParsedReviewArgs } | { ok: false; errorCode: string };
 
-function readFlag(args: string[], name: string): string {
-  const index = args.indexOf(name);
-  return index >= 0 ? (args[index + 1] || "").trim() : "";
-}
-
 export function parseReviewArgs(args: string[]): ParseResult {
-  const authorizationId = readFlag(args, "--authorization-id");
+  const values = new Map<string, string>();
+  const valueFlags = new Set([
+    "--authorization-id",
+    "--decision",
+    "--reviewer-id",
+    "--reason",
+  ]);
+  let confirmed = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const flag = args[index];
+    if (!flag.startsWith("--")) return { ok: false, errorCode: "unexpected_argument" };
+    if (flag === "--confirm") {
+      if (confirmed) return { ok: false, errorCode: "duplicate_argument" };
+      confirmed = true;
+      continue;
+    }
+    if (!valueFlags.has(flag)) return { ok: false, errorCode: "unknown_argument" };
+    if (values.has(flag)) return { ok: false, errorCode: "duplicate_argument" };
+    const rawValue = args[index + 1];
+    if (rawValue === undefined || rawValue.startsWith("--") || !rawValue.trim()) {
+      return { ok: false, errorCode: "missing_argument_value" };
+    }
+    values.set(flag, rawValue.trim());
+    index += 1;
+  }
+
+  const authorizationId = values.get("--authorization-id") || "";
   if (!authorizationId) return { ok: false, errorCode: "missing_authorization_id" };
-  const rawDecision = readFlag(args, "--decision");
+  const rawDecision = values.get("--decision") || "";
   if (!rawDecision) return { ok: false, errorCode: "missing_decision" };
-  const reviewerId = readFlag(args, "--reviewer-id");
+  const reviewerId = values.get("--reviewer-id") || "";
   if (!reviewerId) return { ok: false, errorCode: "missing_reviewer_id" };
-  const reason = readFlag(args, "--reason");
+  const reason = values.get("--reason") || "";
   if (!reason) return { ok: false, errorCode: "missing_reason" };
-  if (!args.includes("--confirm")) return { ok: false, errorCode: "confirmation_required" };
+  if (!confirmed) return { ok: false, errorCode: "confirmation_required" };
   if (rawDecision !== "approve" && rawDecision !== "reject") {
     return { ok: false, errorCode: "invalid_decision" };
   }

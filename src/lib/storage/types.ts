@@ -20,6 +20,11 @@ export type Persona = {
 
 export type CreatePersonaInput = Omit<Persona, "createdAt">;
 
+export type CreatePersonaWithApprovedVoiceResult =
+  | { status: "created"; persona: Persona }
+  | { status: "voice_not_found" }
+  | { status: "authorization_denied" };
+
 export type Memory = {
   id: string;
   personaId: string;
@@ -527,6 +532,9 @@ export interface AppRepository {
   listPersonas(userId: string): Promise<Persona[]>;
   getPersonaForUser(id: string, userId: string): Promise<Persona | null>;
   createPersona(input: CreatePersonaInput): Promise<Persona>;
+  createPersonaWithApprovedVoice(
+    input: CreatePersonaInput,
+  ): Promise<CreatePersonaWithApprovedVoiceResult>;
   deletePersona(id: string, userId: string): Promise<Persona | null>;
   countPersonasUsingVoice(voiceId: string, userId: string): Promise<number>;
   createVoiceProfile(input: CreateVoiceProfileInput): Promise<VoiceMeta>;

@@ -14,7 +14,9 @@ import type {
 } from "@/lib/storage/types";
 import {
   buildVoiceAuthorizationPayload,
+  createVoiceAuthorizationRequestGate,
   mapVoiceAuthorizationStatus,
+  runLatestVoiceAuthorizationRequest,
 } from "@/lib/voiceAuthorizationClient";
 
 type VoiceMeta = {
@@ -63,7 +65,7 @@ export default function VoiceNewPage() {
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const authorizationRequestRef = useRef(0);
+  const authorizationRequestGateRef = useRef(createVoiceAuthorizationRequestGate());
   const [audioUrl, setAudioUrl] = useState("");
   const prevAudioUrlRef = useRef<string>("");
   const [transcribing, setTranscribing] = useState(false);
@@ -168,37 +170,43 @@ export default function VoiceNewPage() {
   useEffect(() => { refreshVoices(); }, []);
 
   async function refreshAuthorization(voiceId: string) {
-    const requestId = ++authorizationRequestRef.current;
     if (!voiceId) {
+      authorizationRequestGateRef.current.cancel();
       setAuthorization(null);
       setAuthorizationVoiceId("");
       setAuthorizationLoading(false);
       return;
     }
-    setAuthorizationLoading(true);
     setAuthorization(null);
     setPresetState({ status: null, errorCode: null });
-    try {
-      const response = await fetch(`/api/voice/authorization?voiceId=${encodeURIComponent(voiceId)}`);
-      if (requestId !== authorizationRequestRef.current) return;
-      if (response.status === 404) { setAuthorizationVoiceId(voiceId); return; }
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error("授权状态读取失败");
-      setAuthorization(body.authorization || null);
-      if (body.authorization) {
-        setSpeakerStatus(body.authorization.speakerStatus);
-        setAuthorizationBasis(body.authorization.basis);
-      }
-      setAuthorizationVoiceId(voiceId);
-      setPresetState({ status: body.presetStatus || null, errorCode: body.presetErrorCode || null });
-    } catch {
-      if (requestId !== authorizationRequestRef.current) return;
-      setError("授权状态读取失败，请稍后重试");
-      setAuthorization(null);
-      setAuthorizationVoiceId(voiceId);
-    } finally {
-      if (requestId === authorizationRequestRef.current) setAuthorizationLoading(false);
-    }
+    await runLatestVoiceAuthorizationRequest({
+      gate: authorizationRequestGateRef.current,
+      setLoading: setAuthorizationLoading,
+      request: async () => {
+        const response = await fetch(`/api/voice/authorization?voiceId=${encodeURIComponent(voiceId)}`);
+        if (response.status === 404) return { authorization: null, missing: true };
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error("授权状态读取失败");
+        return { ...body, missing: false };
+      },
+      onSuccess: (body) => {
+        setAuthorization(body.authorization || null);
+        if (body.authorization) {
+          setSpeakerStatus(body.authorization.speakerStatus);
+          setAuthorizationBasis(body.authorization.basis);
+        }
+        setAuthorizationVoiceId(voiceId);
+        setPresetState({
+          status: body.missing ? null : body.presetStatus || null,
+          errorCode: body.missing ? null : body.presetErrorCode || null,
+        });
+      },
+      onError: () => {
+        setError("授权状态读取失败，请稍后重试");
+        setAuthorization(null);
+        setAuthorizationVoiceId(voiceId);
+      },
+    });
   }
 
   useEffect(() => { void refreshAuthorization(selectedVoiceId); }, [selectedVoiceId]);
@@ -207,64 +215,78 @@ export default function VoiceNewPage() {
     e.preventDefault(); setError("");
     if (!selectedVoiceId) return setError("请先选择一段参考声音");
     const voiceId = selectedVoiceId;
-    const requestId = ++authorizationRequestRef.current;
-    setAuthorizationLoading(true);
-    try {
-      const response = await fetch("/api/voice/authorization", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildVoiceAuthorizationPayload({
-          voiceId,
-          speakerStatus,
-          basis: authorizationBasis,
-          separateConsentConfirmed,
-          thirdPartyProcessingConfirmed,
-          syntheticDisclosureConfirmed,
-        })),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (requestId !== authorizationRequestRef.current) return;
-      if (!response.ok) throw new Error(body.reasonCode || body.error || "授权提交失败");
-      setAuthorization(body.authorization || null);
-      if (body.authorization) {
-        setSpeakerStatus(body.authorization.speakerStatus);
-        setAuthorizationBasis(body.authorization.basis);
-      }
-      setAuthorizationVoiceId(voiceId);
-      setPresetState({ status: body.presetStatus || null, errorCode: body.presetErrorCode || null });
-      if (body.presetStatus === "failed") setError(`授权已通过，但音色创建失败：${body.presetErrorCode || "preset_failed"}`);
-    } catch (err) {
-      if (requestId !== authorizationRequestRef.current) return;
-      setError(err instanceof Error ? err.message : "授权提交失败");
-    } finally {
-      if (requestId === authorizationRequestRef.current) setAuthorizationLoading(false);
-    }
+    await runLatestVoiceAuthorizationRequest({
+      gate: authorizationRequestGateRef.current,
+      setLoading: setAuthorizationLoading,
+      request: async () => {
+        const response = await fetch("/api/voice/authorization", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildVoiceAuthorizationPayload({
+            voiceId,
+            speakerStatus,
+            basis: authorizationBasis,
+            separateConsentConfirmed,
+            thirdPartyProcessingConfirmed,
+            syntheticDisclosureConfirmed,
+          })),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.reasonCode || body.error || "授权提交失败");
+        return body;
+      },
+      onSuccess: (body) => {
+        setAuthorization(body.authorization || null);
+        if (body.authorization) {
+          setSpeakerStatus(body.authorization.speakerStatus);
+          setAuthorizationBasis(body.authorization.basis);
+        }
+        setAuthorizationVoiceId(voiceId);
+        setPresetState({ status: body.presetStatus || null, errorCode: body.presetErrorCode || null });
+        if (body.presetStatus === "failed") {
+          setError(`授权已通过，但音色创建失败：${body.presetErrorCode || "preset_failed"}`);
+        }
+      },
+      onError: (requestError) => {
+        setError(requestError instanceof Error ? requestError.message : "授权提交失败");
+      },
+    });
   }
 
   async function handleAuthorizationRevoke() {
     if (!selectedVoiceId) return;
     const voiceId = selectedVoiceId;
-    const requestId = ++authorizationRequestRef.current;
-    setError(""); setAuthorizationLoading(true);
-    try {
-      const response = await fetch(`/api/voice/authorization?voiceId=${encodeURIComponent(voiceId)}`, { method: "DELETE" });
-      const body = await response.json().catch(() => ({}));
-      if (requestId !== authorizationRequestRef.current) return;
-      if (!response.ok) throw new Error(body.error || "授权撤回失败");
-      if (authorization && authorizationVoiceId === voiceId) {
-        setAuthorization({
-          ...authorization,
-          status: body.status === "rejected" ? "rejected" : "revoked",
-          reasonCode: body.status === "rejected" ? authorization.reasonCode : null,
+    setError("");
+    await runLatestVoiceAuthorizationRequest({
+      gate: authorizationRequestGateRef.current,
+      setLoading: setAuthorizationLoading,
+      request: async () => {
+        const response = await fetch(
+          `/api/voice/authorization?voiceId=${encodeURIComponent(voiceId)}`,
+          { method: "DELETE" },
+        );
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.error || "授权撤回失败");
+        return body;
+      },
+      onSuccess: (body) => {
+        if (authorization && authorizationVoiceId === voiceId) {
+          setAuthorization({
+            ...authorization,
+            status: body.status === "rejected" ? "rejected" : "revoked",
+            reasonCode: body.status === "rejected" ? authorization.reasonCode : null,
+          });
+        }
+        setPresetState({
+          status: body.cleanupPending ? "failed" : "not_created",
+          errorCode: body.cleanupPending ? "cleanup_pending" : null,
         });
-      }
-      setPresetState({ status: body.cleanupPending ? "failed" : "not_created", errorCode: body.cleanupPending ? "cleanup_pending" : null });
-      if (body.cleanupPending) setError("授权已撤回，供应商音色仍在清理中");
-    } catch (err) {
-      if (requestId !== authorizationRequestRef.current) return;
-      setError(err instanceof Error ? err.message : "授权撤回失败");
-      setAuthorizationLoading(false);
-    }
+        if (body.cleanupPending) setError("授权已撤回，供应商音色仍在清理中");
+      },
+      onError: (requestError) => {
+        setError(requestError instanceof Error ? requestError.message : "授权撤回失败");
+      },
+    });
   }
 
   async function handleTranscribe() {

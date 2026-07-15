@@ -5,6 +5,7 @@ import { getRepository } from "@/lib/storage/repository";
 import { getVoiceObjectStore } from "@/lib/storage/voiceObjectStore";
 import { deleteVoiceEverywhere } from "@/lib/voicePresetService";
 import { logger } from "@/lib/logger";
+import { executePersonaCreation } from "@/lib/personaCreation";
 
 export const runtime = "nodejs";
 
@@ -33,27 +34,15 @@ export async function POST(req: NextRequest) {
   if (!relation) return NextResponse.json({ error: "缺少 relation" }, { status: 400 });
   if (!voiceId) return NextResponse.json({ error: "缺少 voiceId" }, { status: 400 });
 
-  const voice = await getVoiceObjectStore().getMeta(voiceId, auth.userId);
-  if (!voice) return NextResponse.json({ error: "voiceId 不存在或不属于你" }, { status: 404 });
-
-  const repository = getRepository();
-  const authorization = await repository.getCurrentVoiceAuthorization(voiceId, auth.userId);
-  if (authorization?.status !== "approved") {
-    return NextResponse.json(
-      { error: "声音授权尚未通过", reasonCode: "VOICE_AUTHORIZATION_REQUIRED" },
-      { status: 403 },
-    );
-  }
-
-  const persona = await repository.createPersona({
+  const result = await executePersonaCreation({
     id: randomUUID(),
     userId: auth.userId,
     name,
     relation,
     voiceId,
     personaDesc,
-  });
-  return NextResponse.json({ ok: true, persona });
+  }, getRepository);
+  return NextResponse.json(result.body, { status: result.status });
 }
 
 export async function DELETE(req: NextRequest) {

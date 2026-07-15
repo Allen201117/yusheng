@@ -20,6 +20,7 @@ import type {
   ConversationTurnEvidence,
   CreatePersonaKnowledgeCandidateInput,
   CreatePersonaInput,
+  CreatePersonaWithApprovedVoiceResult,
   CreatePersonaSourceInput,
   CreateVoiceAuthorizationInput,
   ReviewVoiceAuthorizationInput,
@@ -1007,6 +1008,43 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       );
       if (!rows[0]) throw new Error("Failed to create persona");
       return mapPersona(rows[0]);
+    },
+
+    async createPersonaWithApprovedVoice(
+      input: CreatePersonaInput,
+    ): Promise<CreatePersonaWithApprovedVoiceResult> {
+      return sql.transaction(async (transaction) => {
+        const voices = await transaction.query<{ id: string }>(
+          `SELECT id FROM voice_profiles
+           WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+           FOR UPDATE`,
+          [input.voiceId, input.userId],
+        );
+        if (!voices[0]) return { status: "voice_not_found" as const };
+
+        const authorizations = await transaction.query<{ id: string; status: string }>(
+          `SELECT id, status FROM voice_authorizations
+           WHERE id = (
+             SELECT id FROM voice_authorizations
+             WHERE voice_id = $1 AND user_id = $2
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1
+           )
+             AND status = 'approved'
+           FOR UPDATE`,
+          [input.voiceId, input.userId],
+        );
+        if (!authorizations[0]) return { status: "authorization_denied" as const };
+
+        const rows = await transaction.query<PersonaRow>(
+          `INSERT INTO personas (id, user_id, name, relation, voice_id, persona_desc)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING id, user_id, name, relation, voice_id, persona_desc, created_at`,
+          [input.id, input.userId, input.name, input.relation, input.voiceId, input.personaDesc],
+        );
+        if (!rows[0]) throw new Error("Failed to create persona");
+        return { status: "created" as const, persona: mapPersona(rows[0]) };
+      });
     },
 
     async deletePersona(id: string, userId: string): Promise<Persona | null> {

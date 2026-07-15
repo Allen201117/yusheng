@@ -48,6 +48,35 @@ it("fails safely with one JSON object when confirmation is missing", () => {
   assert.equal(result.stderr, "");
 });
 
+it("rejects a missing value before the next flag without writing the database", () => {
+  const result = run([
+    "--authorization-id", "auth-cli", "--decision", "reject", "--reviewer-id",
+    "--reason", "invalid", "--confirm",
+  ]);
+  assert.equal(result.status, 2);
+  assert.deepEqual(JSON.parse(result.stdout), { ok: false, errorCode: "missing_argument_value" });
+  assert.equal(result.stderr, "");
+  assert.equal(db.getCurrentVoiceAuthorization("voice-cli", "__dev__")?.status, "pending_review");
+});
+
+it("rejects duplicate and unknown flags without writing the database", () => {
+  const duplicate = run([
+    "--authorization-id", "auth-cli", "--decision", "reject", "--reviewer-id", "operator-1",
+    "--reason", "invalid", "--reason", "again", "--confirm",
+  ]);
+  assert.equal(duplicate.status, 2);
+  assert.deepEqual(JSON.parse(duplicate.stdout), { ok: false, errorCode: "duplicate_argument" });
+
+  const unknown = run([
+    "--authorization-id", "auth-cli", "--decision", "reject", "--reviewer-id", "operator-1",
+    "--reason", "invalid", "--confirm", "--force",
+  ]);
+  assert.equal(unknown.status, 2);
+  assert.deepEqual(JSON.parse(unknown.stdout), { ok: false, errorCode: "unknown_argument" });
+  assert.equal(duplicate.stderr + unknown.stderr, "");
+  assert.equal(db.getCurrentVoiceAuthorization("voice-cli", "__dev__")?.status, "pending_review");
+});
+
 it("sanitizes configuration failures instead of printing raw configuration or secrets", () => {
   const result = run([
     "--authorization-id", "auth-cli", "--decision", "approve", "--reviewer-id", "operator-1",

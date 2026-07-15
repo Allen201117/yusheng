@@ -24,8 +24,32 @@ const voice: VoiceMeta = {
 it("requires every operator argument and an explicit confirmation flag", () => {
   assert.deepEqual(parseReviewArgs([]), { ok: false, errorCode: "missing_authorization_id" });
   assert.deepEqual(parseReviewArgs(["--authorization-id", "auth-1"]), { ok: false, errorCode: "missing_decision" });
+  assert.deepEqual(parseReviewArgs(["--authorization-id", "auth-1", "--decision", "approve"]), { ok: false, errorCode: "missing_reviewer_id" });
+  assert.deepEqual(parseReviewArgs(["--authorization-id", "auth-1", "--decision", "approve", "--reviewer-id", "r"]), { ok: false, errorCode: "missing_reason" });
   assert.deepEqual(parseReviewArgs(["--authorization-id", "auth-1", "--decision", "approve", "--reviewer-id", "r", "--reason", "ok"]), { ok: false, errorCode: "confirmation_required" });
   assert.deepEqual(parseReviewArgs(["--authorization-id", "auth-1", "--decision", "maybe", "--reviewer-id", "r", "--reason", "ok", "--confirm"]), { ok: false, errorCode: "invalid_decision" });
+});
+
+it("strictly rejects unknown, duplicate, orphaned and valueless operator arguments", () => {
+  assert.deepEqual(parseReviewArgs([
+    "--authorization-id", "auth-1", "--decision", "reject", "--reviewer-id", "operator-1",
+    "--reason", "invalid", "--confirm", "--unknown",
+  ]), { ok: false, errorCode: "unknown_argument" });
+  assert.deepEqual(parseReviewArgs([
+    "--authorization-id", "auth-1", "--authorization-id", "auth-2", "--decision", "reject",
+    "--reviewer-id", "operator-1", "--reason", "invalid", "--confirm",
+  ]), { ok: false, errorCode: "duplicate_argument" });
+  assert.deepEqual(parseReviewArgs([
+    "orphan", "--authorization-id", "auth-1", "--decision", "reject", "--reviewer-id", "operator-1",
+    "--reason", "invalid", "--confirm",
+  ]), { ok: false, errorCode: "unexpected_argument" });
+  assert.deepEqual(parseReviewArgs([
+    "--authorization-id", "auth-1", "--decision", "reject", "--reviewer-id", "--reason", "invalid", "--confirm",
+  ]), { ok: false, errorCode: "missing_argument_value" });
+  assert.deepEqual(parseReviewArgs([
+    "--authorization-id", "auth-1", "--decision", "reject", "--reviewer-id", "operator-1",
+    "--reason", "invalid", "--confirm", "--confirm",
+  ]), { ok: false, errorCode: "duplicate_argument" });
 });
 
 it("approves by repository snapshot before provisioning that exact owner voice", async () => {

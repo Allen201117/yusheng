@@ -21,6 +21,7 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
     WHERE conname = 'voice_authorizations_review_audit'
+      AND conrelid = 'voice_authorizations'::regclass
   ) THEN
     ALTER TABLE voice_authorizations
       ADD CONSTRAINT voice_authorizations_review_audit CHECK (

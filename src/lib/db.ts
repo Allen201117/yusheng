@@ -725,6 +725,26 @@ export function createPersona(p: Omit<Persona, "createdAt">): Persona {
   return { ...p, createdAt };
 }
 
+export function createPersonaWithApprovedVoice(
+  input: Omit<Persona, "createdAt">,
+): { status: "created"; persona: Persona } | { status: "authorization_denied" } {
+  const database = getDb();
+  return database.transaction(() => {
+    const authorization = database.prepare(
+      `SELECT id FROM voice_authorizations
+       WHERE voice_id = ? AND user_id = ? AND status = 'approved'
+         AND id = (
+           SELECT id FROM voice_authorizations
+           WHERE voice_id = ? AND user_id = ?
+           ORDER BY created_at DESC, id DESC
+           LIMIT 1
+         )`,
+    ).get(input.voiceId, input.userId, input.voiceId, input.userId);
+    if (!authorization) return { status: "authorization_denied" as const };
+    return { status: "created" as const, persona: createPersona(input) };
+  }).immediate();
+}
+
 export function listPersonas(userId: string): Persona[] {
   const db = getDb();
   const rows = db
@@ -2496,16 +2516,18 @@ export function revokeVoiceAuthorization(
   userId: string,
 ): VoiceAuthorization | null {
   const database = getDb();
-  const current = getCurrentVoiceAuthorization(voiceId, userId);
-  if (!current) return null;
-  if (current.status === "pending_review" || current.status === "approved") {
-    database.prepare(
-      `UPDATE voice_authorizations
-       SET status = 'revoked', revoked_at = ?
-       WHERE id = ? AND user_id = ?`,
-    ).run(new Date().toISOString(), current.id, userId);
-  }
-  return getCurrentVoiceAuthorization(voiceId, userId);
+  return database.transaction(() => {
+    const current = getCurrentVoiceAuthorization(voiceId, userId);
+    if (!current) return null;
+    if (current.status === "pending_review" || current.status === "approved") {
+      database.prepare(
+        `UPDATE voice_authorizations
+         SET status = 'revoked', revoked_at = ?
+         WHERE id = ? AND user_id = ? AND status IN ('pending_review', 'approved')`,
+      ).run(new Date().toISOString(), current.id, userId);
+    }
+    return getCurrentVoiceAuthorization(voiceId, userId);
+  }).immediate();
 }
 
 export function reviewVoiceAuthorization(

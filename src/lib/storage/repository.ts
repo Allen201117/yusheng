@@ -13,6 +13,7 @@ import {
   countPersonasUsingVoice,
   createPersonaKnowledgeCandidates,
   createPersona,
+  createPersonaWithApprovedVoice,
   createUserByEmail,
   createVerificationCode,
   deleteMemory,
@@ -97,6 +98,11 @@ export function createLocalRepository(): AppRepository {
     async listPersonas(userId) { return listPersonas(userId); },
     async getPersonaForUser(id, userId) { return getPersonaForUser(id, userId); },
     async createPersona(input) { return createPersona(input); },
+    async createPersonaWithApprovedVoice(input) {
+      const voice = await loadVoiceForUser(input.voiceId, input.userId);
+      if (!voice) return { status: "voice_not_found" };
+      return createPersonaWithApprovedVoice(input);
+    },
     async deletePersona(id, userId) {
       return getDb().transaction(() => {
         const persona = getPersonaForUser(id, userId);

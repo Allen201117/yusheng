@@ -26,6 +26,51 @@ export type VoiceAuthorizationDisplay = {
   errorCode: string | null;
 };
 
+export type VoiceAuthorizationRequestGate = {
+  begin(): number;
+  cancel(): void;
+  isCurrent(token: number): boolean;
+  finish(token: number): boolean;
+};
+
+export function createVoiceAuthorizationRequestGate(): VoiceAuthorizationRequestGate {
+  let currentToken = 0;
+  return {
+    begin() {
+      currentToken += 1;
+      return currentToken;
+    },
+    cancel() {
+      currentToken += 1;
+    },
+    isCurrent(token) {
+      return token === currentToken;
+    },
+    finish(token) {
+      return token === currentToken;
+    },
+  };
+}
+
+export async function runLatestVoiceAuthorizationRequest<T>(input: {
+  gate: VoiceAuthorizationRequestGate;
+  setLoading: (loading: boolean) => void;
+  request: () => Promise<T>;
+  onSuccess: (value: T) => unknown;
+  onError: (error: unknown) => unknown;
+}): Promise<void> {
+  const token = input.gate.begin();
+  input.setLoading(true);
+  try {
+    const value = await input.request();
+    if (input.gate.isCurrent(token)) await input.onSuccess(value);
+  } catch (error) {
+    if (input.gate.isCurrent(token)) await input.onError(error);
+  } finally {
+    if (input.gate.finish(token)) input.setLoading(false);
+  }
+}
+
 export function mapVoiceAuthorizationStatus(
   authorization: { status: VoiceAuthorizationStatus; reasonCode: string | null } | null,
 ): VoiceAuthorizationDisplay {

@@ -185,6 +185,10 @@ it("routes use the provider preset fast path and provider-aware deletion lifecyc
     new URL("../src/app/api/persona/route.ts", import.meta.url),
     "utf8",
   );
+  const personaCreation = await readFile(
+    new URL("../src/lib/personaCreation.ts", import.meta.url),
+    "utf8",
+  );
   const personaPage = await readFile(
     new URL("../src/app/persona/new/page.tsx", import.meta.url),
     "utf8",
@@ -196,9 +200,11 @@ it("routes use the provider preset fast path and provider-aware deletion lifecyc
   assert.match(tts, /getCurrentVoiceAuthorization/);
   assert.match(tts, /canSynthesizeVoice/);
   assert.match(tts, /isVoiceAuthorizationEnforced/);
-  assert.match(persona, /getCurrentVoiceAuthorization/);
-  assert.match(persona, /authorization\?\.status !== ["']approved["']/);
-  assert.match(persona, /VOICE_AUTHORIZATION_REQUIRED/);
+  assert.match(persona, /executePersonaCreation/);
+  assert.doesNotMatch(persona, /getCurrentVoiceAuthorization/);
+  assert.doesNotMatch(persona, /repository\.createPersona\(/);
+  assert.match(personaCreation, /VOICE_AUTHORIZATION_REQUIRED/);
+  assert.match(personaCreation, /createPersonaWithApprovedVoice/);
   assert.match(personaPage, /api\/voice\/authorization\?voiceId=/);
   assert.match(personaPage, /authorizationVoiceId === voiceId/);
   assert.match(personaPage, /disabled=\{submitting \|\| !canCreate\}/);
@@ -211,7 +217,6 @@ it("routes use the provider preset fast path and provider-aware deletion lifecyc
   assert.match(ttsVoiceBinding, /getPersonaForUser\(personaId, input\.userId\)/);
   assert.match(ttsVoiceBinding, /voiceId:\s*persona\.voiceId/);
   assert.match(persona, /deleteVoiceEverywhere/);
-  assert.match(persona, /\.getMeta\(voiceId, auth\.userId\)/);
   assert.match(persona, /cleanupPending/);
 
   const voiceUpload = await readFile(

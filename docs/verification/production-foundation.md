@@ -5,8 +5,14 @@ Updated: 2026-07-15 (Asia/Shanghai)
 ## Local evidence
 
 - Grounded focused regression bundle: 166 passed, 0 failed.
-- `npm test`: 443 passed, 0 failed after adding the voice-authorization client/review closure on top of restoration session/feedback qualification, browser playback telemetry and aggregate-report privacy coverage.
-- Voice-authorization focused bundle: 107 passed, 0 failed, including the production page wiring, real CLI child-process safety failures, a temporary SQLite reject review, rejected-preset cleanup retry and cleanup when authorization changes during provisioning.
+- `npm test`: 453 passed, 0 failed after adding the voice-authorization client/review closure on top of restoration session/feedback qualification, browser playback telemetry and aggregate-report privacy coverage.
+- Voice-authorization focused bundle: 124 passed, 0 failed with this exact command:
+
+  ```sh
+  node --import tsx --test tests/personaAuthorizationRoute.test.ts tests/postgresRepository.test.ts tests/storageRouteBoundary.test.ts tests/ttsRoute.test.ts tests/voiceAuthorizationCli.test.ts tests/voiceAuthorizationClient.test.ts tests/voiceAuthorizationDb.test.ts tests/voiceAuthorizationPolicy.test.ts tests/voiceAuthorizationReview.test.ts tests/voiceAuthorizationRoute.test.ts tests/voicePresetService.test.ts
+  ```
+
+  It includes production page request-race handling, strict real CLI child-process failures without database writes, SQLite create/revoke transaction ordering, Postgres voice-to-authorization lock ordering, rejected-preset cleanup retry and cleanup when authorization changes during provisioning.
 - `npm run typecheck`: passed.
 - `npm run build`: passed on Next.js 15.5.20 and includes `/api/chat`, `/api/tts`, `/api/playback-event` and `/api/conversation-feedback`.
 - `npm run db:migrate:dry`: passed and lists migrations `001` through `008`; migration 008 adds explicit reviewer audit fields and the pending-review operator index.

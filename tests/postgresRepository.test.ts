@@ -105,8 +105,46 @@ it("adds reviewer audit fields and a pending-review operator index", async () =>
   assert.match(sql, /ADD COLUMN IF NOT EXISTS reviewed_by text/);
   assert.match(sql, /reviewed_at IS NOT NULL/);
   assert.match(sql, /reviewed_by IS NOT NULL/);
+  assert.match(sql, /conrelid = 'voice_authorizations'::regclass/);
   assert.match(sql, /policy:self/);
   assert.match(sql, /WHERE status = 'pending_review'/);
+});
+
+it("creates a persona only after locking its voice then current approved authorization", async () => {
+  const fake = createFakeSql((text, params) => {
+    if (text.includes("FROM voice_profiles") && text.includes("FOR UPDATE")) return [{ id: "voice-1" }];
+    if (text.includes("FROM voice_authorizations") && text.includes("FOR UPDATE")) return [{ id: "auth-1", status: "approved" }];
+    if (text.includes("INSERT INTO personas")) return [{
+      id: params[0], user_id: params[1], name: params[2], relation: params[3],
+      voice_id: params[4], persona_desc: params[5], created_at: "2026-07-15T00:00:00.000Z",
+    }];
+    return [];
+  });
+  const result = await createPostgresRepository(fake.executor).createPersonaWithApprovedVoice({
+    id: "persona-auth", userId: "user-1", name: "妈妈", relation: "母亲",
+    voiceId: "voice-1", personaDesc: "温柔",
+  });
+  assert.equal(result.status, "created");
+  const voiceLock = fake.calls.findIndex((call) => call.text.includes("FROM voice_profiles") && call.text.includes("FOR UPDATE"));
+  const authLock = fake.calls.findIndex((call) => call.text.includes("FROM voice_authorizations") && call.text.includes("FOR UPDATE"));
+  const insert = fake.calls.findIndex((call) => call.text.includes("INSERT INTO personas"));
+  assert.ok(voiceLock >= 0 && voiceLock < authLock && authLock < insert);
+  assert.match(fake.calls[authLock].text, /status = 'approved'/);
+  assert.equal(fake.transactions, 1);
+});
+
+it("does not insert a Postgres persona after revocation wins the authorization lock", async () => {
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM voice_profiles") && text.includes("FOR UPDATE")) return [{ id: "voice-1" }];
+    if (text.includes("FROM voice_authorizations") && text.includes("FOR UPDATE")) return [];
+    if (text.includes("INSERT INTO personas")) throw new Error("must not insert");
+    return [];
+  });
+  const result = await createPostgresRepository(fake.executor).createPersonaWithApprovedVoice({
+    id: "persona-denied", userId: "user-1", name: "妈妈", relation: "母亲",
+    voiceId: "voice-1", personaDesc: "",
+  });
+  assert.deepEqual(result, { status: "authorization_denied" });
 });
 
 it("adds persona knowledge tables and idempotently copies legacy memories", async () => {
