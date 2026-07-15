@@ -676,12 +676,13 @@ it("does not stream a sentence until its persistence promise resolves", async ()
   }
   assert.doesNotMatch(received, /"sentence"/);
 
-  const nextChunk = reader.read();
-  const stateBeforePersistence = await Promise.race([
-    nextChunk.then(() => "resolved" as const),
-    Promise.resolve("pending" as const),
-  ]);
-  assert.equal(stateBeforePersistence, "pending");
+  let nextChunkSettled = false;
+  const nextChunk = reader.read().then((chunk) => {
+    nextChunkSettled = true;
+    return chunk;
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(nextChunkSettled, false);
 
   releaseSentence();
   const persistedChunk = await nextChunk;
