@@ -1094,7 +1094,7 @@ Document:
 - every completed grounded assistant message has evidence IDs;
 - no-evidence and retrieval failure become companionship;
 - boundary paths do not call the free model;
-- browser playback telemetry, effective-restoration feedback, real users, and Preview remain incomplete;
+- the later restoration-feedback work locally wires and tests non-visual browser playback telemetry and feedback; `play_started` is client-attested only, while real Preview browser + provider + database readback and real-user cohorts remain incomplete;
 - local passing tests do not authorize Production.
 - the real-model probe result is separate from deterministic tests and still does not substitute for people who know the voice owner.
 

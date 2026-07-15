@@ -13,8 +13,8 @@
 ## Scope and locked decisions
 
 - Source of truth: `docs/superpowers/specs/2026-07-14-core-conversation-design.md`, already marked user-approved.
-- No changes to `src/app/persona/[id]/chat/page.tsx`, components, CSS, layouts, or interaction design.
-- This plan creates the playback-event receiver, but live browser event sending remains separately approval-dependent. Tests may submit events directly; docs must not call that real-user proof.
+- No visual changes to components, CSS, layouts, or interaction design. The user selected the non-visual telemetry option, so the chat page may wire the existing playback lifecycle to the telemetry client without changing the visible experience.
+- Non-visual browser event sending and the playback-event receiver are locally wired and tested. `play_started` remains client-attested evidence of reported playback start only; local tests do not prove real Preview browser delivery, provider audio, deployed database readback, listening completion, or real-user value.
 - A valid feedback session needs at least three distinct completed non-boundary turns. Each turn needs a completed tracked TTS attempt with a server-received `play_started` event.
 - Client bodies never control evaluator identity, cohort, persona, voice, sentence text, speech controls, provider source/model, or server timings.
 - Feedback is immutable and unique per session/evaluator. Legacy turns keep nullable `session_id` and cannot qualify.
@@ -545,7 +545,7 @@ The script loads the repository, reads metric rows, calls `summarizeRestorationF
 
 - [ ] **Step 4: Update operational truth**
 
-Document the five scores, three red lines, three-audible-turn rule, and cohort gates. State that the receiver exists but live browser `play_started` sending is absent until separately approved; TTS success is not playback; synthetic tests are not user proof; the first dry run is living 2 + deceased 2 people with 3 sessions each and does not pass the product; the real gate remains 10/30/60% in each cohort; Preview and push are separate gates.
+Document the five scores, three red lines, three-audible-turn rule, and cohort gates. State that non-visual browser `play_started` sending is locally wired and tested, but is client-attested only; TTS success is not playback or listening completion; synthetic tests are not user proof; the first dry run is living 2 + deceased 2 people with 3 sessions each and does not pass the product; the real gate remains 10/30/60% in each cohort; real Preview browser + provider + database readback and push are separate gates.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -598,7 +598,7 @@ Expected: all tests pass; migration dry-run lists migration `006` and schema tes
 
 - [ ] **Step 3: Independent completion audit**
 
-Review owner isolation for session/sentence/attempt/event/feedback; rejection of client identity/cohort/voice/text/model metadata; compare-and-set transactions; event idempotency; feedback immutability; three distinct turns rather than three sentences; red-line precedence; no secrets/audio/transcripts/comments/raw provider errors in logs/reports; explicit absence of browser wiring and real cohorts.
+Review owner isolation for session/sentence/attempt/event/feedback; rejection of client identity/cohort/voice/text/model metadata; compare-and-set transactions; event idempotency; feedback immutability; three distinct turns rather than three sentences; red-line precedence; no secrets/audio/transcripts/comments/raw provider errors in logs/reports; local non-visual browser wiring and its client-attested-only boundary; explicit absence of real Preview browser + provider + database readback evidence and real cohorts.
 
 - [ ] **Step 4: Stop before push/deploy**
 
@@ -622,7 +622,7 @@ Spec coverage:
 
 Explicit remaining work after this plan:
 
-- Non-visual browser event sending remains separately approval-dependent.
+- Non-visual browser event sending is locally wired and tested; real Preview browser lifecycle delivery, provider audio, deployed database readback, and listening completion remain external gates.
 - Usable Preview still needs Neon, `STORAGE_BACKEND=cloud`, migrations, and explicit push.
-- Real provider/model runs, 2+2 dry run, and final 10+10 cohorts remain external gates.
+- Real provider/model runs, 2+2 dry run, and final 10+10 cohorts remain external gates; `play_started` alone is not real-user proof.
 - Voice-generation versioning, multi-material experiments, and sentence emotion correction follow real feedback rather than preceding it.
