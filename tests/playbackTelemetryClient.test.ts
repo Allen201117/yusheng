@@ -2,12 +2,17 @@ import { it } from "node:test";
 import assert from "node:assert/strict";
 import { OrderedPlaybackQueue } from "../src/lib/orderedPlaybackQueue";
 import {
+  cancelPlaybackLifecycle,
   createTrackedPlaybackTelemetry,
+  flushPendingPlaybackEvents,
+  installPlaybackTelemetryFlushListeners,
+  playAudioItemLifecycle,
   playAudioWithTelemetry,
+  type PlaybackCancellationSlot,
   type TelemetryAudioElement,
 } from "../src/lib/playbackTelemetryClient";
 
-type CapturedRequest = { url: string; body: Record<string, unknown> };
+type CapturedRequest = { url: string; body: Record<string, unknown>; keepalive: boolean };
 
 function telemetryFixture(statuses: number[] = [201, 201, 201, 201]) {
   const requests: CapturedRequest[] = [];
@@ -17,6 +22,7 @@ function telemetryFixture(statuses: number[] = [201, 201, 201, 201]) {
     requests.push({
       url: String(input),
       body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+      keepalive: init?.keepalive === true,
     });
     return new Response(null, { status: statuses.shift() ?? 201 });
   };
@@ -113,6 +119,7 @@ it("retries at most once with the same stable event id", async () => {
   assert.equal(f.requests.length, 2);
   assert.equal(f.requests[0].body.eventId, f.requests[1].body.eventId);
   assert.equal(f.requests[0].body.clientElapsedMs, f.requests[1].body.clientElapsedMs);
+  assert.equal(f.requests[0].keepalive, true);
 });
 
 it("rejects missing, padded or oversized attempt headers", () => {
@@ -153,6 +160,7 @@ it("clamps elapsed time and lets playback finish when telemetry exhausts retries
     grouped.set(String(request.eventType), (grouped.get(String(request.eventType)) ?? 0) + 1);
   }
   assert.equal(Array.from(grouped.values()).every((count) => count === 2), true);
+  flushPendingPlaybackEvents(() => true);
 });
 
 it("cancelling playback does not claim completion or failure", async () => {
@@ -167,4 +175,184 @@ it("cancelling playback does not claim completion or failure", async () => {
   await playAudioWithTelemetry(audio, f.telemetry, () => {}, (cancel) => cancel());
   await f.telemetry!.whenSettled();
   assert.deepEqual(f.requests, []);
+});
+
+class PendingAudio implements TelemetryAudioElement {
+  onloadeddata: (() => void) | null = null;
+  onended: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  async play(): Promise<void> {}
+}
+
+it("reset cannot let an old finally clear the new playback cancel handle", async () => {
+  const slot: PlaybackCancellationSlot = { current: null };
+  const oldAudio = new PendingAudio();
+  const old = playAudioItemLifecycle({
+    audio: oldAudio,
+    telemetry: null,
+    onPlaybackStarted: () => {},
+    prepareAudio: () => {},
+    pauseAfterMs: 0,
+    cancellationSlot: slot,
+  });
+  cancelPlaybackLifecycle(slot);
+
+  const newAudio = new PendingAudio();
+  const current = playAudioItemLifecycle({
+    audio: newAudio,
+    telemetry: null,
+    onPlaybackStarted: () => {},
+    prepareAudio: () => {},
+    pauseAfterMs: 0,
+    cancellationSlot: slot,
+  });
+  assert.equal(await old, "cancelled");
+  assert.notEqual(slot.current, null);
+  cancelPlaybackLifecycle(slot);
+  assert.equal(await current, "cancelled");
+  assert.equal(slot.current, null);
+});
+
+it("reset during the sentence pause cancels the timer immediately", async () => {
+  const slot: PlaybackCancellationSlot = { current: null };
+  const audio = new PendingAudio();
+  let cleared = 0;
+  let timerCallback: (() => void) | null = null;
+  const running = playAudioItemLifecycle({
+    audio,
+    telemetry: null,
+    onPlaybackStarted: () => {},
+    prepareAudio: () => {},
+    pauseAfterMs: 10_000,
+    cancellationSlot: slot,
+    setTimeoutFn: (callback) => {
+      timerCallback = callback;
+      return 7 as unknown as ReturnType<typeof setTimeout>;
+    },
+    clearTimeoutFn: () => { cleared += 1; },
+  });
+  audio.onended?.();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(timerCallback);
+  cancelPlaybackLifecycle(slot);
+  assert.equal(await running, "cancelled");
+  assert.equal(cleared, 1);
+  assert.equal(slot.current, null);
+});
+
+it("uses keepalive and aborts each telemetry request after a bounded timeout", async () => {
+  let aborted = 0;
+  const requestOptions: RequestInit[] = [];
+  const telemetry = createTrackedPlaybackTelemetry(
+    new Response(null, { headers: { "X-TTS-Attempt-ID": "attempt-timeout" } }),
+    true,
+    {
+      fetchImpl: ((_input: string | URL | Request, init?: RequestInit) => {
+        requestOptions.push(init ?? {});
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            aborted += 1;
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        });
+      }) as typeof fetch,
+      randomUUID: () => "event-timeout",
+      requestTimeoutMs: 1,
+      wait: async () => {},
+    },
+  );
+  assert.ok(telemetry);
+  assert.equal(await telemetry!.emit("play_started"), false);
+  assert.equal(aborted, 2);
+  assert.equal(requestOptions.every((options) => options.keepalive === true), true);
+  assert.equal(requestOptions.every((options) => options.signal instanceof AbortSignal), true);
+  flushPendingPlaybackEvents(() => true);
+});
+
+it("flushes bounded pending events on pagehide with the original safe body and cleans listeners", async () => {
+  const handlers = new Map<string, () => void>();
+  const removed: string[] = [];
+  const target = {
+    addEventListener(type: string, handler: () => void) { handlers.set(type, handler); },
+    removeEventListener(type: string) { removed.push(type); handlers.delete(type); },
+  };
+  const beacons: Array<{ url: string; body: Blob }> = [];
+  const telemetry = createTrackedPlaybackTelemetry(
+    new Response(null, { headers: { "X-TTS-Attempt-ID": "attempt-pagehide" } }),
+    true,
+    {
+      fetchImpl: async () => new Response(null, { status: 500 }),
+      randomUUID: () => "event-pagehide",
+      wait: async () => {},
+    },
+  );
+  assert.ok(telemetry);
+  await telemetry!.emit("play_failed");
+  const cleanup = installPlaybackTelemetryFlushListeners(
+    target,
+    (url, body) => { beacons.push({ url, body }); return true; },
+  );
+  assert.deepEqual(Array.from(handlers.keys()).sort(), ["beforeunload", "pagehide"]);
+  handlers.get("pagehide")?.();
+  cleanup();
+  assert.deepEqual(removed.sort(), ["beforeunload", "pagehide"]);
+  assert.equal(handlers.size, 0);
+  assert.equal(beacons.length, 1);
+  assert.equal(beacons[0].url, "/api/playback-event");
+  assert.equal(beacons[0].body.type, "application/json");
+  const body = JSON.parse(await beacons[0].body.text()) as Record<string, unknown>;
+  assert.deepEqual(body, {
+    eventId: "event-pagehide",
+    ttsAttemptId: "attempt-pagehide",
+    eventType: "play_failed",
+    clientElapsedMs: body.clientElapsedMs,
+  });
+  assert.equal(Number.isInteger(body.clientElapsedMs), true);
+  assert.doesNotMatch(JSON.stringify(body), /audio|transcript|raw error/i);
+});
+
+it("caps page-lifecycle pending telemetry at 32 safe events", async () => {
+  const eventTypes = [
+    "audio_ready", "play_started", "play_completed", "play_failed",
+  ] as const;
+  let eventId = 0;
+  for (let attempt = 0; attempt < 9; attempt += 1) {
+    const telemetry = createTrackedPlaybackTelemetry(
+      new Response(null, { headers: { "X-TTS-Attempt-ID": `attempt-bounded-${attempt}` } }),
+      true,
+      {
+        fetchImpl: async () => new Response(null, { status: 500 }),
+        randomUUID: () => `event-bounded-${++eventId}`,
+        wait: async () => {},
+      },
+    );
+    assert.ok(telemetry);
+    await Promise.all(eventTypes.map((eventType) => telemetry!.emit(eventType)));
+  }
+  const bodies: Blob[] = [];
+  assert.equal(flushPendingPlaybackEvents((_url, body) => {
+    bodies.push(body);
+    return true;
+  }), 32);
+  assert.equal(bodies.length, 32);
+  for (const body of bodies) {
+    assert.deepEqual(
+      Object.keys(JSON.parse(await body.text()) as Record<string, unknown>).sort(),
+      ["clientElapsedMs", "eventId", "eventType", "ttsAttemptId"],
+    );
+  }
+});
+
+it("does not retain terminal 4xx telemetry for unload retries", async () => {
+  const telemetry = createTrackedPlaybackTelemetry(
+    new Response(null, { headers: { "X-TTS-Attempt-ID": "attempt-terminal" } }),
+    true,
+    {
+      fetchImpl: async () => new Response(null, { status: 403 }),
+      randomUUID: () => "event-terminal",
+    },
+  );
+  assert.ok(telemetry);
+  assert.equal(await telemetry!.emit("play_started"), false);
+  assert.equal(flushPendingPlaybackEvents(() => true), 0);
 });

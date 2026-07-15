@@ -6,8 +6,11 @@ import { use } from "react";
 import AppShell from "@/components/AppShell";
 import { OrderedPlaybackQueue } from "@/lib/orderedPlaybackQueue";
 import {
+  cancelPlaybackLifecycle,
   createTrackedPlaybackTelemetry,
-  playAudioWithTelemetry,
+  installPlaybackTelemetryFlushListeners,
+  playAudioItemLifecycle,
+  type PlaybackCancellationSlot,
   type PlaybackTelemetry,
 } from "@/lib/playbackTelemetryClient";
 import {
@@ -24,6 +27,7 @@ type PreparedSpeech = {
   requestedAt: number;
   serverMs: string | null;
   playbackTelemetry: PlaybackTelemetry | null;
+  generation: number;
 };
 
 export default function ChatPage({ params }: { params: Promise<{ id: string }> }) {
@@ -43,7 +47,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const ttsControllersRef = useRef(new Set<AbortController>());
   const playbackQueueRef = useRef<OrderedPlaybackQueue<PreparedSpeech> | null>(null);
   const pendingSpeechRef = useRef(0);
-  const playbackDoneRef = useRef<(() => void) | null>(null);
+  const playbackDoneRef = useRef<PlaybackCancellationSlot["current"]>(null);
+  const speechGenerationRef = useRef(0);
   const turnStartedAtRef = useRef(0);
   const firstAudioReportedRef = useRef(false);
 
@@ -56,12 +61,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   useEffect(() => { loadHistory(); }, [personaId]);
 
   useEffect(() => () => stopSpeech(), []);
+  useEffect(() => installPlaybackTelemetryFlushListeners(), []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  function finishSpeechItem() {
+  function finishSpeechItem(generation: number) {
+    if (generation !== speechGenerationRef.current) return;
     pendingSpeechRef.current = Math.max(0, pendingSpeechRef.current - 1);
     if (pendingSpeechRef.current === 0) setSpeaking(false);
   }
@@ -72,10 +79,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       if (!audio) throw new Error("播放器不可用");
       if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
       blobUrlRef.current = URL.createObjectURL(prepared.blob);
-      await playAudioWithTelemetry(
+      await playAudioItemLifecycle({
         audio,
-        prepared.playbackTelemetry,
-        () => {
+        telemetry: prepared.playbackTelemetry,
+        onPlaybackStarted: () => {
           if (!firstAudioReportedRef.current && turnStartedAtRef.current > 0) {
             firstAudioReportedRef.current = true;
             console.info(JSON.stringify({
@@ -86,19 +93,16 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             }));
           }
         },
-        (cancelPlayback) => {
-          playbackDoneRef.current = cancelPlayback;
+        prepareAudio: () => {
           audio.src = blobUrlRef.current;
         },
-      );
-      if (prepared.plan.pauseAfterMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, prepared.plan.pauseAfterMs));
-      }
+        pauseAfterMs: prepared.plan.pauseAfterMs,
+        cancellationSlot: playbackDoneRef,
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      playbackDoneRef.current = null;
-      finishSpeechItem();
+      finishSpeechItem(prepared.generation);
     }
   }
 
@@ -107,7 +111,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       playbackQueueRef.current = new OrderedPlaybackQueue<PreparedSpeech>(
         playPreparedSpeech,
         (err) => {
-          finishSpeechItem();
           if (!(err instanceof DOMException && err.name === "AbortError")) {
             setError(err instanceof Error ? err.message : String(err));
           }
@@ -121,9 +124,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     for (const controller of ttsControllersRef.current) controller.abort();
     ttsControllersRef.current.clear();
     playbackQueueRef.current?.reset();
+    speechGenerationRef.current += 1;
     pendingSpeechRef.current = 0;
-    playbackDoneRef.current?.();
-    playbackDoneRef.current = null;
+    cancelPlaybackLifecycle(playbackDoneRef);
     const audio = audioRef.current;
     if (audio) {
       audio.pause();
@@ -135,7 +138,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     setSpeaking(false);
   }
 
-  async function requestSpeech(plan: SpeechPlan | TrackedSpeechPlan): Promise<PreparedSpeech> {
+  async function requestSpeech(
+    plan: SpeechPlan | TrackedSpeechPlan,
+    generation: number,
+  ): Promise<PreparedSpeech> {
     const controller = new AbortController();
     ttsControllersRef.current.add(controller);
     const requestedAt = performance.now();
@@ -155,6 +161,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         requestedAt,
         serverMs: r.headers.get("X-TTS-Ms"),
         playbackTelemetry,
+        generation,
       };
     } finally {
       ttsControllersRef.current.delete(controller);
@@ -162,9 +169,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   }
 
   function enqueueSpeech(plan: SpeechPlan | TrackedSpeechPlan) {
+    const generation = speechGenerationRef.current;
     pendingSpeechRef.current += 1;
     setSpeaking(true);
-    getPlaybackQueue().enqueue(requestSpeech(plan));
+    getPlaybackQueue().enqueue(requestSpeech(plan, generation).catch((error) => {
+      finishSpeechItem(generation);
+      throw error;
+    }));
   }
 
   function speak(replyText: string) {

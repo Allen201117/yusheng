@@ -193,6 +193,18 @@ it("adds owner-consistent auditable restoration feedback schema", async () => {
   assert.match(sql, /CHECK \(comment IS NULL OR char_length\(comment\) <= 1000\)/);
 });
 
+it("adds the one-event-type-per-attempt playback uniqueness migration", async () => {
+  const sql = await readFile(
+    new URL("../migrations/007_playback_event_cardinality.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /DELETE FROM playback_events/);
+  assert.match(
+    sql,
+    /CREATE UNIQUE INDEX IF NOT EXISTS idx_playback_events_one_type_per_attempt\s+ON playback_events\(tts_attempt_id, event_type\)/,
+  );
+});
+
 it("locks the owner-scoped persona before atomically reusing an active restoration session", async () => {
   const now = "2026-07-14T10:00:00.000Z";
   const fake = createFakeSql((text) => {
@@ -1568,7 +1580,7 @@ it("records playback events with an owner lock and conflict-safe insert", async 
   assert.match(fake.calls[0].text, /attempt\.status = 'completed'/);
   assert.match(fake.calls[0].text, /sessions\.evaluator_user_id = \$2/);
   assert.match(fake.calls[0].text, /FOR UPDATE OF attempt/);
-  assert.match(fake.calls[1].text, /ON CONFLICT \(event_id\) DO NOTHING/);
+  assert.match(fake.calls[1].text, /ON CONFLICT DO NOTHING/);
   assert.match(fake.calls[1].text, /RETURNING event_id/);
   for (const call of fake.calls) assertContiguousPostgresPlaceholders(call);
 });
@@ -1600,7 +1612,7 @@ it("returns false only for an identical Postgres playback retry", async () => {
   assert.equal(fake.transactions, 1);
 });
 
-it("cannot report two created playback rows under concurrent identical requests", async () => {
+it("models the SQL conflict outcomes so two identical writes cannot both report created", async () => {
   const now = "2026-07-15T00:00:00.000Z";
   const eventRow = {
     event_id: "event-concurrent",
@@ -1633,6 +1645,39 @@ it("cannot report two created playback rows under concurrent identical requests"
     repo.recordPlaybackEvent(input),
   ]);
   assert.deepEqual(results.map((result) => result.created).sort(), [false, true]);
+  const inserts = fake.calls.filter((call) => call.text.includes("INSERT INTO playback_events"));
+  assert.equal(inserts.length, 2);
+  for (const insert of inserts) assert.match(insert.text, /ON CONFLICT DO NOTHING/);
+});
+
+it("treats a new event id with the same attempt, type and elapsed as a semantic retry", async () => {
+  const now = "2026-07-15T00:00:00.000Z";
+  const eventRow = {
+    event_id: "event-original",
+    tts_attempt_id: "attempt-1",
+    event_type: "play_started",
+    client_elapsed_ms: 42,
+    received_at: now,
+  };
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM tts_attempts attempt")) return [{ id: "attempt-1" }];
+    if (text.includes("INSERT INTO playback_events")) return [];
+    if (text.includes("FROM playback_events") && text.includes("event_type")) return [eventRow];
+    throw new Error(`unexpected query: ${text}`);
+  });
+  const result = await createPostgresRepository(fake.executor).recordPlaybackEvent({
+    eventId: "event-new-retry-id",
+    ttsAttemptId: "attempt-1",
+    evaluatorUserId: "user-1",
+    eventType: "play_started",
+    clientElapsedMs: 42,
+  });
+  assert.equal(result.created, false);
+  assert.equal(result.event.eventId, "event-original");
+  assert.match(
+    fake.calls.find((call) => call.text.includes("FROM playback_events"))!.text,
+    /event_id = \$1[\s\S]*tts_attempt_id = \$2[\s\S]*event_type = \$3/,
+  );
 });
 
 it("locks the persona before persisting a null-session boundary turn", async () => {

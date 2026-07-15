@@ -152,6 +152,15 @@ it("creates all restoration feedback tables and legacy-safe turn columns", () =>
   const trackingFailed = turnColumns.find((column) => column.name === "speech_tracking_failed");
   assert.equal(trackingFailed?.notnull, 1);
   assert.equal(trackingFailed?.dflt_value, "0");
+  const playbackIndexes = database.pragma("index_list(playback_events)") as Array<{
+    name: string;
+    unique: number;
+  }>;
+  assert.equal(
+    playbackIndexes.some((index) =>
+      index.name === "idx_playback_events_one_type_per_attempt" && index.unique === 1),
+    true,
+  );
 });
 
 it("upgrades legacy turns without rewriting them and is idempotent", async () => {
@@ -183,6 +192,16 @@ it("upgrades legacy turns without rewriting them and is idempotent", async () =>
       last_activity_at TEXT NOT NULL,
       rated_at TEXT
     );
+    CREATE TABLE playback_events (
+      event_id TEXT PRIMARY KEY,
+      tts_attempt_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      client_elapsed_ms INTEGER NOT NULL,
+      received_at TEXT NOT NULL
+    );
+    INSERT INTO playback_events VALUES
+      ('legacy-event-1', 'legacy-attempt', 'play_started', 10, '${NOW}'),
+      ('legacy-event-2', 'legacy-attempt', 'play_started', 20, '${NOW}');
     INSERT INTO users VALUES ('legacy-user');
     INSERT INTO personas VALUES ('legacy-persona', 'legacy-user', 'legacy-voice');
     INSERT INTO voice_authorizations VALUES ('legacy-auth', 'legacy-voice', 'legacy-user', 'living');
@@ -214,6 +233,16 @@ it("upgrades legacy turns without rewriting them and is idempotent", async () =>
       .get() as { cohort: string }).cohort,
     "living",
   );
+  assert.equal(
+    (legacy.prepare(
+      "SELECT COUNT(*) AS count FROM playback_events WHERE tts_attempt_id = 'legacy-attempt' AND event_type = 'play_started'",
+    ).get() as { count: number }).count,
+    1,
+  );
+  assert.throws(() => legacy.prepare(
+    `INSERT INTO playback_events VALUES
+       ('legacy-event-3', 'legacy-attempt', 'play_started', 30, '${NOW}')`,
+  ).run(), /UNIQUE constraint failed/);
   assert.throws(
     () => legacy.prepare(
       `INSERT INTO conversation_sessions
@@ -689,11 +718,46 @@ it("records completed owner-scoped playback events idempotently", async () => {
     ...input,
     eventType: "play_completed",
   }), /playback_event_conflict/);
+  const semanticRetry = await repository.recordPlaybackEvent({
+    ...input,
+    eventId: "event-owned-retry-id",
+  });
+  assert.equal(semanticRetry.created, false);
+  assert.equal(semanticRetry.event.eventId, "event-owned");
+  await assert.rejects(repository.recordPlaybackEvent({
+    ...input,
+    eventId: "event-owned-different-elapsed",
+    clientElapsedMs: 25,
+  }), /playback_event_conflict/);
   await assert.rejects(repository.recordPlaybackEvent({
     ...input,
     eventId: "event-other-owner",
     evaluatorUserId: "user-2",
   }), /playback_attempt_forbidden/);
+});
+
+it("stores at most one row for each of the four event types per attempt", async () => {
+  insertSession();
+  insertTurn();
+  insertSentence();
+  insertAttempt();
+  for (const [index, eventType] of [
+    "audio_ready", "play_started", "play_completed", "play_failed",
+  ].entries()) {
+    await repository.recordPlaybackEvent({
+      eventId: `event-type-${index}`,
+      ttsAttemptId: "attempt-1",
+      evaluatorUserId: "user-1",
+      eventType: eventType as import("../src/lib/storage/types").PlaybackEventType,
+      clientElapsedMs: index,
+    });
+  }
+  assert.equal(
+    (database.prepare(
+      "SELECT COUNT(*) AS count FROM playback_events WHERE tts_attempt_id = 'attempt-1'",
+    ).get() as { count: number }).count,
+    4,
+  );
 });
 
 it("rejects playback events for non-completed and unknown attempts", async () => {

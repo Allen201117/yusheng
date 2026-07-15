@@ -2075,7 +2075,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
           `INSERT INTO playback_events
              (event_id, tts_attempt_id, event_type, client_elapsed_ms)
            VALUES ($1, $2, $3, $4)
-           ON CONFLICT (event_id) DO NOTHING
+           ON CONFLICT DO NOTHING
            RETURNING event_id, tts_attempt_id, event_type, client_elapsed_ms, received_at`,
           [input.eventId, input.ttsAttemptId, input.eventType, input.clientElapsedMs],
         );
@@ -2085,16 +2085,20 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
 
         const existing = await transaction.query<PlaybackEventRow>(
           `SELECT event_id, tts_attempt_id, event_type, client_elapsed_ms, received_at
-           FROM playback_events WHERE event_id = $1`,
-          [input.eventId],
+           FROM playback_events WHERE event_id = $1
+              OR (tts_attempt_id = $2 AND event_type = $3)`,
+          [input.eventId, input.ttsAttemptId, input.eventType],
         );
-        if (
-          existing.length === 1
-          && existing[0].tts_attempt_id === input.ttsAttemptId
-          && existing[0].event_type === input.eventType
-          && Number(existing[0].client_elapsed_ms) === input.clientElapsedMs
-        ) {
-          return { event: mapPlaybackEvent(existing[0]), created: false };
+        const byEventId = existing.find((row) => row.event_id === input.eventId);
+        if (byEventId && (
+          byEventId.tts_attempt_id !== input.ttsAttemptId
+          || byEventId.event_type !== input.eventType
+          || Number(byEventId.client_elapsed_ms) !== input.clientElapsedMs
+        )) throw new Error("playback_event_conflict");
+        const byAttemptType = existing.find((row) =>
+          row.tts_attempt_id === input.ttsAttemptId && row.event_type === input.eventType);
+        if (byAttemptType && Number(byAttemptType.client_elapsed_ms) === input.clientElapsedMs) {
+          return { event: mapPlaybackEvent(byAttemptType), created: false };
         }
         throw new Error("playback_event_conflict");
       });
