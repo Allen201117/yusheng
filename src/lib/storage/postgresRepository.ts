@@ -2154,47 +2154,52 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       sessionId: string,
       evaluatorUserId: string,
     ): Promise<FeedbackEligibility | null> {
-      const sessions = await sql.query<{ status: FeedbackEligibility["sessionStatus"] }>(
-        `SELECT status FROM conversation_sessions
-         WHERE id = $1 AND evaluator_user_id = $2`,
+      const rows = await sql.query<{
+        status: FeedbackEligibility["sessionStatus"];
+        already_submitted: boolean;
+        completed_audible_turn_count: number | string;
+      }>(
+        `WITH owned_session AS (
+           SELECT id, persona_id, evaluator_user_id, status
+           FROM conversation_sessions
+           WHERE id = $1 AND evaluator_user_id = $2
+         )
+         SELECT owned.status,
+                EXISTS (
+                  SELECT 1 FROM conversation_feedback feedback
+                  WHERE feedback.session_id = owned.id
+                    AND feedback.evaluator_user_id = owned.evaluator_user_id
+                ) AS already_submitted,
+                (
+                  SELECT COUNT(DISTINCT turn.id)
+                  FROM conversation_turns turn
+                  WHERE turn.session_id = owned.id AND turn.persona_id = owned.persona_id
+                    AND turn.status = 'completed'
+                    AND turn.mode IN ('grounded', 'companionship')
+                    AND turn.speech_tracking_failed = false
+                    AND EXISTS (
+                      SELECT 1
+                      FROM tts_attempts attempt
+                      JOIN playback_events playback
+                        ON playback.tts_attempt_id = attempt.id
+                       AND playback.event_type = 'play_started'
+                      WHERE attempt.session_id = turn.session_id
+                        AND attempt.turn_id = turn.id
+                        AND attempt.persona_id = turn.persona_id
+                        AND attempt.status = 'completed'
+                    )
+                ) AS completed_audible_turn_count
+         FROM owned_session owned`,
         [sessionId, evaluatorUserId],
       );
-      if (sessions.length !== 1) return null;
-      const existing = await sql.query<{ exists: boolean }>(
-        `SELECT EXISTS (
-           SELECT 1 FROM conversation_feedback
-           WHERE session_id = $1 AND evaluator_user_id = $2
-         ) AS exists`,
-        [sessionId, evaluatorUserId],
-      );
-      const counts = await sql.query<{ count: number | string }>(
-        `SELECT COUNT(DISTINCT turn.id) AS count
-         FROM conversation_turns turn
-         JOIN conversation_sessions sessions
-           ON sessions.id = turn.session_id AND sessions.persona_id = turn.persona_id
-         WHERE turn.session_id = $1 AND sessions.evaluator_user_id = $2
-           AND turn.status = 'completed'
-           AND turn.mode IN ('grounded', 'companionship')
-           AND turn.speech_tracking_failed = false
-           AND EXISTS (
-             SELECT 1
-             FROM tts_attempts attempt
-             JOIN playback_events playback
-               ON playback.tts_attempt_id = attempt.id AND playback.event_type = 'play_started'
-             WHERE attempt.session_id = turn.session_id
-               AND attempt.turn_id = turn.id
-               AND attempt.persona_id = turn.persona_id
-               AND attempt.status = 'completed'
-           )`,
-        [sessionId, evaluatorUserId],
-      );
-      const count = Number(counts[0]?.count || 0);
-      const alreadySubmitted = Boolean(existing[0]?.exists);
+      if (rows.length !== 1) return null;
+      const count = Number(rows[0].completed_audible_turn_count || 0);
+      const alreadySubmitted = Boolean(rows[0].already_submitted);
       return {
         completedAudibleTurnCount: count,
         requiredAudibleTurnCount: 3,
-        eligible: sessions[0].status === "active" && !alreadySubmitted && count >= 3,
-        sessionStatus: sessions[0].status,
+        eligible: rows[0].status === "active" && !alreadySubmitted && count >= 3,
+        sessionStatus: rows[0].status,
         alreadySubmitted,
       };
     },
@@ -2210,15 +2215,51 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       comment: string | null;
     }): Promise<ConversationFeedback> {
       return sql.transaction(async (transaction) => {
+        const identities = await transaction.query<ConversationSessionRow>(
+          `SELECT id, persona_id, evaluator_user_id, voice_id, voice_authorization_id,
+                  cohort, status, started_at, last_activity_at, rated_at
+           FROM conversation_sessions
+           WHERE id = $1 AND evaluator_user_id = $2`,
+          [input.sessionId, input.evaluatorUserId],
+        );
+        if (identities.length !== 1) throw new Error("feedback_session_forbidden");
+        const identity = identities[0];
+
+        const personas = await transaction.query<{ id: string }>(
+          `SELECT id FROM personas
+           WHERE id = $1 AND user_id = $2
+           FOR UPDATE`,
+          [identity.persona_id, identity.evaluator_user_id],
+        );
+        if (personas.length !== 1) throw new Error("feedback_session_forbidden");
+
         const sessions = await transaction.query<ConversationSessionRow>(
           `SELECT id, persona_id, evaluator_user_id, voice_id, voice_authorization_id,
                   cohort, status, started_at, last_activity_at, rated_at
            FROM conversation_sessions
-           WHERE id = $1 AND evaluator_user_id = $2
+           WHERE id = $1 AND persona_id = $2 AND evaluator_user_id = $3
+             AND voice_id = $4 AND voice_authorization_id = $5
+             AND cohort = $6 AND status = $7
            FOR UPDATE`,
-          [input.sessionId, input.evaluatorUserId],
+          [
+            identity.id,
+            identity.persona_id,
+            identity.evaluator_user_id,
+            identity.voice_id,
+            identity.voice_authorization_id,
+            identity.cohort,
+            identity.status,
+          ],
         );
-        if (sessions.length !== 1) throw new Error("feedback_session_forbidden");
+        if (sessions.length !== 1) {
+          const concurrentFeedback = await transaction.query<{ id: string }>(
+            `SELECT id FROM conversation_feedback
+             WHERE session_id = $1 AND evaluator_user_id = $2`,
+            [identity.id, identity.evaluator_user_id],
+          );
+          if (concurrentFeedback.length > 0) throw new Error("feedback_already_submitted");
+          throw new Error("feedback_session_status_changed");
+        }
         const session = sessions[0];
 
         const existing = await transaction.query<{ id: string }>(

@@ -1708,9 +1708,9 @@ const POSTGRES_FEEDBACK_INPUT = {
 
 it("reads only owner-scoped feedback eligibility from distinct audible turns", async () => {
   const fake = createFakeSql((text) => {
-    if (text.includes("SELECT status FROM conversation_sessions")) return [{ status: "active" }];
-    if (text.includes("SELECT EXISTS")) return [{ exists: false }];
-    if (text.includes("COUNT(DISTINCT turn.id)")) return [{ count: "3" }];
+    if (text.includes("WITH owned_session AS")) {
+      return [{ status: "active", already_submitted: false, completed_audible_turn_count: "3" }];
+    }
     throw new Error(`unexpected query: ${text}`);
   });
   const result = await createPostgresRepository(fake.executor)
@@ -1722,17 +1722,17 @@ it("reads only owner-scoped feedback eligibility from distinct audible turns", a
     sessionStatus: "active",
     alreadySubmitted: false,
   });
-  const count = fake.calls.find((call) => call.text.includes("COUNT(DISTINCT turn.id)"))!;
+  assert.equal(fake.calls.length, 1);
+  const count = fake.calls[0];
+  assert.match(count.text, /WITH owned_session AS/);
   assert.match(count.text, /turn\.status = 'completed'/);
   assert.match(count.text, /turn\.mode IN \('grounded', 'companionship'\)/);
   assert.match(count.text, /turn\.speech_tracking_failed = false/);
   assert.match(count.text, /attempt\.status = 'completed'/);
   assert.match(count.text, /playback\.event_type = 'play_started'/);
   assert.doesNotMatch(count.text, /play_completed/);
-  for (const call of fake.calls) {
-    assert.deepEqual(call.params, ["session-1", "user-1"]);
-    assertContiguousPostgresPlaceholders(call);
-  }
+  assert.deepEqual(count.params, ["session-1", "user-1"]);
+  assertContiguousPostgresPlaceholders(count);
 });
 
 it("returns null eligibility for unknown and non-owned sessions without probing evidence", async () => {
@@ -1779,6 +1779,8 @@ it("atomically submits feedback using only the locked session identity snapshot"
     created_at: now,
   };
   const fake = createFakeSql((text) => {
+    if (text.includes("FROM conversation_sessions") && !text.includes("FOR UPDATE")) return [session];
+    if (text.includes("FROM personas") && text.includes("FOR UPDATE")) return [{ id: "persona-server" }];
     if (text.includes("FROM conversation_sessions") && text.includes("FOR UPDATE")) return [session];
     if (text.includes("SELECT id FROM conversation_feedback")) return [];
     if (text.includes("COUNT(DISTINCT turn.id)")) return [{ count: 3 }];
@@ -1791,8 +1793,21 @@ it("atomically submits feedback using only the locked session identity snapshot"
   assert.equal(fake.transactions, 1);
   assert.equal(result.personaId, "persona-server");
   assert.equal(result.evaluatorUserId, "user-1");
-  const lock = fake.calls[0];
-  assert.match(lock.text, /id = \$1 AND evaluator_user_id = \$2[\s\S]*FOR UPDATE/);
+  const identityRead = fake.calls[0];
+  assert.match(identityRead.text, /id = \$1 AND evaluator_user_id = \$2/);
+  assert.doesNotMatch(identityRead.text, /FOR UPDATE/);
+  const personaLockIndex = fake.calls.findIndex((call) =>
+    call.text.includes("FROM personas") && call.text.includes("FOR UPDATE"));
+  const sessionLockIndex = fake.calls.findIndex((call) =>
+    call.text.includes("FROM conversation_sessions") && call.text.includes("FOR UPDATE"));
+  assert.ok(personaLockIndex > 0);
+  assert.ok(sessionLockIndex > personaLockIndex);
+  const lock = fake.calls[sessionLockIndex];
+  assert.match(lock.text, /persona_id = \$2/);
+  assert.match(lock.text, /evaluator_user_id = \$3/);
+  assert.match(lock.text, /voice_authorization_id = \$5/);
+  assert.match(lock.text, /cohort = \$6/);
+  assert.match(lock.text, /status = \$7/);
   const count = fake.calls.find((call) => call.text.includes("COUNT(DISTINCT turn.id)"))!;
   assert.match(count.text, /COUNT\(DISTINCT turn\.id\)/);
   assert.deepEqual(count.params, ["session-1", "persona-server"]);
@@ -1824,6 +1839,7 @@ it("rejects duplicate or insufficient feedback before insertion", async () => {
   };
   const duplicate = createFakeSql((text) => {
     if (text.includes("FROM conversation_sessions")) return [session];
+    if (text.includes("FROM personas")) return [{ id: "persona-1" }];
     if (text.includes("SELECT id FROM conversation_feedback")) return [{ id: "existing" }];
     throw new Error(`unexpected query: ${text}`);
   });
@@ -1835,6 +1851,7 @@ it("rejects duplicate or insufficient feedback before insertion", async () => {
 
   const insufficient = createFakeSql((text) => {
     if (text.includes("FROM conversation_sessions")) return [session];
+    if (text.includes("FROM personas")) return [{ id: "persona-1" }];
     if (text.includes("SELECT id FROM conversation_feedback")) return [];
     if (text.includes("COUNT(DISTINCT turn.id)")) return [{ count: 2 }];
     throw new Error(`unexpected query: ${text}`);

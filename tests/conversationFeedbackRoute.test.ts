@@ -113,10 +113,14 @@ function fixture(options: {
 
 it("authenticates before parsing either feedback request", async () => {
   const post = fixture({ authError: true });
-  assert.equal((await post.handlers.POST(rawRequest("not-json"))).status, 401);
+  const postResponse = await post.handlers.POST(rawRequest("not-json"));
+  assert.equal(postResponse.status, 401);
+  assert.equal(postResponse.headers.get("cache-control"), "no-store");
   assert.equal(post.repositoryConstructed(), 0);
   const get = fixture({ authError: true });
-  assert.equal((await get.handlers.GET(request("GET", undefined, "sessionId=%00"))).status, 401);
+  const getResponse = await get.handlers.GET(request("GET", undefined, "sessionId=%00"));
+  assert.equal(getResponse.status, 401);
+  assert.equal(getResponse.headers.get("cache-control"), "no-store");
   assert.equal(get.repositoryConstructed(), 0);
 });
 
@@ -124,6 +128,7 @@ it("accepts the exact complete body, normalizes comment, and returns effective",
   const f = fixture();
   const response = await f.handlers.POST(request("POST", VALID_BODY));
   assert.equal(response.status, 201);
+  assert.equal(response.headers.get("cache-control"), "no-store");
   assert.deepEqual(await response.json(), {
     feedbackId: "feedback-1",
     sessionId: "session-1",
@@ -182,6 +187,7 @@ it("GET returns only the current user's minimal eligibility", async () => {
   const f = fixture();
   const response = await f.handlers.GET(request("GET"));
   assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
   const payload = await response.json();
   assert.deepEqual(payload, ELIGIBLE);
   assert.deepEqual(f.eligibilityReads, [{ sessionId: "session-1", evaluatorUserId: "user-1" }]);
@@ -232,6 +238,11 @@ it("red lines override high scores and generic failures never leak feedback", as
   }));
   assert.equal(response.status, 201);
   assert.equal((await response.json()).effective, false);
+  const routeSource = await import("node:fs/promises").then(({ readFile }) => readFile(
+    new URL("../src/lib/conversationFeedbackRoute.ts", import.meta.url),
+    "utf8",
+  ));
+  assert.doesNotMatch(routeSource, /cohort:\s*["']living["']/);
 
   const failed = fixture({
     repositoryError: new Error("raw comment 5 4 4 5 provider transcript secret"),

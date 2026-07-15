@@ -1,6 +1,7 @@
 import type {
   RestorationCohort,
   RestorationMetricRow,
+  RestorationScores,
 } from "./storage/types";
 
 const INITIAL_EVALUATOR_COUNT = 10;
@@ -15,15 +16,19 @@ export type CohortSummary = {
   meetsInitialGate: boolean;
 };
 
+export function isEffectiveRestorationScores(scores: RestorationScores): boolean {
+  return scores.voiceSimilarity >= 4
+    && scores.expressionSimilarity >= 4
+    && scores.emotionFit >= 4
+    && scores.factTrust >= 4
+    && scores.discomfort <= 2
+    && !scores.majorFabrication
+    && !scores.identityImpersonation
+    && !scores.authorizationViolation;
+}
+
 export function isEffectiveRestorationFeedback(row: RestorationMetricRow): boolean {
-  return row.voiceSimilarity >= 4
-    && row.expressionSimilarity >= 4
-    && row.emotionFit >= 4
-    && row.factTrust >= 4
-    && row.discomfort <= 2
-    && !row.majorFabrication
-    && !row.identityImpersonation
-    && !row.authorizationViolation;
+  return isEffectiveRestorationScores(row);
 }
 
 function summarizeCohort(

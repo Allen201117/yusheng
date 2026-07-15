@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "./guard";
 import { logger } from "./logger";
-import { isEffectiveRestorationFeedback } from "./restorationMetrics";
+import { isEffectiveRestorationScores } from "./restorationMetrics";
 import { getRepository } from "./storage/repository";
 import type {
   AppRepository,
@@ -48,7 +48,12 @@ const MAX_ID_LENGTH = 100;
 const MAX_COMMENT_LENGTH = 1000;
 
 function jsonError(error: string, code: string, status: number, extra?: Record<string, number>) {
-  return NextResponse.json({ error, code, ...extra }, { status });
+  return noStore(NextResponse.json({ error, code, ...extra }, { status }));
+}
+
+function noStore(response: NextResponse): NextResponse {
+  response.headers.set("Cache-Control", "no-store");
+  return response;
 }
 
 function validId(value: unknown): value is string {
@@ -152,7 +157,7 @@ export function createConversationFeedbackHandlers(
 
   async function GET(request: NextRequest): Promise<NextResponse> {
     const auth = await deps.requireAuth(request);
-    if ("error" in auth) return auth.error;
+    if ("error" in auth) return noStore(auth.error);
     const sessionId = parseSessionQuery(request);
     if (!sessionId) return jsonError("会话参数无效", "INVALID_FEEDBACK_SESSION", 400);
     try {
@@ -160,7 +165,7 @@ export function createConversationFeedbackHandlers(
       if (!eligibility) {
         return jsonError("无法访问该会话反馈", "FEEDBACK_SESSION_FORBIDDEN", 403);
       }
-      return NextResponse.json(eligibility, { status: 200 });
+      return noStore(NextResponse.json(eligibility, { status: 200 }));
     } catch (error) {
       deps.logError("conversation_feedback_eligibility_failed", {
         sessionId,
@@ -172,7 +177,7 @@ export function createConversationFeedbackHandlers(
 
   async function POST(request: NextRequest): Promise<NextResponse> {
     const auth = await deps.requireAuth(request);
-    if ("error" in auth) return auth.error;
+    if ("error" in auth) return noStore(auth.error);
     let rawBody: unknown;
     try {
       rawBody = await request.json();
@@ -188,13 +193,10 @@ export function createConversationFeedbackHandlers(
         ...input,
         evaluatorUserId: auth.userId,
       });
-      const effective = isEffectiveRestorationFeedback({
-        ...saved,
-        cohort: "living",
-      });
-      return NextResponse.json({ feedbackId: saved.id, sessionId: saved.sessionId, effective }, {
+      const effective = isEffectiveRestorationScores(saved);
+      return noStore(NextResponse.json({ feedbackId: saved.id, sessionId: saved.sessionId, effective }, {
         status: 201,
-      });
+      }));
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
       if (message === "feedback_session_forbidden") {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { it } from "node:test";
 import {
   isEffectiveRestorationFeedback,
+  isEffectiveRestorationScores,
   summarizeRestorationFeedback,
 } from "../src/lib/restorationMetrics";
 import type { SpeechEmotion } from "../src/lib/speechPlanning";
@@ -68,6 +69,12 @@ function cohortRows(options: {
 
 it("accepts feedback exactly on every effective-restoration threshold", () => {
   assert.equal(isEffectiveRestorationFeedback(feedbackRow("qualified")), true);
+});
+
+it("calculates effectiveness from scores without inventing a cohort", () => {
+  const { sessionId: _sessionId, evaluatorUserId: _evaluatorUserId, cohort: _cohort, ...scores } = feedbackRow("scores-only");
+  assert.equal(isEffectiveRestorationScores(scores), true);
+  assert.equal(isEffectiveRestorationScores({ ...scores, authorizationViolation: true }), false);
 });
 
 it("rejects a score of 3 for each positive restoration dimension", () => {
