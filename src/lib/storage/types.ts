@@ -673,6 +673,7 @@ export interface AppRepository {
     scores: RestorationScores;
     comment: string | null;
   }): Promise<ConversationFeedback>;
+  listRestorationMetricRows(): Promise<RestorationMetricRow[]>;
   failConversationTurn(input: {
     turnId: string;
     personaId: string;

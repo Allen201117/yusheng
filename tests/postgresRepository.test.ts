@@ -1995,6 +1995,73 @@ it("blocks Postgres feedback while speech synthesis is still started", async () 
   assert.equal(fake.calls.some((call) => call.text.includes("UPDATE conversation_sessions")), false);
 });
 
+it("queries and maps only the aggregate restoration metric whitelist", async () => {
+  const fake = createFakeSql((text) => {
+    if (!text.includes("FROM conversation_feedback")) throw new Error(`unexpected query: ${text}`);
+    return [{
+      session_id: "session-report",
+      evaluator_user_id: "user-report",
+      cohort: "deceased",
+      voice_similarity: 5,
+      expression_similarity: 4,
+      emotion_fit: 4,
+      fact_trust: 5,
+      discomfort: 1,
+      major_fabrication: false,
+      identity_impersonation: false,
+      authorization_violation: false,
+    }];
+  });
+
+  const rows = await createPostgresRepository(fake.executor).listRestorationMetricRows();
+  assert.deepEqual(rows, [{
+    sessionId: "session-report",
+    evaluatorUserId: "user-report",
+    cohort: "deceased",
+    voiceSimilarity: 5,
+    expressionSimilarity: 4,
+    emotionFit: 4,
+    factTrust: 5,
+    discomfort: 1,
+    majorFabrication: false,
+    identityImpersonation: false,
+    authorizationViolation: false,
+  }]);
+  assert.equal(fake.calls.length, 1);
+  const query = fake.calls[0];
+  assert.deepEqual(query.params, []);
+  for (const column of [
+    "feedback.session_id",
+    "feedback.evaluator_user_id",
+    "sessions.cohort",
+    "feedback.voice_similarity",
+    "feedback.expression_similarity",
+    "feedback.emotion_fit",
+    "feedback.fact_trust",
+    "feedback.discomfort",
+    "feedback.major_fabrication",
+    "feedback.identity_impersonation",
+    "feedback.authorization_violation",
+  ]) assert.match(query.text, new RegExp(column.replace(".", "\\.")));
+  assert.doesNotMatch(
+    query.text,
+    /\b(email|persona_name|comment|sentence|text|voice_id|provider|object_path|audio)\b/i,
+  );
+  assert.deepEqual(Object.keys(rows[0]).sort(), [
+    "authorizationViolation",
+    "cohort",
+    "discomfort",
+    "emotionFit",
+    "evaluatorUserId",
+    "expressionSimilarity",
+    "factTrust",
+    "identityImpersonation",
+    "majorFabrication",
+    "sessionId",
+    "voiceSimilarity",
+  ]);
+});
+
 it("locks the persona before persisting a null-session boundary turn", async () => {
   const now = "2026-07-14T00:00:00.000Z";
   const startedBoundary = {

@@ -146,8 +146,43 @@ it("summarizes living and deceased sessions separately without merging an evalua
 it("reports null rates for cohorts with no feedback", () => {
   const summary = summarizeRestorationFeedback([]);
 
-  assert.equal(summary.living.effectiveRate, null);
-  assert.equal(summary.deceased.effectiveRate, null);
+  assert.deepEqual(summary, {
+    living: {
+      evaluatorCount: 0,
+      sessionCount: 0,
+      effectiveSessionCount: 0,
+      effectiveRate: null,
+      meetsInitialGate: false,
+    },
+    deceased: {
+      evaluatorCount: 0,
+      sessionCount: 0,
+      effectiveSessionCount: 0,
+      effectiveRate: null,
+      meetsInitialGate: false,
+    },
+    bothCohortsMeetInitialGate: false,
+  });
+});
+
+it("keeps both cohorts below the gate when each has only dry-run evidence", () => {
+  const living = cohortRows({
+    cohort: "living",
+    evaluatorCount: 2,
+    sessionCount: 6,
+    effectiveSessionCount: 6,
+  });
+  const deceased = cohortRows({
+    cohort: "deceased",
+    evaluatorCount: 2,
+    sessionCount: 6,
+    effectiveSessionCount: 6,
+  });
+
+  const summary = summarizeRestorationFeedback([...living, ...deceased]);
+  assert.equal(summary.living.meetsInitialGate, false);
+  assert.equal(summary.deceased.meetsInitialGate, false);
+  assert.equal(summary.bothCohortsMeetInitialGate, false);
 });
 
 it("returns the exact effective rate without rounding non-terminating decimals", () => {

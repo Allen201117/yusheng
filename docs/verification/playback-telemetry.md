@@ -10,6 +10,8 @@
 - SQLite enforces one row per `(tts_attempt_id, event_type)` and owner-scoped idempotency.
 - Postgres repository tests verify the lock order, targetless `ON CONFLICT DO NOTHING`, composite unique-index migration, and created/idempotent/conflict result branches.
 
+This is non-visual browser wiring: it changes event reporting only and does not change layout or UI. `play_started` is client-attested evidence that the browser reported playback start; it does not prove that the evaluator heard the whole clip. A successful TTS attempt proves synthesis, not playback. The evaluator's explicit all-rounds attestation remains separately required before feedback is accepted. See [restoration-feedback.md](./restoration-feedback.md) for the aggregate product gate.
+
 The stable idempotency rule is: the same attempt, event type, and elapsed time is an idempotent retry even if a restarted client proposes a new event ID; the stored original row is returned with `created:false`. Reusing an event ID for another attempt/type, or reporting another elapsed time for an already stored attempt/type, is a conflict. Migration `007` locks the table against concurrent writes, then deterministically keeps the earliest existing row by `received_at, event_id` before adding the cardinality constraint.
 
 ## Not proven locally
@@ -18,4 +20,4 @@ There is no reachable local PostgreSQL service on `127.0.0.1:5432`. The Postgres
 
 Before production promotion, apply migration `007_playback_event_cardinality.sql` to an isolated Preview database, send concurrent identical and conflicting playback requests, and verify directly that exactly one row exists for each `(tts_attempt_id, event_type)` and that at most one request reports `created:true`.
 
-The local browser tests use controlled audio objects. Real browser lifecycle delivery, real provider audio, Preview authentication, and deployed database readback remain external verification gates.
+The local browser tests use controlled audio objects. Real Preview browser lifecycle delivery, real provider audio, Preview authentication, and deployed database readback remain external verification gates.

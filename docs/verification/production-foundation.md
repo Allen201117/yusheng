@@ -1,13 +1,15 @@
 # Production Foundation Verification
 
-Updated: 2026-07-14 (Asia/Shanghai)
+Updated: 2026-07-15 (Asia/Shanghai)
 
 ## Local evidence
 
 - Grounded focused regression bundle: 155 passed, 0 failed.
-- `npm test`: 298 passed, 0 failed after hardening grounded verification result categories, cancellable provider timeouts and persona-bound external TTS retry coverage.
+- `npm test`: 408 passed, 0 failed after adding restoration session/feedback qualification, browser playback telemetry and aggregate-report privacy coverage.
 - `npm run typecheck`: passed.
-- `npm run build`: passed on Next.js 15.5.20 and includes `/api/chat`.
+- `npm run build`: passed on Next.js 15.5.20 and includes `/api/chat`, `/api/tts`, `/api/playback-event` and `/api/conversation-feedback`.
+- `npm run db:migrate:dry`: passed and lists migrations `001` through `007`, including restoration feedback and playback-event cardinality.
+- Empty `npm run report:restoration`: returns zero evaluators/sessions/effective sessions, `null` rates and `bothCohortsMeetInitialGate:false`.
 - `git diff --check`: passed.
 - Production local-storage guard: `NODE_ENV=production STORAGE_BACKEND=local` fails with `Production requires STORAGE_BACKEND=cloud`.
 - Provider preset local evidence: ready presets avoid Blob reads; stale preset URI errors mark the preset failed and retry dynamic cloning once; general provider outages do not double-call; deleting voices cannot start new synthesis.
@@ -18,7 +20,8 @@ Updated: 2026-07-14 (Asia/Shanghai)
 - Deterministic probes verify routing and evidence only. They do not prove subjective voice resemblance, emotional authenticity or real-user success.
 - `npm run probe:grounded` on 2026-07-14 returned `provider_not_configured` (exit 2). The four-case synthetic real-model behavior remains unverified in this shell; this is recorded as missing evidence, not a pass.
 - Probe result semantics are regression-tested separately: only completed content assertion failures are `red_line_failed` (exit 1); missing configuration is exit 2; network, HTTP 401/429/5xx, timeout and response parsing failures are `provider_failed` (exit 3). Every case has one cancellable provider call at most, and provider reports include only stable error category/name fields.
-- Not locally complete: browser playback telemetry, effective-restoration feedback, people who know the voice owner, and a usable Preview environment.
+- Restoration feedback local evidence: non-visual browser telemetry sends the tracked playback lifecycle, feedback requires three distinct completed audible turns and blocks while any turn/TTS attempt is still started, red lines override scores, and the aggregate command separates living/deceased cohorts while excluding comments, transcripts, voice/provider metadata and audio paths. `play_started` is client-attested and TTS success is not proof of playback or listening completion.
+- Not locally complete: real Preview browser + provider + database readback, people who know the voice owner, the 2+2 dry run, the 10/30/60% gate in each cohort, and a usable Preview environment. Synthetic tests are not user proof.
 - Local tests, typecheck and build do not authorize a push, Preview deployment or Production promotion.
 
 ## Vercel project and Git deployment

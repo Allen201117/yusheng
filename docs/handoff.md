@@ -1,6 +1,6 @@
 # 余声交接文档
 
-> 最后更新：2026-07-14
+> 最后更新：2026-07-15
 > 当前阶段：已上线产品的生产底座加固；云存储切换尚需真实 Preview 验证
 
 ## 产品定位
@@ -63,6 +63,7 @@ migrations/001_production_foundation.sql  Postgres / pgvector schema
 migrations/002_provider_voice_lifecycle.sql 供应商音色状态机
 scripts/apply-migrations.ts               幂等 schema migration
 scripts/migrate-local-data.ts             SQLite + 本地声音盘点和迁移
+scripts/report-restoration-feedback.ts    只输出健在/逝者聚合指标的运营命令
 src/lib/storage/config.ts                 生产存储强制保护
 src/lib/storage/repository.ts             本地/云 repository 选择
 src/lib/storage/postgresRepository.ts     Neon 数据访问
@@ -133,7 +134,7 @@ NODE_ENV=production STORAGE_BACKEND=local \
 - 授权记录、撤回和受控预置 API 已有后端；只有健在本人会自动 approved，亲友与逝者均待人工审核。已有授权记录一旦为 pending/revoked 就禁止 TTS；开关关闭时只兼容“完全没有授权记录”的旧声音。当前没有功能客户端，Production 不得设置 `VOICE_AUTH_ENFORCEMENT=enabled`。
 - SiliconFlow 用户预置音色需供应商账号完成实名认证；当前尚无真实成功证据。
 - 健在第三人授权证据核验、逝者场景人工审核、删除完成凭证和用户可见的 AI 合成标识仍未完成。
-- 三层人物知识、confirmed-only 检索、grounded/companionship/boundary 路由和消息级 evidence 已落地。AI 候选提取、浏览器播放 telemetry（真实请求/音频就绪/播放时间点）、有效还原反馈和真实用户验证尚未落地。
+- 三层人物知识、confirmed-only 检索、grounded/companionship/boundary 路由、消息级 evidence、非视觉浏览器播放 telemetry、评分资格和健在/逝者聚合报告已本地落地。`play_started` 只证明客户端报告开始播放，TTS 成功不等于已播放/已听完。真实 Preview 浏览器 + provider + DB readback、有效还原真实用户样本和 AI 候选提取仍未完成。详见 `docs/verification/restoration-feedback.md`。
 - 真实模型虚构数据探针与确定性单测分开记录，两者都不能替代认识声音主人的人评价“是不是像”。
 - 本地测试、类型检查和构建通过只证明当前代码库门禁，不授权推送、Preview 或 Production 发布。
 - 自伤检测仍是关键词规则，不能当作完整安全系统。

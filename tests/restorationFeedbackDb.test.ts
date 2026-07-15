@@ -1086,6 +1086,49 @@ it("rolls feedback insertion back when rating the session fails", async () => {
   );
 });
 
+it("lists only the aggregate restoration metric whitelist", async () => {
+  insertSession();
+  for (const turnId of ["turn-report-1", "turn-report-2", "turn-report-3"]) {
+    insertAudibleTurn({ turnId });
+  }
+  await repository.submitConversationFeedback({
+    ...VALID_FEEDBACK,
+    comment: "private evaluator comment",
+  });
+
+  const rows = await repository.listRestorationMetricRows();
+  assert.deepEqual(rows, [{
+    sessionId: "session-1",
+    evaluatorUserId: "user-1",
+    cohort: "living",
+    voiceSimilarity: 5,
+    expressionSimilarity: 4,
+    emotionFit: 4,
+    factTrust: 5,
+    discomfort: 2,
+    majorFabrication: false,
+    identityImpersonation: false,
+    authorizationViolation: false,
+  }]);
+  assert.deepEqual(Object.keys(rows[0]).sort(), [
+    "authorizationViolation",
+    "cohort",
+    "discomfort",
+    "emotionFit",
+    "evaluatorUserId",
+    "expressionSimilarity",
+    "factTrust",
+    "identityImpersonation",
+    "majorFabrication",
+    "sessionId",
+    "voiceSimilarity",
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(rows),
+    /private evaluator comment|persona-1|voice-1|provider-voice-1|audio-path/i,
+  );
+});
+
 it("rejects owner mismatches and rolls back the whole transaction", () => {
   assert.throws(
     () => insertSession("session-owner-mismatch", "persona-1", "user-2", "voice-2", "auth-2"),

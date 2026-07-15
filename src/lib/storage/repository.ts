@@ -7,6 +7,7 @@ import {
   failTtsAttempt,
   recordPlaybackEvent,
   getFeedbackEligibility,
+  listRestorationMetricRows,
   submitConversationFeedback,
   completeConversationTurn,
   countPersonasUsingVoice,
@@ -186,6 +187,9 @@ export function createLocalRepository(): AppRepository {
     },
     async submitConversationFeedback(input) {
       return submitConversationFeedback(input);
+    },
+    async listRestorationMetricRows() {
+      return listRestorationMetricRows();
     },
     async failConversationTurn(input) { return failConversationTurn(input); },
     async listMessageEvidence(assistantMessageId, personaId) {

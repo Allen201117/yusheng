@@ -63,6 +63,7 @@ src/lib/storage/voiceObjectStore.ts  本地/Private Blob 边界
 migrations/                          版本化 Postgres schema
 scripts/apply-migrations.ts          schema migration
 scripts/migrate-local-data.ts        旧数据 dry-run / import / report
+scripts/report-restoration-feedback.ts 健在/逝者有效还原聚合报告
 tests/                               Node test runner 测试
 docs/handoff.md                      上线与交接契约
 ```
@@ -91,7 +92,7 @@ docs/handoff.md                      上线与交接契约
 - 真实 Preview 持久化、跨用户隔离、Blob 删除和重部署后的读回必须有直接证据，不能用本地测试代替。
 - Vercel Sensitive 变量在 `env pull` 中会被脱敏为空，不能据此判断缺少 Key。Preview `SILICONFLOW_API_KEY` 已重新写入为 Sensitive；是否可用必须由新 deployment 的真实请求证明。
 - 授权依据、告知版本和撤回已落库；健在第三人的证据核验、逝者场景人工审核、删除完成凭证与用户可见的 AI 合成标识仍未完成。
-- grounded/companionship/boundary 对话路由和消息级证据已有后端实现与确定性测试。浏览器真实播放时间点、有效还原反馈、认识声音主人的真实用户验证和可用 Preview 仍未完成。
+- grounded/companionship/boundary 对话路由、消息级证据、非视觉浏览器播放事件发送、评分资格与健在/逝者聚合报告已有本地实现和测试。`play_started` 只是客户端自证，TTS 成功不等于真实播放或听完。真实 Preview 浏览器 + provider + DB 回读、认识声音主人的真实用户验证和可用 Preview 仍未完成。
 - `npm run probe:grounded` 是与确定性单测分开的虚构数据真实模型探针；它不能替代认识声音主人的人来判断是否“像”。
 - 本地测试、类型检查和构建全绿不等于授权推送、Preview 或 Production 发布。
 
