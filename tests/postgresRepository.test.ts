@@ -110,6 +110,21 @@ it("adds reviewer audit fields and a pending-review operator index", async () =>
   assert.match(sql, /WHERE status = 'pending_review'/);
 });
 
+it("adds authenticated review operators, deployment identity and append-only audit events", async () => {
+  const sql = await readFile(
+    new URL("../migrations/010_voice_authorization_operator_security.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS voice_review_operators/);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS deployment_identity/);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS audit_events/);
+  assert.match(sql, /trg_audit_events_no_update/);
+  assert.match(sql, /trg_audit_events_no_delete/);
+  assert.match(sql, /trg_voice_authorizations_terminal_review_immutable/);
+  assert.match(sql, /OLD\.status = 'approved' AND NEW\.status NOT IN \('approved', 'revoked'\)/);
+  assert.match(sql, /BEFORE UPDATE OF status, reason_code, reviewed_at, reviewed_by/);
+});
+
 it("adds provider generations and a durable retryable voice deletion job", async () => {
   const sql = await readFile(
     new URL("../migrations/009_voice_deletion_lifecycle.sql", import.meta.url),
@@ -834,6 +849,10 @@ it("reviews a pending authorization with voice-owner lock ordering and CAS", asy
     revoked_at: null, created_at: "2026-07-13T09:00:00.000Z",
   };
   const fake = createFakeSql((text) => {
+    if (text.includes("FROM deployment_identity")) {
+      return [{ environment: "production", target_fingerprint: "a".repeat(32) }];
+    }
+    if (text.includes("FROM voice_review_operators")) return [{ reviewer_id: "operator-1" }];
     if (text.includes("FROM voice_authorizations") && !text.includes("FOR UPDATE")) return [pending];
     if (text.includes("FROM voice_profiles") && text.includes("FOR UPDATE")) return [{ id: "voice-review" }];
     if (text.includes("FROM voice_authorizations") && text.includes("FOR UPDATE")) return [pending];
@@ -844,8 +863,11 @@ it("reviews a pending authorization with voice-owner lock ordering and CAS", asy
   });
   const repo = createPostgresRepository(fake.executor);
   const result = await repo.reviewVoiceAuthorization({
-    authorizationId: "auth-review", decision: "approve", reviewerId: "operator-1",
+    authorizationId: "auth-review", decision: "approve",
     reason: "evidence_verified", reviewedAt: "2026-07-15T01:00:00.000Z",
+    reviewerCredentialHash: "b".repeat(64), expectedEnvironment: "production",
+    expectedTargetFingerprint: "a".repeat(32), auditEventId: "audit-review",
+    requestId: "request-review",
   });
 
   assert.equal(result.status, "reviewed");
@@ -855,13 +877,71 @@ it("reviews a pending authorization with voice-owner lock ordering and CAS", asy
     assert.equal(result.authorization.userId, "user-review");
   }
   const voiceLock = fake.calls.findIndex((call) => call.text.includes("FROM voice_profiles") && call.text.includes("FOR UPDATE"));
+  const targetLock = fake.calls.findIndex((call) => call.text.includes("FROM deployment_identity"));
+  const operatorLock = fake.calls.findIndex((call) => call.text.includes("FROM voice_review_operators"));
   const authorizationLock = fake.calls.findIndex((call) => call.text.includes("FROM voice_authorizations") && call.text.includes("FOR UPDATE"));
   const cas = fake.calls.findIndex((call) => call.text.includes("UPDATE voice_authorizations") && call.text.includes("status = 'pending_review'"));
-  assert.ok(voiceLock >= 0 && voiceLock < authorizationLock && authorizationLock < cas);
+  const audit = fake.calls.findIndex((call) => call.text.includes("INSERT INTO audit_events"));
+  assert.ok(targetLock >= 0 && targetLock < operatorLock && operatorLock < voiceLock);
+  assert.ok(voiceLock < authorizationLock && authorizationLock < cas && cas < audit);
   assert.deepEqual(fake.calls[voiceLock].params, ["voice-review", "user-review"]);
   assert.deepEqual(fake.calls[cas].params, [
     "auth-review", "approved", "evidence_verified", "2026-07-15T01:00:00.000Z", "operator-1",
   ]);
+});
+
+it("fails a Postgres operator review before lookup when the deployment target differs", async () => {
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM deployment_identity")) {
+      return [{ environment: "preview", target_fingerprint: "c".repeat(32) }];
+    }
+    throw new Error("must_not_reach_review_storage");
+  });
+  const result = await createPostgresRepository(fake.executor).reviewVoiceAuthorization({
+    authorizationId: "auth-review", decision: "approve", reason: "verified",
+    reviewedAt: "2026-07-15T01:00:00.000Z", reviewerCredentialHash: "b".repeat(64),
+    expectedEnvironment: "production", expectedTargetFingerprint: "a".repeat(32),
+    auditEventId: "audit-mismatch", requestId: "request-mismatch",
+  });
+  assert.deepEqual(result, { status: "target_mismatch" });
+  assert.equal(fake.calls.length, 1);
+  assert.equal(fake.transactions, 1);
+});
+
+it("keeps the review update and audit append in one failing Postgres transaction", async () => {
+  const pending = {
+    id: "auth-rollback", voice_id: "voice-rollback", user_id: "user-review",
+    speaker_status: "deceased", basis: "close_relative_request", status: "pending_review",
+    reason_code: "manual_review_required", notice_version: "voice-authorization-2026-07-13",
+    separate_consent_confirmed: true, third_party_processing_confirmed: true,
+    synthetic_disclosure_confirmed: true, attested_at: "2026-07-13T09:00:00.000Z",
+    reviewed_at: null, reviewed_by: null, revoked_at: null,
+    created_at: "2026-07-13T09:00:00.000Z",
+  };
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM deployment_identity")) {
+      return [{ environment: "production", target_fingerprint: "a".repeat(32) }];
+    }
+    if (text.includes("FROM voice_review_operators")) return [{ reviewer_id: "operator-1" }];
+    if (text.includes("FROM voice_authorizations") && !text.includes("FOR UPDATE")) return [pending];
+    if (text.includes("FROM voice_profiles")) return [{ id: "voice-rollback" }];
+    if (text.includes("FROM voice_authorizations") && text.includes("FOR UPDATE")) return [pending];
+    if (text.includes("UPDATE voice_authorizations")) {
+      return [{ ...pending, status: "approved", reviewed_by: "operator-1" }];
+    }
+    if (text.includes("INSERT INTO audit_events")) throw new Error("audit_write_failed");
+    return [];
+  });
+  await assert.rejects(createPostgresRepository(fake.executor).reviewVoiceAuthorization({
+    authorizationId: pending.id, decision: "approve", reason: "verified",
+    reviewedAt: "2026-07-15T01:00:00.000Z", reviewerCredentialHash: "b".repeat(64),
+    expectedEnvironment: "production", expectedTargetFingerprint: "a".repeat(32),
+    auditEventId: "audit-rollback", requestId: "request-rollback",
+  }), /audit_write_failed/);
+  assert.equal(fake.transactions, 1);
+  const update = fake.calls.findIndex((call) => call.text.includes("UPDATE voice_authorizations"));
+  const audit = fake.calls.findIndex((call) => call.text.includes("INSERT INTO audit_events"));
+  assert.ok(update >= 0 && update < audit);
 });
 
 it("stably rejects operator review of a terminal authorization without mutation", async () => {
@@ -875,14 +955,21 @@ it("stably rejects operator review of a terminal authorization without mutation"
     reviewed_by: "policy:self", revoked_at: null, created_at: "2026-07-13T09:00:00.000Z",
   };
   const fake = createFakeSql((text) => {
+    if (text.includes("FROM deployment_identity")) {
+      return [{ environment: "production", target_fingerprint: "a".repeat(32) }];
+    }
+    if (text.includes("FROM voice_review_operators")) return [{ reviewer_id: "operator-1" }];
     if (text.includes("FROM voice_authorizations") && !text.includes("FOR UPDATE")) return [terminal];
     if (text.includes("FROM voice_profiles")) return [{ id: "voice-1" }];
     if (text.includes("FROM voice_authorizations") && text.includes("FOR UPDATE")) return [terminal];
     return [];
   });
   const result = await createPostgresRepository(fake.executor).reviewVoiceAuthorization({
-    authorizationId: "auth-terminal", decision: "reject", reviewerId: "operator-1",
+    authorizationId: "auth-terminal", decision: "reject",
     reason: "invalid_evidence", reviewedAt: "2026-07-15T01:00:00.000Z",
+    reviewerCredentialHash: "b".repeat(64), expectedEnvironment: "production",
+    expectedTargetFingerprint: "a".repeat(32), auditEventId: "audit-terminal",
+    requestId: "request-terminal",
   });
   assert.deepEqual(result, { status: "not_pending" });
   assert.equal(fake.calls.some((call) => call.text.includes("UPDATE voice_authorizations")), false);

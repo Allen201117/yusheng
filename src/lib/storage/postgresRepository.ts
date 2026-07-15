@@ -1595,6 +1595,32 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       input: ReviewVoiceAuthorizationInput,
     ): Promise<ReviewVoiceAuthorizationResult> {
       return sql.transaction(async (transaction) => {
+        const targets = await transaction.query<{
+          environment: string;
+          target_fingerprint: string;
+        }>(
+          `SELECT environment, target_fingerprint
+           FROM deployment_identity WHERE singleton = true
+           FOR UPDATE`,
+        );
+        const target = targets[0];
+        if (!target) return { status: "target_unconfigured" as const };
+        if (
+          target.environment !== input.expectedEnvironment
+          || target.target_fingerprint !== input.expectedTargetFingerprint
+        ) {
+          return { status: "target_mismatch" as const };
+        }
+
+        const operators = await transaction.query<{ reviewer_id: string }>(
+          `SELECT reviewer_id FROM voice_review_operators
+           WHERE credential_sha256 = $1 AND active = true AND revoked_at IS NULL
+           FOR UPDATE`,
+          [input.reviewerCredentialHash],
+        );
+        const operator = operators[0];
+        if (!operator) return { status: "reviewer_unauthorized" as const };
+
         const snapshots = await transaction.query<VoiceAuthorizationRow>(
           `SELECT ${VOICE_AUTHORIZATION_COLUMNS}
            FROM voice_authorizations WHERE id = $1`,
@@ -1627,9 +1653,27 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
            SET status = $2, reason_code = $3, reviewed_at = $4, reviewed_by = $5
            WHERE id = $1 AND status = 'pending_review'
            RETURNING ${VOICE_AUTHORIZATION_COLUMNS}`,
-          [input.authorizationId, nextStatus, input.reason, input.reviewedAt, input.reviewerId],
+          [input.authorizationId, nextStatus, input.reason, input.reviewedAt, operator.reviewer_id],
         );
         if (!rows[0]) return { status: "not_pending" as const };
+        await transaction.query(
+          `INSERT INTO audit_events
+             (id, event_type, actor_type, actor_id, target_type, target_id,
+              target_environment, target_fingerprint, decision, reason_code, request_id, created_at)
+           VALUES ($1, 'voice_authorization.reviewed', 'operator', $2,
+                   'voice_authorization', $3, $4, $5, $6, $7, $8, $9)`,
+          [
+            input.auditEventId,
+            operator.reviewer_id,
+            input.authorizationId,
+            target.environment,
+            target.target_fingerprint,
+            input.decision,
+            input.reason,
+            input.requestId,
+            input.reviewedAt,
+          ],
+        );
         return { status: "reviewed" as const, authorization: mapVoiceAuthorization(rows[0]) };
       });
     },

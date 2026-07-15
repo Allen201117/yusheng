@@ -184,8 +184,12 @@ export async function submitVoiceAuthorization(
 export type ReviewStoredVoiceAuthorizationInput = {
   authorizationId: string;
   decision: "approve" | "reject";
-  reviewerId: string;
   reason: string;
+  reviewerCredentialHash: string;
+  expectedEnvironment: "local" | "preview" | "production";
+  expectedTargetFingerprint: string;
+  auditEventId: string;
+  requestId: string;
 };
 
 export async function reviewStoredVoiceAuthorization(

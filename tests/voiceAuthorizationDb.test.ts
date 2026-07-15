@@ -7,11 +7,29 @@ import Database from "better-sqlite3";
 
 let dataDir = "";
 let db: typeof import("../src/lib/db");
+const secureReview = {
+  reviewerCredentialHash: "b".repeat(64),
+  expectedEnvironment: "local" as const,
+  expectedTargetFingerprint: "a".repeat(32),
+  auditEventId: "audit-db-review",
+  requestId: "request-db-review",
+};
 
 before(async () => {
   dataDir = await mkdtemp(path.join(os.tmpdir(), "yusheng-auth-db-"));
   process.env.DATA_DIR = dataDir;
   db = await import("../src/lib/db");
+  const database = db.getDb();
+  database.prepare(
+    `INSERT INTO deployment_identity
+       (singleton, environment, target_fingerprint, configured_at, configured_by)
+     VALUES (1, 'local', ?, ?, 'test')`,
+  ).run("a".repeat(32), "2026-07-15T00:00:00.000Z");
+  database.prepare(
+    `INSERT INTO voice_review_operators
+       (reviewer_id, credential_sha256, active, created_at)
+     VALUES ('operator-1', ?, 1, ?)`,
+  ).run("b".repeat(64), "2026-07-15T00:00:00.000Z");
 });
 
 after(async () => {
@@ -121,7 +139,7 @@ it("atomically reviews only pending local authorizations and records the reviewe
   });
   assert.equal(pending.reviewedBy, null);
   const reviewed = db.reviewVoiceAuthorization({
-    authorizationId: pending.id, decision: "approve", reviewerId: "operator-1",
+    authorizationId: pending.id, decision: "approve", ...secureReview,
     reason: "evidence_verified", reviewedAt: "2026-07-15T01:00:00.000Z",
   });
   assert.equal(reviewed.status, "reviewed");
@@ -131,13 +149,95 @@ it("atomically reviews only pending local authorizations and records the reviewe
     assert.equal(reviewed.authorization.reasonCode, "evidence_verified");
   }
   assert.deepEqual(db.reviewVoiceAuthorization({
-    authorizationId: pending.id, decision: "reject", reviewerId: "operator-2",
+    authorizationId: pending.id, decision: "reject", ...secureReview,
+    auditEventId: "audit-db-late", requestId: "request-db-late",
     reason: "late_rejection", reviewedAt: "2026-07-15T02:00:00.000Z",
   }), { status: "not_pending" });
   assert.deepEqual(db.reviewVoiceAuthorization({
-    authorizationId: "missing", decision: "approve", reviewerId: "operator-1",
+    authorizationId: "missing", decision: "approve", ...secureReview,
+    auditEventId: "audit-db-missing", requestId: "request-db-missing",
     reason: "ok", reviewedAt: "2026-07-15T01:00:00.000Z",
   }), { status: "not_found" });
+
+  const database = db.getDb();
+  const audit = database.prepare(
+    `SELECT event_type, actor_id, target_id, target_environment,
+            target_fingerprint, decision, reason_code
+     FROM audit_events WHERE id = ?`,
+  ).get(secureReview.auditEventId) as Record<string, unknown>;
+  assert.deepEqual(audit, {
+    event_type: "voice_authorization.reviewed",
+    actor_id: "operator-1",
+    target_id: pending.id,
+    target_environment: "local",
+    target_fingerprint: "a".repeat(32),
+    decision: "approve",
+    reason_code: "evidence_verified",
+  });
+  assert.throws(() => database.prepare(
+    "UPDATE audit_events SET reason_code = 'changed' WHERE id = ?",
+  ).run(secureReview.auditEventId), /audit_event_is_append_only/);
+  assert.throws(() => database.prepare(
+    "DELETE FROM audit_events WHERE id = ?",
+  ).run(secureReview.auditEventId), /audit_event_is_append_only/);
+  assert.throws(() => database.prepare(
+    "UPDATE voice_authorizations SET reviewed_by = 'forged' WHERE id = ?",
+  ).run(pending.id), /voice_authorization_review_is_immutable/);
+  assert.throws(() => database.prepare(
+    "UPDATE voice_authorizations SET status = 'pending_review' WHERE id = ?",
+  ).run(pending.id), /voice_authorization_review_is_immutable/);
+
+  const revoked = db.revokeVoiceAuthorization("voice-review", "__dev__");
+  assert.equal(revoked?.status, "revoked");
+  assert.equal(revoked?.reviewedBy, "operator-1");
+});
+
+it("fails closed before mutation and rolls back when the audit append fails", () => {
+  const database = db.getDb();
+  const createPending = (id: string) => db.replaceVoiceAuthorization({
+    id, voiceId: `voice-${id}`, userId: "__dev__", speakerStatus: "deceased",
+    basis: "close_relative_request", status: "pending_review",
+    reasonCode: "manual_review_required", noticeVersion: "voice-authorization-2026-07-13",
+    separateConsentConfirmed: true, thirdPartyProcessingConfirmed: true,
+    syntheticDisclosureConfirmed: true, attestedAt: "2026-07-15T00:00:00.000Z",
+    reviewedAt: null, reviewedBy: null,
+  });
+
+  const targetPending = createPending("auth-target-mismatch");
+  assert.deepEqual(db.reviewVoiceAuthorization({
+    authorizationId: targetPending.id, decision: "reject", reason: "invalid",
+    reviewedAt: "2026-07-15T01:00:00.000Z", ...secureReview,
+    expectedTargetFingerprint: "c".repeat(32), auditEventId: "audit-target-mismatch",
+    requestId: "request-target-mismatch",
+  }), { status: "target_mismatch" });
+  assert.equal(db.getCurrentVoiceAuthorization(targetPending.voiceId, "__dev__")?.status, "pending_review");
+
+  const reviewerPending = createPending("auth-reviewer-mismatch");
+  assert.deepEqual(db.reviewVoiceAuthorization({
+    authorizationId: reviewerPending.id, decision: "reject", reason: "invalid",
+    reviewedAt: "2026-07-15T01:00:00.000Z", ...secureReview,
+    reviewerCredentialHash: "c".repeat(64), auditEventId: "audit-reviewer-mismatch",
+    requestId: "request-reviewer-mismatch",
+  }), { status: "reviewer_unauthorized" });
+  assert.equal(db.getCurrentVoiceAuthorization(reviewerPending.voiceId, "__dev__")?.status, "pending_review");
+
+  database.prepare(
+    `INSERT INTO audit_events
+       (id, event_type, actor_type, actor_id, target_type, target_id,
+        target_environment, target_fingerprint, decision, reason_code, request_id, created_at)
+     VALUES ('audit-existing', 'test', 'system', 'test', 'test', 'test',
+             'local', ?, NULL, NULL, 'duplicate-request', ?)`,
+  ).run("a".repeat(32), "2026-07-15T00:00:00.000Z");
+  const rollbackPending = createPending("auth-audit-rollback");
+  assert.throws(() => db.reviewVoiceAuthorization({
+    authorizationId: rollbackPending.id, decision: "approve", reason: "verified",
+    reviewedAt: "2026-07-15T01:00:00.000Z", ...secureReview,
+    auditEventId: "audit-rollback", requestId: "duplicate-request",
+  }), /UNIQUE constraint failed: audit_events.request_id/);
+  assert.equal(db.getCurrentVoiceAuthorization(rollbackPending.voiceId, "__dev__")?.status, "pending_review");
+  assert.equal((database.prepare(
+    "SELECT COUNT(*) AS count FROM audit_events WHERE id = 'audit-rollback'",
+  ).get() as { count: number }).count, 0);
 });
 
 it("prevents a local pending authorization from being relabeled during replacement", () => {

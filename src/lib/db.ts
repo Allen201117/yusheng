@@ -160,6 +160,53 @@ function initSchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_voice_authorizations_owner_created
       ON voice_authorizations(user_id, voice_id, created_at DESC);
 
+    CREATE TABLE IF NOT EXISTS voice_review_operators (
+      reviewer_id       TEXT PRIMARY KEY,
+      credential_sha256 TEXT NOT NULL UNIQUE CHECK (
+        length(credential_sha256) = 64 AND credential_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      active            INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+      created_at        TEXT NOT NULL,
+      revoked_at        TEXT,
+      CHECK ((active = 1 AND revoked_at IS NULL) OR active = 0)
+    );
+
+    CREATE TABLE IF NOT EXISTS deployment_identity (
+      singleton          INTEGER PRIMARY KEY CHECK (singleton = 1),
+      environment        TEXT NOT NULL CHECK (environment IN ('local','preview','production')),
+      target_fingerprint TEXT NOT NULL UNIQUE CHECK (
+        length(target_fingerprint) = 32 AND target_fingerprint NOT GLOB '*[^0-9a-f]*'
+      ),
+      configured_at      TEXT NOT NULL,
+      configured_by      TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS audit_events (
+      id                 TEXT PRIMARY KEY,
+      event_type         TEXT NOT NULL,
+      actor_type         TEXT NOT NULL CHECK (actor_type IN ('operator','system','user')),
+      actor_id           TEXT NOT NULL,
+      target_type        TEXT NOT NULL,
+      target_id          TEXT NOT NULL,
+      target_environment TEXT NOT NULL CHECK (target_environment IN ('local','preview','production')),
+      target_fingerprint TEXT NOT NULL CHECK (
+        length(target_fingerprint) = 32 AND target_fingerprint NOT GLOB '*[^0-9a-f]*'
+      ),
+      decision           TEXT CHECK (decision IN ('approve','reject')),
+      reason_code        TEXT,
+      request_id         TEXT NOT NULL UNIQUE,
+      created_at         TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_events_target
+      ON audit_events(target_type, target_id, created_at);
+    CREATE TRIGGER IF NOT EXISTS trg_audit_events_no_update
+      BEFORE UPDATE ON audit_events BEGIN
+        SELECT RAISE(ABORT, 'audit_event_is_append_only');
+      END;
+    CREATE TRIGGER IF NOT EXISTS trg_audit_events_no_delete
+      BEFORE DELETE ON audit_events BEGIN
+        SELECT RAISE(ABORT, 'audit_event_is_append_only');
+      END;
     CREATE TABLE IF NOT EXISTS voice_provider_generations (
       voice_id   TEXT NOT NULL,
       user_id    TEXT NOT NULL,
@@ -476,6 +523,22 @@ export function migrateVoiceAuthorizationReviewSchema(db: Database.Database) {
       AND (NEW.reviewed_at IS NULL OR NEW.reviewed_by IS NULL OR length(trim(NEW.reviewed_by)) = 0)
     BEGIN
       SELECT RAISE(ABORT, 'voice_authorization_review_audit_required');
+    END;
+
+    DROP TRIGGER IF EXISTS trg_voice_authorizations_terminal_review_immutable;
+    CREATE TRIGGER trg_voice_authorizations_terminal_review_immutable
+    BEFORE UPDATE OF status, reason_code, reviewed_at, reviewed_by ON voice_authorizations
+    FOR EACH ROW
+    WHEN (OLD.status = 'approved' AND NEW.status NOT IN ('approved','revoked'))
+      OR (OLD.status IN ('rejected','revoked') AND NEW.status IS NOT OLD.status)
+      OR (OLD.status IN ('approved','rejected','revoked') AND (
+        OLD.reason_code IS NOT NEW.reason_code
+        OR OLD.reviewed_at IS NOT NEW.reviewed_at
+        OR OLD.reviewed_by IS NOT NEW.reviewed_by
+      )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'voice_authorization_review_is_immutable');
     END;
   `);
 }
@@ -2670,6 +2733,22 @@ export function reviewVoiceAuthorization(
 ): ReviewVoiceAuthorizationResult {
   const database = getDb();
   return database.transaction(() => {
+    const target = database.prepare(
+      "SELECT environment, target_fingerprint FROM deployment_identity WHERE singleton = 1",
+    ).get() as { environment: string; target_fingerprint: string } | undefined;
+    if (!target) return { status: "target_unconfigured" as const };
+    if (
+      target.environment !== input.expectedEnvironment
+      || target.target_fingerprint !== input.expectedTargetFingerprint
+    ) {
+      return { status: "target_mismatch" as const };
+    }
+    const operator = database.prepare(
+      `SELECT reviewer_id FROM voice_review_operators
+       WHERE credential_sha256 = ? AND active = 1 AND revoked_at IS NULL`,
+    ).get(input.reviewerCredentialHash) as { reviewer_id: string } | undefined;
+    if (!operator) return { status: "reviewer_unauthorized" as const };
+
     const current = database.prepare(
       "SELECT * FROM voice_authorizations WHERE id = ?",
     ).get(input.authorizationId) as any;
@@ -2681,8 +2760,24 @@ export function reviewVoiceAuthorization(
       `UPDATE voice_authorizations
        SET status = ?, reason_code = ?, reviewed_at = ?, reviewed_by = ?
        WHERE id = ? AND status = 'pending_review'`,
-    ).run(nextStatus, input.reason, input.reviewedAt, input.reviewerId, input.authorizationId);
+    ).run(nextStatus, input.reason, input.reviewedAt, operator.reviewer_id, input.authorizationId);
     if (changed.changes !== 1) return { status: "not_pending" as const };
+    database.prepare(
+      `INSERT INTO audit_events
+         (id, event_type, actor_type, actor_id, target_type, target_id,
+          target_environment, target_fingerprint, decision, reason_code, request_id, created_at)
+       VALUES (?, 'voice_authorization.reviewed', 'operator', ?, 'voice_authorization', ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      input.auditEventId,
+      operator.reviewer_id,
+      input.authorizationId,
+      target.environment,
+      target.target_fingerprint,
+      input.decision,
+      input.reason,
+      input.requestId,
+      input.reviewedAt,
+    );
     const reviewed = database.prepare(
       "SELECT * FROM voice_authorizations WHERE id = ?",
     ).get(input.authorizationId) as any;

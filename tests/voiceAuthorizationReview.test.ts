@@ -1,6 +1,6 @@
 import { it } from "node:test";
 import assert from "node:assert/strict";
-import { parseReviewArgs } from "../scripts/review-voice-authorization";
+import { parseReviewArgs, runReviewCommand } from "../scripts/review-voice-authorization";
 import { reviewStoredVoiceAuthorization } from "../src/lib/voiceAuthorizationService";
 import type { AppRepository, VoiceAuthorization, VoiceMeta } from "../src/lib/storage/types";
 import type { VoiceObjectStore } from "../src/lib/storage/voiceObjectStore";
@@ -20,36 +20,69 @@ const voice: VoiceMeta = {
   providerVoiceStatus: "not_created", providerVoiceErrorCode: null,
   providerVoiceUpdatedAt: null, createdAt: "2026-07-15T00:00:00.000Z",
 };
+const secureReview = {
+  reviewerCredentialHash: "b".repeat(64),
+  expectedEnvironment: "production" as const,
+  expectedTargetFingerprint: "a".repeat(32),
+  auditEventId: "audit-review",
+  requestId: "request-review",
+};
 
 it("requires every operator argument and an explicit confirmation flag", () => {
   assert.deepEqual(parseReviewArgs([]), { ok: false, errorCode: "missing_authorization_id" });
   assert.deepEqual(parseReviewArgs(["--authorization-id", "auth-1"]), { ok: false, errorCode: "missing_decision" });
-  assert.deepEqual(parseReviewArgs(["--authorization-id", "auth-1", "--decision", "approve"]), { ok: false, errorCode: "missing_reviewer_id" });
-  assert.deepEqual(parseReviewArgs(["--authorization-id", "auth-1", "--decision", "approve", "--reviewer-id", "r"]), { ok: false, errorCode: "missing_reason" });
-  assert.deepEqual(parseReviewArgs(["--authorization-id", "auth-1", "--decision", "approve", "--reviewer-id", "r", "--reason", "ok"]), { ok: false, errorCode: "confirmation_required" });
-  assert.deepEqual(parseReviewArgs(["--authorization-id", "auth-1", "--decision", "maybe", "--reviewer-id", "r", "--reason", "ok", "--confirm"]), { ok: false, errorCode: "invalid_decision" });
+  assert.deepEqual(parseReviewArgs(["--authorization-id", "auth-1", "--decision", "approve"]), { ok: false, errorCode: "missing_reason" });
+  assert.deepEqual(parseReviewArgs(["--authorization-id", "auth-1", "--decision", "approve", "--reason", "ok"]), { ok: false, errorCode: "missing_expected_environment" });
+  assert.deepEqual(parseReviewArgs([
+    "--authorization-id", "auth-1", "--decision", "approve", "--reason", "ok",
+    "--expected-environment", "production", "--expected-target", "a".repeat(32),
+  ]), { ok: false, errorCode: "confirmation_required" });
+  assert.deepEqual(parseReviewArgs([
+    "--authorization-id", "auth-1", "--decision", "maybe", "--reason", "ok",
+    "--expected-environment", "production", "--expected-target", "a".repeat(32),
+    "--confirm", `review:production:${"a".repeat(32)}:auth-1:maybe`,
+  ]), { ok: false, errorCode: "invalid_decision" });
 });
 
 it("strictly rejects unknown, duplicate, orphaned and valueless operator arguments", () => {
   assert.deepEqual(parseReviewArgs([
     "--authorization-id", "auth-1", "--decision", "reject", "--reviewer-id", "operator-1",
-    "--reason", "invalid", "--confirm", "--unknown",
+    "--reason", "invalid",
   ]), { ok: false, errorCode: "unknown_argument" });
   assert.deepEqual(parseReviewArgs([
     "--authorization-id", "auth-1", "--authorization-id", "auth-2", "--decision", "reject",
-    "--reviewer-id", "operator-1", "--reason", "invalid", "--confirm",
+    "--reason", "invalid",
   ]), { ok: false, errorCode: "duplicate_argument" });
   assert.deepEqual(parseReviewArgs([
-    "orphan", "--authorization-id", "auth-1", "--decision", "reject", "--reviewer-id", "operator-1",
-    "--reason", "invalid", "--confirm",
+    "orphan", "--authorization-id", "auth-1", "--decision", "reject", "--reason", "invalid",
   ]), { ok: false, errorCode: "unexpected_argument" });
   assert.deepEqual(parseReviewArgs([
-    "--authorization-id", "auth-1", "--decision", "reject", "--reviewer-id", "--reason", "invalid", "--confirm",
+    "--authorization-id", "auth-1", "--decision", "reject", "--reason", "--expected-environment", "production",
   ]), { ok: false, errorCode: "missing_argument_value" });
   assert.deepEqual(parseReviewArgs([
-    "--authorization-id", "auth-1", "--decision", "reject", "--reviewer-id", "operator-1",
-    "--reason", "invalid", "--confirm", "--confirm",
-  ]), { ok: false, errorCode: "duplicate_argument" });
+    "--authorization-id", "auth-1", "--decision", "reject", "--reason", "invalid",
+    "--expected-environment", "production", "--expected-target", "a".repeat(32),
+    "--confirm", "wrong",
+  ]), { ok: false, errorCode: "confirmation_mismatch" });
+});
+
+it("rejects a mismatched exact confirmation before accessing storage", async () => {
+  let repositoryReads = 0;
+  const result = await runReviewCommand([
+    "--authorization-id", "auth-1", "--decision", "reject", "--reason", "invalid",
+    "--expected-environment", "production", "--expected-target", "a".repeat(32),
+    "--confirm", "wrong",
+  ], {
+    env: { VOICE_AUTH_REVIEWER_TOKEN: "must-not-be-used" },
+    getRepository: () => {
+      repositoryReads += 1;
+      return {} as AppRepository;
+    },
+  });
+  assert.deepEqual(result, {
+    exitCode: 2, output: { ok: false, errorCode: "confirmation_mismatch" },
+  });
+  assert.equal(repositoryReads, 0);
 });
 
 it("approves by repository snapshot before provisioning that exact owner voice", async () => {
@@ -60,7 +93,7 @@ it("approves by repository snapshot before provisioning that exact owner voice",
     async getCurrentVoiceAuthorization() { return approved; },
   } as unknown as AppRepository;
   const result = await reviewStoredVoiceAuthorization({
-    authorizationId: "auth-1", decision: "approve", reviewerId: "operator-1", reason: "evidence_verified",
+    authorizationId: "auth-1", decision: "approve", reason: "evidence_verified", ...secureReview,
   }, {
     repository, store: {} as VoiceObjectStore, nowIso: () => "2026-07-15T01:00:00.000Z",
     provision: async (voiceId, userId) => {
@@ -76,7 +109,7 @@ it("rejects and removes a ready preset without ever provisioning", async () => {
   const calls: string[] = [];
   const rejected = { ...pending, status: "rejected" as const, reasonCode: "insufficient_evidence", reviewedAt: "2026-07-15T01:00:00.000Z", reviewedBy: "operator-1" };
   const result = await reviewStoredVoiceAuthorization({
-    authorizationId: "auth-1", decision: "reject", reviewerId: "operator-1", reason: "insufficient_evidence",
+    authorizationId: "auth-1", decision: "reject", reason: "insufficient_evidence", ...secureReview,
   }, {
     repository: { async reviewVoiceAuthorization() { calls.push("review"); return { status: "reviewed" as const, authorization: rejected }; } } as unknown as AppRepository,
     store: {} as VoiceObjectStore, nowIso: () => "2026-07-15T01:00:00.000Z",
@@ -89,7 +122,7 @@ it("rejects and removes a ready preset without ever provisioning", async () => {
 
 it("returns stable repository failures and does not expose raw errors", async () => {
   const result = await reviewStoredVoiceAuthorization({
-    authorizationId: "missing", decision: "approve", reviewerId: "operator-1", reason: "ok",
+    authorizationId: "missing", decision: "approve", reason: "ok", ...secureReview,
   }, {
     repository: { async reviewVoiceAuthorization() { return { status: "not_found" as const }; } } as unknown as AppRepository,
     store: {} as VoiceObjectStore,
@@ -100,7 +133,7 @@ it("returns stable repository failures and does not expose raw errors", async ()
 it("keeps approval durable when preset provisioning fails with a stable code", async () => {
   const approved = { ...pending, status: "approved" as const, reviewedAt: "2026-07-15T01:00:00.000Z", reviewedBy: "operator-1" };
   const result = await reviewStoredVoiceAuthorization({
-    authorizationId: approved.id, decision: "approve", reviewerId: "operator-1", reason: "verified",
+    authorizationId: approved.id, decision: "approve", reason: "verified", ...secureReview,
   }, {
     repository: {
       async reviewVoiceAuthorization() { return { status: "reviewed" as const, authorization: approved }; },
@@ -120,7 +153,7 @@ it("removes a newly provisioned preset if authorization changes during provision
   const revoked = { ...approved, status: "revoked" as const, revokedAt: "2026-07-15T01:00:01.000Z" };
   const calls: string[] = [];
   const result = await reviewStoredVoiceAuthorization({
-    authorizationId: approved.id, decision: "approve", reviewerId: "operator-1", reason: "verified",
+    authorizationId: approved.id, decision: "approve", reason: "verified", ...secureReview,
   }, {
     repository: {
       async reviewVoiceAuthorization() { return { status: "reviewed" as const, authorization: approved }; },
@@ -141,7 +174,7 @@ it("removes a newly provisioned preset if authorization changes during provision
 it("keeps rejection durable and reports retryable preset cleanup", async () => {
   const rejected = { ...pending, status: "rejected" as const, reviewedAt: "2026-07-15T01:00:00.000Z", reviewedBy: "operator-1" };
   const result = await reviewStoredVoiceAuthorization({
-    authorizationId: rejected.id, decision: "reject", reviewerId: "operator-1", reason: "invalid",
+    authorizationId: rejected.id, decision: "reject", reason: "invalid", ...secureReview,
   }, {
     repository: { async reviewVoiceAuthorization() { return { status: "reviewed" as const, authorization: rejected }; } } as unknown as AppRepository,
     store: {} as VoiceObjectStore,

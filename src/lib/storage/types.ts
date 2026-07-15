@@ -434,14 +434,25 @@ export type CreateVoiceAuthorizationInput = Omit<
 export type ReviewVoiceAuthorizationInput = {
   authorizationId: string;
   decision: "approve" | "reject";
-  reviewerId: string;
   reason: string;
   reviewedAt: string;
+  reviewerCredentialHash: string;
+  expectedEnvironment: "local" | "preview" | "production";
+  expectedTargetFingerprint: string;
+  auditEventId: string;
+  requestId: string;
 };
 
 export type ReviewVoiceAuthorizationResult =
   | { status: "reviewed"; authorization: VoiceAuthorization }
-  | { status: "not_found" | "not_pending" };
+  | {
+    status:
+      | "not_found"
+      | "not_pending"
+      | "reviewer_unauthorized"
+      | "target_unconfigured"
+      | "target_mismatch";
+  };
 
 export type RestorationCohort = "living" | "deceased";
 
