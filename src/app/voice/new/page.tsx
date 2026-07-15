@@ -26,6 +26,14 @@ type VoiceMeta = {
   durationSec?: number | null;
 };
 
+type VoiceDeletionSummary = {
+  jobId: string;
+  voiceId: string;
+  status: string;
+  currentStep: string;
+  errorCode: string | null;
+};
+
 type SelectedAudio = {
   file: File;
   durationSec?: number;
@@ -66,6 +74,7 @@ export default function VoiceNewPage() {
   const [error, setError] = useState("");
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const authorizationRequestGateRef = useRef(createVoiceAuthorizationRequestGate());
+  const authorizationReadAbortRef = useRef<AbortController | null>(null);
   const [audioUrl, setAudioUrl] = useState("");
   const prevAudioUrlRef = useRef<string>("");
   const [transcribing, setTranscribing] = useState(false);
@@ -81,6 +90,7 @@ export default function VoiceNewPage() {
   const [authorizationLoading, setAuthorizationLoading] = useState(false);
   const [authorizationVoiceId, setAuthorizationVoiceId] = useState("");
   const [presetState, setPresetState] = useState<{ status: string | null; errorCode: string | null }>({ status: null, errorCode: null });
+  const [deletionJobs, setDeletionJobs] = useState<VoiceDeletionSummary[]>([]);
 
   // 录音
   const [recording, setRecording] = useState(false);
@@ -160,16 +170,24 @@ export default function VoiceNewPage() {
 
   async function refreshVoices() {
     try {
-      const r = await fetch("/api/voice/upload");
+      const [r, deletionResponse] = await Promise.all([
+        fetch("/api/voice/upload"),
+        fetch("/api/voice/authorization"),
+      ]);
       if (!r.ok) return;
-      const j = await r.json().catch(() => ({}));
+      const [j, deletionBody] = await Promise.all([
+        r.json().catch(() => ({})),
+        deletionResponse.ok ? deletionResponse.json().catch(() => ({})) : Promise.resolve({}),
+      ]);
       setVoices(j.voices || []);
+      setDeletionJobs(deletionBody.deletionJobs || []);
       setSelectedVoiceId((prev) => prev || j.voices?.[0]?.voiceId || "");
     } catch {}
   }
   useEffect(() => { refreshVoices(); }, []);
 
   async function refreshAuthorization(voiceId: string) {
+    authorizationReadAbortRef.current?.abort();
     if (!voiceId) {
       authorizationRequestGateRef.current.cancel();
       setAuthorization(null);
@@ -179,11 +197,16 @@ export default function VoiceNewPage() {
     }
     setAuthorization(null);
     setPresetState({ status: null, errorCode: null });
+    const controller = new AbortController();
+    authorizationReadAbortRef.current = controller;
     await runLatestVoiceAuthorizationRequest({
       gate: authorizationRequestGateRef.current,
       setLoading: setAuthorizationLoading,
       request: async () => {
-        const response = await fetch(`/api/voice/authorization?voiceId=${encodeURIComponent(voiceId)}`);
+        const response = await fetch(
+          `/api/voice/authorization?voiceId=${encodeURIComponent(voiceId)}`,
+          { signal: controller.signal },
+        );
         if (response.status === 404) return { authorization: null, missing: true };
         const body = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error("授权状态读取失败");
@@ -196,12 +219,19 @@ export default function VoiceNewPage() {
           setAuthorizationBasis(body.authorization.basis);
         }
         setAuthorizationVoiceId(voiceId);
+        if (body.deletion) {
+          setDeletionJobs((jobs) => [
+            body.deletion,
+            ...jobs.filter((job) => job.voiceId !== body.deletion.voiceId),
+          ]);
+        }
         setPresetState({
-          status: body.missing ? null : body.presetStatus || null,
-          errorCode: body.missing ? null : body.presetErrorCode || null,
+          status: body.deletion ? "failed" : body.missing ? null : body.presetStatus || null,
+          errorCode: body.deletion?.errorCode || (body.missing ? null : body.presetErrorCode || null),
         });
       },
       onError: () => {
+        if (controller.signal.aborted) return;
         setError("授权状态读取失败，请稍后重试");
         setAuthorization(null);
         setAuthorizationVoiceId(voiceId);
@@ -210,11 +240,13 @@ export default function VoiceNewPage() {
   }
 
   useEffect(() => { void refreshAuthorization(selectedVoiceId); }, [selectedVoiceId]);
+  useEffect(() => () => authorizationReadAbortRef.current?.abort(), []);
 
   async function handleAuthorizationSubmit(e: React.FormEvent) {
     e.preventDefault(); setError("");
     if (!selectedVoiceId) return setError("请先选择一段参考声音");
     const voiceId = selectedVoiceId;
+    authorizationReadAbortRef.current?.abort();
     await runLatestVoiceAuthorizationRequest({
       gate: authorizationRequestGateRef.current,
       setLoading: setAuthorizationLoading,
@@ -253,9 +285,14 @@ export default function VoiceNewPage() {
     });
   }
 
-  async function handleAuthorizationRevoke() {
-    if (!selectedVoiceId) return;
-    const voiceId = selectedVoiceId;
+  async function handleAuthorizationRevoke(voiceIdOverride?: string) {
+    const voiceId = voiceIdOverride || selectedVoiceId;
+    if (!voiceId) return;
+    const confirmed = window.confirm(
+      "这会永久删除该原始录音、生成音色、关联人物和全部对话，且无法恢复。确认继续删除吗？",
+    );
+    if (!confirmed) return;
+    authorizationReadAbortRef.current?.abort();
     setError("");
     await runLatestVoiceAuthorizationRequest({
       gate: authorizationRequestGateRef.current,
@@ -263,25 +300,49 @@ export default function VoiceNewPage() {
       request: async () => {
         const response = await fetch(
           `/api/voice/authorization?voiceId=${encodeURIComponent(voiceId)}`,
-          { method: "DELETE" },
+          {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ deleteConversationData: true }),
+          },
         );
         const body = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(body.error || "授权撤回失败");
         return body;
       },
       onSuccess: (body) => {
+        if (body.status === "completed") {
+          const remaining = voices.filter((voice) => voice.voiceId !== voiceId);
+          setVoices(remaining);
+          setDeletionJobs((jobs) => jobs.filter((job) => job.voiceId !== voiceId));
+          if (selectedVoiceId === voiceId) {
+            setSelectedVoiceId(remaining[0]?.voiceId || "");
+            setAuthorization(null);
+            setAuthorizationVoiceId("");
+            setPresetState({ status: null, errorCode: null });
+          }
+          return;
+        }
+        setDeletionJobs((jobs) => [{
+          jobId: body.jobId,
+          voiceId,
+          status: body.status,
+          currentStep: body.currentStep || "pending",
+          errorCode: body.errorCode || null,
+        }, ...jobs.filter((job) => job.voiceId !== voiceId)]);
+        if (selectedVoiceId !== voiceId) return;
         if (authorization && authorizationVoiceId === voiceId) {
           setAuthorization({
             ...authorization,
-            status: body.status === "rejected" ? "rejected" : "revoked",
-            reasonCode: body.status === "rejected" ? authorization.reasonCode : null,
+            status: "revoked",
+            reasonCode: null,
           });
         }
         setPresetState({
-          status: body.cleanupPending ? "failed" : "not_created",
-          errorCode: body.cleanupPending ? "cleanup_pending" : null,
+          status: "failed",
+          errorCode: body.errorCode || "deletion_processing",
         });
-        if (body.cleanupPending) setError("授权已撤回，供应商音色仍在清理中");
+        setError(`授权已撤回，数据仍在清理中（${body.currentStep || "pending"}），请稍后继续删除`);
       },
       onError: (requestError) => {
         setError(requestError instanceof Error ? requestError.message : "授权撤回失败");
@@ -492,7 +553,7 @@ export default function VoiceNewPage() {
             <label className="y-label">
               选择录音
               <select value={selectedVoiceId} onChange={(e) => setSelectedVoiceId(e.target.value)}
-                className="y-select" style={{ marginTop: 6 }}>
+                disabled={authorizationLoading} className="y-select" style={{ marginTop: 6 }}>
                 {voices.map((v) => (
                   <option key={v.voiceId} value={v.voiceId}>
                     {v.createdAt.slice(0, 19).replace("T", " ")} · {v.promptText.slice(0, 25)}
@@ -511,14 +572,14 @@ export default function VoiceNewPage() {
                 const next = e.target.value as VoiceSpeakerStatus;
                 setSpeakerStatus(next);
                 setAuthorizationBasis(next === "living" ? "self" : "close_relative_request");
-              }} disabled={Boolean(authorization)} className="y-select" style={{ marginTop: 6 }}>
+              }} disabled={Boolean(authorization) || authorizationLoading} className="y-select" style={{ marginTop: 6 }}>
                 <option value="living">健在</option>
                 <option value="deceased">已故</option>
               </select>
             </label>
             <label className="y-label" style={{ marginTop: 12 }}>
               授权依据
-              <select value={authorizationBasis} onChange={(e) => setAuthorizationBasis(e.target.value as VoiceAuthorizationBasis)} disabled={Boolean(authorization)} className="y-select" style={{ marginTop: 6 }}>
+              <select value={authorizationBasis} onChange={(e) => setAuthorizationBasis(e.target.value as VoiceAuthorizationBasis)} disabled={Boolean(authorization) || authorizationLoading} className="y-select" style={{ marginTop: 6 }}>
                 {speakerStatus === "living" ? <>
                   <option value="self">这是我本人的声音</option>
                   <option value="speaker_separate_consent">声音主人已单独同意</option>
@@ -535,7 +596,7 @@ export default function VoiceNewPage() {
               [syntheticDisclosureConfirmed, setSyntheticDisclosureConfirmed, "我知道系统输出是 AI 合成语音，不代表声音主人的真实意志"],
             ].map(([checked, setter, label]) => (
               <label key={String(label)} style={{ display: "flex", gap: 8, marginTop: 12, color: "var(--text-secondary)", fontSize: 13 }}>
-                <input type="checkbox" checked={checked as boolean} onChange={(e) => (setter as (value: boolean) => void)(e.target.checked)} />
+                <input type="checkbox" checked={checked as boolean} disabled={authorizationLoading} onChange={(e) => (setter as (value: boolean) => void)(e.target.checked)} />
                 <span>{String(label)}</span>
               </label>
             ))}
@@ -547,13 +608,29 @@ export default function VoiceNewPage() {
                 authorization.status === "approved"
                 || authorization.status === "pending_review"
                 || (authorization.status === "rejected" && presetState.status === "failed")
+                || authorization.status === "revoked"
               ) && (
-                <button type="button" onClick={handleAuthorizationRevoke} disabled={authorizationLoading} className="y-btn-ghost">
-                  {authorization.status === "rejected" ? "重试清理音色" : "撤回授权"}
+                <button type="button" onClick={() => void handleAuthorizationRevoke()} disabled={authorizationLoading} className="y-btn-ghost">
+                  {authorization.status === "rejected" || authorization.status === "revoked" ? "继续删除" : "撤回并删除"}
                 </button>
               )}
             </div>
           </form>
+        )}
+        {deletionJobs.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <p style={{ color: "var(--text-secondary)", fontSize: 13 }}>以下声音仍在执行永久删除，可安全继续：</p>
+            {deletionJobs.map((job) => (
+              <div key={job.jobId} style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                <span style={{ color: "var(--text-hint)", fontSize: 12 }}>
+                  {job.voiceId.slice(0, 8)} · {job.currentStep}{job.errorCode ? ` · ${job.errorCode}` : ""}
+                </span>
+                <button type="button" disabled={authorizationLoading} onClick={() => void handleAuthorizationRevoke(job.voiceId)} className="y-btn-ghost">
+                  继续删除
+                </button>
+              </div>
+            ))}
+          </div>
         )}
       </div>
 

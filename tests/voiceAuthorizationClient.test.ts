@@ -37,8 +37,27 @@ it("wires the production voice page to per-voice status, submit and revoke calls
   assert.match(source, /api\/voice\/authorization\?voiceId=/);
   assert.match(source, /method:\s*["']POST["']/);
   assert.match(source, /method:\s*["']DELETE["']/);
+  assert.match(source, /deleteConversationData:\s*true/);
+  assert.match(source, /window\.confirm/);
+  assert.match(source, /authorizationReadAbortRef\.current\?\.abort\(\)/);
+  assert.match(source, /disabled=\{authorizationLoading\}\s+className="y-select"/);
+  assert.match(source, /fetch\("\/api\/voice\/authorization"\)/);
+  assert.match(source, /deletionJobs\.map/);
+  assert.match(source, /handleAuthorizationRevoke\(job\.voiceId\)/);
   assert.match(source, /authorizationVoiceId === selectedVoiceId/);
   assert.match(source, /runLatestVoiceAuthorizationRequest/);
+});
+
+it("guards sensitive authorization writes and never reports an unfinished deletion as complete", async () => {
+  const source = await readFile(
+    new URL("../src/app/api/voice/authorization/route.ts", import.meta.url),
+    "utf8",
+  );
+  assert.equal(source.match(/requireSameOrigin\(req\)/g)?.length, 2);
+  assert.match(source, /status === "confirmation_required"/);
+  assert.match(source, /status === "processing"/);
+  assert.match(source, /listActiveVoiceDeletionJobs\(auth\.userId\)/);
+  assert.match(source, /ok:\s*false[\s\S]*status:\s*result\.status[\s\S]*status:\s*202/);
 });
 
 it("finishes loading after a successful revoke request", async () => {

@@ -47,6 +47,9 @@ import type {
   ReviewVoiceAuthorizationInput,
   ReviewVoiceAuthorizationResult,
   VoiceAuthorization,
+  VoiceDeletionJob,
+  VoiceDeletionStatus,
+  VoiceDeletionStep,
   InsertMemoryInput,
   GroundingEvidenceKind,
   MessageEvidence,
@@ -70,9 +73,11 @@ export function getDb(): Database.Database {
   _db.pragma("foreign_keys = ON");
   initSchema(_db);
   migrateUserColumn(_db);
+  migratePersonaDeletedAt(_db);
   migratePersonaFactEmbedding(_db);
   migrateVoiceAuthorizationReviewSchema(_db);
   migrateRestorationFeedbackSchema(_db);
+  migratePersonaSoftDeleteGuards(_db);
   migrateLegacyPersonaKnowledge(_db);
   return _db;
 }
@@ -105,7 +110,8 @@ function initSchema(db: Database.Database) {
       relation     TEXT NOT NULL,
       voice_id     TEXT NOT NULL,
       persona_desc TEXT NOT NULL DEFAULT '',
-      created_at   TEXT NOT NULL
+      created_at   TEXT NOT NULL,
+      deleted_at   TEXT
     );
 
     CREATE TABLE IF NOT EXISTS memories (
@@ -153,6 +159,86 @@ function initSchema(db: Database.Database) {
       WHERE status IN ('pending_review','approved');
     CREATE INDEX IF NOT EXISTS idx_voice_authorizations_owner_created
       ON voice_authorizations(user_id, voice_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS voice_provider_generations (
+      voice_id   TEXT NOT NULL,
+      user_id    TEXT NOT NULL,
+      generation INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (voice_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS voice_provider_operations (
+      voice_id         TEXT NOT NULL,
+      user_id          TEXT NOT NULL,
+      generation       INTEGER NOT NULL,
+      status           TEXT NOT NULL CHECK (status IN ('pending','cleanup_pending','closed')),
+      provider_voice_id TEXT,
+      error_code       TEXT,
+      created_at       TEXT NOT NULL,
+      updated_at       TEXT NOT NULL,
+      PRIMARY KEY (voice_id, user_id, generation)
+    );
+    CREATE INDEX IF NOT EXISTS idx_voice_provider_operations_cleanup
+      ON voice_provider_operations(voice_id, user_id, generation) WHERE status <> 'closed';
+
+    CREATE TABLE IF NOT EXISTS voice_deletion_jobs (
+      id                       TEXT PRIMARY KEY,
+      voice_id                 TEXT NOT NULL,
+      user_id                  TEXT NOT NULL,
+      authorization_id         TEXT,
+      provider_voice_id        TEXT,
+      provider_generation      INTEGER NOT NULL,
+      delete_conversation_data INTEGER NOT NULL CHECK (delete_conversation_data = 1),
+      status                   TEXT NOT NULL CHECK (status IN ('pending','processing','retry_pending','completed')),
+      current_step             TEXT NOT NULL CHECK (current_step IN ('provider','personas','source','completed')),
+      last_error_code          TEXT,
+      attempt_count            INTEGER NOT NULL DEFAULT 0,
+      lease_token              TEXT,
+      created_at               TEXT NOT NULL,
+      updated_at               TEXT NOT NULL,
+      completed_at             TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_deletion_jobs_active
+      ON voice_deletion_jobs(voice_id, user_id) WHERE status <> 'completed';
+    CREATE INDEX IF NOT EXISTS idx_voice_deletion_jobs_retry
+      ON voice_deletion_jobs(status, updated_at) WHERE status = 'retry_pending';
+
+    CREATE TABLE IF NOT EXISTS voice_deletion_events (
+      id         TEXT PRIMARY KEY,
+      job_id     TEXT NOT NULL,
+      voice_id   TEXT NOT NULL,
+      user_id    TEXT NOT NULL,
+      event_type TEXT NOT NULL CHECK (event_type IN ('started','step_advanced','retry_pending','completed')),
+      step       TEXT NOT NULL CHECK (step IN ('provider','personas','source','completed')),
+      error_code TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_voice_deletion_events_job
+      ON voice_deletion_events(job_id, created_at);
+    CREATE TRIGGER IF NOT EXISTS trg_voice_deletion_events_no_update
+      BEFORE UPDATE ON voice_deletion_events BEGIN
+        SELECT RAISE(ABORT, 'voice_deletion_audit_is_append_only');
+      END;
+    CREATE TRIGGER IF NOT EXISTS trg_voice_deletion_events_no_delete
+      BEFORE DELETE ON voice_deletion_events BEGIN
+        SELECT RAISE(ABORT, 'voice_deletion_audit_is_append_only');
+      END;
+
+    CREATE TABLE IF NOT EXISTS persona_deletion_tombstones (
+      persona_id     TEXT PRIMARY KEY,
+      user_id        TEXT NOT NULL,
+      voice_id       TEXT NOT NULL,
+      deletion_job_id TEXT NOT NULL,
+      deleted_at     TEXT NOT NULL
+    );
+    CREATE TRIGGER IF NOT EXISTS trg_persona_deletion_tombstones_no_update
+      BEFORE UPDATE ON persona_deletion_tombstones BEGIN
+        SELECT RAISE(ABORT, 'voice_deletion_audit_is_append_only');
+      END;
+    CREATE TRIGGER IF NOT EXISTS trg_persona_deletion_tombstones_no_delete
+      BEFORE DELETE ON persona_deletion_tombstones BEGIN
+        SELECT RAISE(ABORT, 'voice_deletion_audit_is_append_only');
+      END;
 
     CREATE TABLE IF NOT EXISTS persona_sources (
       id                 TEXT PRIMARY KEY,
@@ -297,6 +383,52 @@ function migrateUserColumn(db: Database.Database) {
   const cols = db.pragma("table_info(personas)") as { name: string }[];
   if (!cols.some((c) => c.name === "user_id")) {
     db.exec(`ALTER TABLE personas ADD COLUMN user_id TEXT NOT NULL DEFAULT '__legacy__'`);
+  }
+}
+
+function migratePersonaDeletedAt(db: Database.Database) {
+  const cols = db.pragma("table_info(personas)") as { name: string }[];
+  if (!cols.some((column) => column.name === "deleted_at")) {
+    db.exec("ALTER TABLE personas ADD COLUMN deleted_at TEXT");
+  }
+}
+
+function migratePersonaSoftDeleteGuards(db: Database.Database) {
+  for (const table of [
+    "memories",
+    "messages",
+    "persona_sources",
+    "persona_facts",
+    "relationship_memories",
+    "speech_style_items",
+    "conversation_turns",
+    "conversation_sessions",
+    "conversation_turn_evidence",
+    "message_evidence",
+    "conversation_sentences",
+    "tts_attempts",
+    "conversation_feedback",
+  ]) {
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS trg_${table}_active_persona_insert
+      BEFORE INSERT ON ${table}
+      FOR EACH ROW
+      WHEN NOT EXISTS (
+        SELECT 1 FROM personas WHERE id = NEW.persona_id AND deleted_at IS NULL
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'persona_deleted');
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_${table}_active_persona_update
+      BEFORE UPDATE ON ${table}
+      FOR EACH ROW
+      WHEN NOT EXISTS (
+        SELECT 1 FROM personas WHERE id = NEW.persona_id AND deleted_at IS NULL
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'persona_deleted');
+      END;
+    `);
   }
 }
 
@@ -748,14 +880,14 @@ export function createPersonaWithApprovedVoice(
 export function listPersonas(userId: string): Persona[] {
   const db = getDb();
   const rows = db
-    .prepare(`SELECT * FROM personas WHERE user_id = ? ORDER BY created_at DESC`)
+    .prepare(`SELECT * FROM personas WHERE user_id = ? AND deleted_at IS NULL ORDER BY created_at DESC`)
     .all(userId) as any[];
   return rows.map(rowToPersona);
 }
 
 export function getPersona(id: string): Persona | null {
   const db = getDb();
-  const row = db.prepare(`SELECT * FROM personas WHERE id = ?`).get(id) as any;
+  const row = db.prepare(`SELECT * FROM personas WHERE id = ? AND deleted_at IS NULL`).get(id) as any;
   return row ? rowToPersona(row) : null;
 }
 
@@ -763,7 +895,7 @@ export function getPersona(id: string): Persona | null {
 export function getPersonaForUser(id: string, userId: string): Persona | null {
   const db = getDb();
   const row = db
-    .prepare(`SELECT * FROM personas WHERE id = ? AND user_id = ?`)
+    .prepare(`SELECT * FROM personas WHERE id = ? AND user_id = ? AND deleted_at IS NULL`)
     .get(id, userId) as any;
   return row ? rowToPersona(row) : null;
 }
@@ -771,7 +903,7 @@ export function getPersonaForUser(id: string, userId: string): Persona | null {
 export function countPersonasUsingVoice(voiceId: string, userId: string): number {
   const db = getDb();
   const row = db
-    .prepare(`SELECT COUNT(*) AS count FROM personas WHERE voice_id = ? AND user_id = ?`)
+    .prepare(`SELECT COUNT(*) AS count FROM personas WHERE voice_id = ? AND user_id = ? AND deleted_at IS NULL`)
     .get(voiceId, userId) as { count: number };
   return row.count;
 }
@@ -2457,6 +2589,9 @@ export function replaceVoiceAuthorization(
 ): VoiceAuthorization {
   const database = getDb();
   return database.transaction(() => {
+    if (getActiveVoiceDeletionJob(input.voiceId, input.userId)) {
+      throw new Error("voice_deletion_pending");
+    }
     const now = new Date().toISOString();
     const prior = getCurrentVoiceAuthorization(input.voiceId, input.userId);
     if (prior) {
@@ -2552,5 +2687,269 @@ export function reviewVoiceAuthorization(
       "SELECT * FROM voice_authorizations WHERE id = ?",
     ).get(input.authorizationId) as any;
     return { status: "reviewed" as const, authorization: rowToVoiceAuthorization(reviewed) };
+  }).immediate();
+}
+
+function rowToVoiceDeletionJob(row: any): VoiceDeletionJob {
+  return {
+    id: row.id,
+    voiceId: row.voice_id,
+    userId: row.user_id,
+    authorizationId: row.authorization_id,
+    providerVoiceId: row.provider_voice_id,
+    providerGeneration: Number(row.provider_generation),
+    deleteConversationData: true,
+    status: row.status as VoiceDeletionStatus,
+    currentStep: row.current_step as VoiceDeletionStep,
+    lastErrorCode: row.last_error_code,
+    attemptCount: Number(row.attempt_count),
+    leaseToken: row.lease_token,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at,
+  };
+}
+
+export function getActiveVoiceDeletionJob(voiceId: string, userId: string): VoiceDeletionJob | null {
+  const row = getDb().prepare(
+    `SELECT * FROM voice_deletion_jobs
+     WHERE voice_id = ? AND user_id = ? AND status <> 'completed'
+     ORDER BY created_at DESC LIMIT 1`,
+  ).get(voiceId, userId);
+  return row ? rowToVoiceDeletionJob(row) : null;
+}
+
+export function listActiveVoiceDeletionJobs(userId: string): VoiceDeletionJob[] {
+  return (getDb().prepare(
+    `SELECT * FROM voice_deletion_jobs
+     WHERE user_id = ? AND status <> 'completed'
+     ORDER BY created_at DESC`,
+  ).all(userId) as any[]).map(rowToVoiceDeletionJob);
+}
+
+export function claimVoiceProviderGeneration(voiceId: string, userId: string): number | null {
+  return getDb().transaction(() => {
+    if (getActiveVoiceDeletionJob(voiceId, userId)) return null;
+    const now = new Date().toISOString();
+    const row = getDb().prepare(
+      `INSERT INTO voice_provider_generations (voice_id, user_id, generation)
+       VALUES (?, ?, 1)
+       ON CONFLICT(voice_id, user_id) DO UPDATE SET generation = generation + 1
+       RETURNING generation`,
+    ).get(voiceId, userId) as { generation: number };
+    getDb().prepare(
+      `INSERT INTO voice_provider_operations
+         (voice_id, user_id, generation, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'pending', ?, ?)`,
+    ).run(voiceId, userId, Number(row.generation), now, now);
+    return Number(row.generation);
+  }).immediate();
+}
+
+export function closeVoiceProviderOperation(
+  voiceId: string,
+  userId: string,
+  generation: number,
+): void {
+  getDb().prepare(
+    `UPDATE voice_provider_operations SET status = 'closed', updated_at = ?
+     WHERE voice_id = ? AND user_id = ? AND generation = ?`,
+  ).run(new Date().toISOString(), voiceId, userId, generation);
+}
+
+export function settleSupersededVoiceProviderOperation(
+  voiceId: string,
+  userId: string,
+  generation: number,
+  input: { providerVoiceId: string | null; cleanupPending: boolean; errorCode: string | null },
+): void {
+  getDb().prepare(
+    `UPDATE voice_provider_operations
+     SET status = ?, provider_voice_id = ?, error_code = ?, updated_at = ?
+     WHERE voice_id = ? AND user_id = ? AND generation = ?`,
+  ).run(
+    input.cleanupPending ? "cleanup_pending" : "closed",
+    input.providerVoiceId,
+    input.errorCode,
+    new Date().toISOString(),
+    voiceId,
+    userId,
+    generation,
+  );
+}
+
+export function listPendingVoiceProviderOperations(voiceId: string, userId: string) {
+  return (getDb().prepare(
+    `SELECT generation, status, provider_voice_id, error_code, updated_at
+     FROM voice_provider_operations
+     WHERE voice_id = ? AND user_id = ? AND status <> 'closed'
+     ORDER BY generation`,
+  ).all(voiceId, userId) as any[]).map((row) => ({
+    generation: Number(row.generation),
+    status: row.status as "pending" | "cleanup_pending",
+    providerVoiceId: row.provider_voice_id as string | null,
+    errorCode: row.error_code as string | null,
+    updatedAt: row.updated_at as string,
+  }));
+}
+
+export function isVoiceProviderGenerationCurrent(
+  voiceId: string,
+  userId: string,
+  generation: number,
+): boolean {
+  const row = getDb().prepare(
+    `SELECT generation FROM voice_provider_generations WHERE voice_id = ? AND user_id = ?`,
+  ).get(voiceId, userId) as { generation: number } | undefined;
+  return Number(row?.generation) === generation;
+}
+
+export function beginVoiceDeletion(input: {
+  id: string;
+  voiceId: string;
+  userId: string;
+  authorizationId: string;
+  providerVoiceId: string | null;
+}): VoiceDeletionJob | null {
+  return getDb().transaction(() => {
+    const existing = getActiveVoiceDeletionJob(input.voiceId, input.userId);
+    if (existing) return existing;
+    const current = getCurrentVoiceAuthorization(input.voiceId, input.userId);
+    if (!current || current.id !== input.authorizationId) return null;
+    if (current.status !== "rejected") {
+      getDb().prepare(
+        `UPDATE voice_authorizations
+         SET status = 'revoked', revoked_at = COALESCE(revoked_at, ?)
+         WHERE id = ? AND voice_id = ? AND user_id = ?`,
+      ).run(new Date().toISOString(), current.id, input.voiceId, input.userId);
+    }
+    const generationRow = getDb().prepare(
+      `INSERT INTO voice_provider_generations (voice_id, user_id, generation)
+       VALUES (?, ?, 1)
+       ON CONFLICT(voice_id, user_id) DO UPDATE SET generation = generation + 1
+       RETURNING generation`,
+    ).get(input.voiceId, input.userId) as { generation: number };
+    const now = new Date().toISOString();
+    getDb().prepare(
+      `INSERT INTO voice_deletion_jobs
+         (id, voice_id, user_id, authorization_id, provider_voice_id, provider_generation,
+          delete_conversation_data, status, current_step, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, 'pending', 'provider', ?, ?)`,
+    ).run(
+      input.id, input.voiceId, input.userId, input.authorizationId, input.providerVoiceId,
+      Number(generationRow.generation), now, now,
+    );
+    getDb().prepare(
+      `INSERT INTO voice_deletion_events
+         (id, job_id, voice_id, user_id, event_type, step, error_code, created_at)
+       VALUES (?, ?, ?, ?, 'started', 'provider', NULL, ?)`,
+    ).run(randomUUID(), input.id, input.voiceId, input.userId, now);
+    return getActiveVoiceDeletionJob(input.voiceId, input.userId);
+  }).immediate();
+}
+
+export function claimVoiceDeletionJob(
+  id: string,
+  userId: string,
+  leaseToken: string,
+): VoiceDeletionJob | null {
+  const now = new Date().toISOString();
+  const row = getDb().prepare(
+    `UPDATE voice_deletion_jobs
+     SET status = 'processing', lease_token = ?, attempt_count = attempt_count + 1, updated_at = ?
+     WHERE id = ? AND user_id = ?
+       AND (
+         status IN ('pending','retry_pending')
+         OR (status = 'processing' AND julianday(updated_at) <= julianday('now', '-5 minutes'))
+       )
+     RETURNING *`,
+  ).get(leaseToken, now, id, userId);
+  return row ? rowToVoiceDeletionJob(row) : null;
+}
+
+export function updateVoiceDeletionJob(input: {
+  id: string;
+  userId: string;
+  leaseToken: string;
+  currentStep: VoiceDeletionStep;
+  status: VoiceDeletionStatus;
+  lastErrorCode: string | null;
+}): VoiceDeletionJob | null {
+  return getDb().transaction(() => {
+    const now = new Date().toISOString();
+    const row = getDb().prepare(
+      `UPDATE voice_deletion_jobs
+       SET current_step = ?, status = ?, last_error_code = ?, updated_at = ?,
+           completed_at = CASE WHEN ? = 'completed' THEN ? ELSE completed_at END,
+           lease_token = CASE WHEN ? = 'processing' THEN lease_token ELSE NULL END
+       WHERE id = ? AND user_id = ? AND status = 'processing' AND lease_token = ?
+       RETURNING *`,
+    ).get(
+      input.currentStep, input.status, input.lastErrorCode, now,
+      input.status, now, input.status, input.id, input.userId, input.leaseToken,
+    ) as any;
+    if (!row) return null;
+    const eventType = input.status === "completed"
+      ? "completed"
+      : input.status === "retry_pending" ? "retry_pending" : "step_advanced";
+    getDb().prepare(
+      `INSERT INTO voice_deletion_events
+         (id, job_id, voice_id, user_id, event_type, step, error_code, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      randomUUID(), row.id, row.voice_id, row.user_id, eventType,
+      input.currentStep, input.lastErrorCode, now,
+    );
+    return rowToVoiceDeletionJob(row);
+  }).immediate();
+}
+
+export function softDeletePersonasForVoice(
+  voiceId: string,
+  userId: string,
+  deletionJobId: string,
+): number {
+  return getDb().transaction(() => {
+    const database = getDb();
+    const personas = database.prepare(
+      `SELECT id FROM personas
+       WHERE voice_id = ? AND user_id = ? AND deleted_at IS NULL`,
+    ).all(voiceId, userId) as Array<{ id: string }>;
+    const now = new Date().toISOString();
+    for (const persona of personas) {
+      database.prepare(
+        `INSERT OR IGNORE INTO persona_deletion_tombstones
+           (persona_id, user_id, voice_id, deletion_job_id, deleted_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(persona.id, userId, voiceId, deletionJobId, now);
+      database.prepare("DELETE FROM conversation_sessions WHERE persona_id = ?").run(persona.id);
+      database.prepare("DELETE FROM conversation_turns WHERE persona_id = ?").run(persona.id);
+      database.prepare("DELETE FROM messages WHERE persona_id = ?").run(persona.id);
+      database.prepare("DELETE FROM memories WHERE persona_id = ?").run(persona.id);
+      database.prepare("DELETE FROM persona_sources WHERE persona_id = ?").run(persona.id);
+      database.prepare("DELETE FROM persona_facts WHERE persona_id = ?").run(persona.id);
+      database.prepare("DELETE FROM relationship_memories WHERE persona_id = ?").run(persona.id);
+      database.prepare("DELETE FROM speech_style_items WHERE persona_id = ?").run(persona.id);
+    }
+    if (personas.length > 0) {
+      database.prepare(
+        `UPDATE personas
+         SET name = '', relation = '', persona_desc = '', deleted_at = ?
+         WHERE voice_id = ? AND user_id = ? AND deleted_at IS NULL`,
+      ).run(now, voiceId, userId);
+    }
+    return personas.length;
+  }).immediate();
+}
+
+export function purgeVoiceData(voiceId: string, userId: string): void {
+  getDb().transaction(() => {
+    getDb().prepare("DELETE FROM voice_authorizations WHERE voice_id = ? AND user_id = ?")
+      .run(voiceId, userId);
+    getDb().prepare("DELETE FROM voice_provider_generations WHERE voice_id = ? AND user_id = ?")
+      .run(voiceId, userId);
+    getDb().prepare(
+      "DELETE FROM voice_provider_operations WHERE voice_id = ? AND user_id = ? AND status = 'closed'",
+    ).run(voiceId, userId);
   }).immediate();
 }

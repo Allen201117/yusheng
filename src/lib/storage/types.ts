@@ -336,6 +336,7 @@ export type VoiceMeta = {
   providerVoiceStatus: ProviderVoiceStatus;
   providerVoiceErrorCode: string | null;
   providerVoiceUpdatedAt: string | null;
+  providerVoiceGeneration?: number;
   createdAt: string;
 };
 
@@ -347,12 +348,46 @@ export type CreateVoiceProfileInput = Omit<
   | "providerVoiceStatus"
   | "providerVoiceErrorCode"
   | "providerVoiceUpdatedAt"
+  | "providerVoiceGeneration"
 >;
 
 export type UpdateVoiceProviderStateInput = {
   status: ProviderVoiceStatus;
   providerVoiceId: string | null;
   errorCode: string | null;
+};
+
+export type VoiceProviderOperationClaim =
+  | { status: "claimed"; generation: number; meta: VoiceMeta }
+  | { status: "not_found" | "deletion_pending" };
+
+export type VoiceProviderPendingOperation = {
+  generation: number;
+  status: "pending" | "cleanup_pending";
+  providerVoiceId: string | null;
+  errorCode: string | null;
+  updatedAt: string;
+};
+
+export type VoiceDeletionStatus = "pending" | "processing" | "retry_pending" | "completed";
+export type VoiceDeletionStep = "provider" | "personas" | "source" | "completed";
+
+export type VoiceDeletionJob = {
+  id: string;
+  voiceId: string;
+  userId: string;
+  authorizationId: string | null;
+  providerVoiceId: string | null;
+  providerGeneration: number;
+  deleteConversationData: true;
+  status: VoiceDeletionStatus;
+  currentStep: VoiceDeletionStep;
+  lastErrorCode: string | null;
+  attemptCount: number;
+  leaseToken: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
 };
 
 export type VoiceSpeakerStatus = "living" | "deceased";
@@ -545,7 +580,49 @@ export interface AppRepository {
     userId: string,
     input: UpdateVoiceProviderStateInput,
   ): Promise<VoiceMeta | null>;
+  claimVoiceProviderOperation(
+    voiceId: string,
+    userId: string,
+    status: Extract<ProviderVoiceStatus, "pending" | "deleting">,
+  ): Promise<VoiceProviderOperationClaim>;
+  completeVoiceProviderOperation(
+    voiceId: string,
+    userId: string,
+    generation: number,
+    input: UpdateVoiceProviderStateInput,
+  ): Promise<VoiceMeta | null>;
+  settleSupersededVoiceProviderOperation(
+    voiceId: string,
+    userId: string,
+    generation: number,
+    input: { providerVoiceId: string | null; cleanupPending: boolean; errorCode: string | null },
+  ): Promise<void>;
+  listPendingVoiceProviderOperations(
+    voiceId: string,
+    userId: string,
+  ): Promise<VoiceProviderPendingOperation[]>;
   deleteVoiceProfile(voiceId: string, userId: string): Promise<boolean>;
+  getActiveVoiceDeletionJob(voiceId: string, userId: string): Promise<VoiceDeletionJob | null>;
+  listActiveVoiceDeletionJobs(userId: string): Promise<VoiceDeletionJob[]>;
+  beginVoiceDeletion(input: {
+    id: string;
+    voiceId: string;
+    userId: string;
+    authorizationId: string;
+    providerVoiceId: string | null;
+    deleteConversationData: true;
+  }): Promise<VoiceDeletionJob | null>;
+  claimVoiceDeletionJob(id: string, userId: string, leaseToken: string): Promise<VoiceDeletionJob | null>;
+  updateVoiceDeletionJob(input: {
+    id: string;
+    userId: string;
+    leaseToken: string;
+    currentStep: VoiceDeletionStep;
+    status: VoiceDeletionStatus;
+    lastErrorCode: string | null;
+  }): Promise<VoiceDeletionJob | null>;
+  softDeletePersonasForVoice(voiceId: string, userId: string, deletionJobId: string): Promise<number>;
+  purgeVoiceData(voiceId: string, userId: string): Promise<void>;
   replaceVoiceAuthorization(input: CreateVoiceAuthorizationInput): Promise<VoiceAuthorization>;
   getCurrentVoiceAuthorization(
     voiceId: string,

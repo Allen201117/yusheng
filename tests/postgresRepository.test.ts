@@ -110,6 +110,28 @@ it("adds reviewer audit fields and a pending-review operator index", async () =>
   assert.match(sql, /WHERE status = 'pending_review'/);
 });
 
+it("adds provider generations and a durable retryable voice deletion job", async () => {
+  const sql = await readFile(
+    new URL("../migrations/009_voice_deletion_lifecycle.sql", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(sql, /provider_generation bigint NOT NULL DEFAULT 0/);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS voice_deletion_jobs/);
+  assert.match(sql, /ALTER TABLE personas[\s\S]*deleted_at timestamptz/);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS voice_deletion_events/);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS persona_deletion_tombstones/);
+  assert.match(sql, /voice_deletion_audit_is_append_only/);
+  assert.match(sql, /CREATE OR REPLACE FUNCTION require_active_persona_write/);
+  assert.match(sql, /FOR UPDATE/);
+  assert.match(sql, /conversation_feedback/);
+  assert.match(sql, /status IN \('pending', 'processing', 'retry_pending', 'completed'\)/);
+  assert.match(sql, /current_step.*provider.*personas.*source.*completed/s);
+  assert.match(sql, /delete_conversation_data boolean NOT NULL/);
+  assert.match(sql, /lease_token text/);
+  assert.doesNotMatch(sql, /REFERENCES voice_profiles/);
+});
+
 it("creates a persona only after locking its voice then current approved authorization", async () => {
   const fake = createFakeSql((text, params) => {
     if (text.includes("FROM voice_profiles") && text.includes("FOR UPDATE")) return [{ id: "voice-1" }];
@@ -721,6 +743,43 @@ it("updates provider voice state only for the owning user", async () => {
   assert.equal(voice?.providerVoiceId, "speech:yusheng-voice-1:provider-id");
   assert.deepEqual(fake.calls[0].params.slice(0, 2), ["voice-1", "user-1"]);
   assert.match(fake.calls[0].text, /id = \$1 AND user_id = \$2 AND deleted_at IS NULL/);
+});
+
+it("claims a provider generation and completes it only with generation CAS", async () => {
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM voice_profiles") && text.includes("FOR UPDATE")) return [{
+      id: "voice-1", user_id: "user-1", object_path: "users/user-1/voice.wav",
+      checksum_sha256: "abc", prompt_text: "你好", mime_type: "audio/wav", duration_sec: 2,
+      provider_voice_id: null, provider_voice_status: "not_created", provider_voice_error_code: null,
+      provider_voice_updated_at: null, provider_generation: 6,
+      created_at: "2026-07-13T07:00:00.000Z",
+    }];
+    if (text.includes("FROM voice_deletion_jobs")) return [];
+    if (text.includes("provider_generation = provider_generation + 1")) return [{
+      id: "voice-1", user_id: "user-1", object_path: "users/user-1/voice.wav",
+      checksum_sha256: "abc", prompt_text: "你好", mime_type: "audio/wav", duration_sec: 2,
+      provider_voice_id: null, provider_voice_status: "pending", provider_voice_error_code: null,
+      provider_voice_updated_at: "2026-07-15T00:00:00.000Z", provider_generation: 7,
+      created_at: "2026-07-13T07:00:00.000Z",
+    }];
+    if (text.includes("provider_generation = $3")) return [];
+    return [];
+  });
+  const repo = createPostgresRepository(fake.executor);
+  const claim = await repo.claimVoiceProviderOperation("voice-1", "user-1", "pending");
+  assert.equal(claim.status, "claimed");
+  if (claim.status !== "claimed") return;
+  const voiceLock = fake.calls.findIndex((call) =>
+    call.text.includes("FROM voice_profiles") && call.text.includes("FOR UPDATE"));
+  const deletionCheck = fake.calls.findIndex((call) => call.text.includes("FROM voice_deletion_jobs"));
+  assert.ok(voiceLock >= 0 && voiceLock < deletionCheck);
+  assert.equal(claim.generation, 7);
+  const stale = await repo.completeVoiceProviderOperation("voice-1", "user-1", 6, {
+    status: "ready", providerVoiceId: "speech:stale", errorCode: null,
+  });
+  assert.equal(stale, null);
+  assert.match(fake.calls.at(-1)!.text, /provider_generation = \$3/);
+  assert.deepEqual(fake.calls.at(-1)!.params.slice(0, 3), ["voice-1", "user-1", 6]);
 });
 
 it("replaces, reads and revokes owner-scoped voice authorization atomically", async () => {

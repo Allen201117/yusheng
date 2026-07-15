@@ -47,6 +47,18 @@ import {
   storeConfirmedConversationEmbeddings,
   verifyCode,
   updatePersonaKnowledgeCandidate,
+  getActiveVoiceDeletionJob,
+  listActiveVoiceDeletionJobs,
+  claimVoiceProviderGeneration,
+  isVoiceProviderGenerationCurrent,
+  beginVoiceDeletion,
+  claimVoiceDeletionJob,
+  updateVoiceDeletionJob,
+  softDeletePersonasForVoice,
+  purgeVoiceData,
+  closeVoiceProviderOperation,
+  settleSupersededVoiceProviderOperation,
+  listPendingVoiceProviderOperations,
 } from "../db";
 import {
   deleteVoiceForUser,
@@ -82,8 +94,31 @@ function mapLocalVoice(meta: Awaited<ReturnType<typeof loadVoiceForUser>>): Voic
     providerVoiceStatus: meta.providerVoiceStatus || "not_created",
     providerVoiceErrorCode: meta.providerVoiceErrorCode || null,
     providerVoiceUpdatedAt: meta.providerVoiceUpdatedAt || null,
+    providerVoiceGeneration: meta.providerVoiceGeneration || 0,
     createdAt: meta.createdAt,
   };
+}
+
+const localVoiceLifecycleTails = new Map<string, Promise<void>>();
+
+async function withLocalVoiceLifecycleLock<T>(
+  voiceId: string,
+  userId: string,
+  work: () => Promise<T>,
+): Promise<T> {
+  const key = `${userId}\u0000${voiceId}`;
+  const previous = localVoiceLifecycleTails.get(key) || Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  const tail = previous.catch(() => undefined).then(() => current);
+  localVoiceLifecycleTails.set(key, tail);
+  await previous.catch(() => undefined);
+  try {
+    return await work();
+  } finally {
+    release();
+    if (localVoiceLifecycleTails.get(key) === tail) localVoiceLifecycleTails.delete(key);
+  }
 }
 
 export function createLocalRepository(): AppRepository {
@@ -127,8 +162,82 @@ export function createLocalRepository(): AppRepository {
     async updateVoiceProviderState(voiceId, userId, input) {
       return mapLocalVoice(await updateVoiceProviderStateForUser(voiceId, userId, input));
     },
+    async claimVoiceProviderOperation(voiceId, userId, status) {
+      return withLocalVoiceLifecycleLock(voiceId, userId, async () => {
+        const meta = await loadVoiceForUser(voiceId, userId);
+        if (!meta) return { status: "not_found" as const };
+        const generation = claimVoiceProviderGeneration(voiceId, userId);
+        if (generation === null) return { status: "deletion_pending" as const };
+        try {
+          const updated = await updateVoiceProviderStateForUser(voiceId, userId, {
+            status,
+            providerVoiceId: meta.providerVoiceId || null,
+            errorCode: null,
+            generation,
+          });
+          if (!updated) {
+            settleSupersededVoiceProviderOperation(
+              voiceId, userId, generation,
+              { providerVoiceId: null, cleanupPending: false, errorCode: null },
+            );
+            return { status: "not_found" as const };
+          }
+          return { status: "claimed" as const, generation, meta: mapLocalVoice(updated)! };
+        } catch (error) {
+          settleSupersededVoiceProviderOperation(
+            voiceId, userId, generation,
+            { providerVoiceId: null, cleanupPending: false, errorCode: null },
+          );
+          throw error;
+        }
+      });
+    },
+    async completeVoiceProviderOperation(voiceId, userId, generation, input) {
+      return withLocalVoiceLifecycleLock(voiceId, userId, async () => {
+        if (!isVoiceProviderGenerationCurrent(voiceId, userId, generation)) return null;
+        const updated = mapLocalVoice(await updateVoiceProviderStateForUser(voiceId, userId, {
+          ...input,
+          generation,
+        }));
+        if (updated) closeVoiceProviderOperation(voiceId, userId, generation);
+        return updated;
+      });
+    },
+    async settleSupersededVoiceProviderOperation(voiceId, userId, generation, input) {
+      settleSupersededVoiceProviderOperation(voiceId, userId, generation, input);
+    },
+    async listPendingVoiceProviderOperations(voiceId, userId) {
+      return listPendingVoiceProviderOperations(voiceId, userId);
+    },
     async deleteVoiceProfile(voiceId, userId) {
       return deleteVoiceForUser(voiceId, userId);
+    },
+    async getActiveVoiceDeletionJob(voiceId, userId) {
+      return getActiveVoiceDeletionJob(voiceId, userId);
+    },
+    async listActiveVoiceDeletionJobs(userId) {
+      return listActiveVoiceDeletionJobs(userId);
+    },
+    async beginVoiceDeletion(input) {
+      return withLocalVoiceLifecycleLock(input.voiceId, input.userId, async () => {
+        const latest = await loadVoiceForUser(input.voiceId, input.userId);
+        return beginVoiceDeletion({
+          ...input,
+          providerVoiceId: latest?.providerVoiceId || input.providerVoiceId,
+        });
+      });
+    },
+    async claimVoiceDeletionJob(id, userId, leaseToken) {
+      return claimVoiceDeletionJob(id, userId, leaseToken);
+    },
+    async updateVoiceDeletionJob(input) {
+      return updateVoiceDeletionJob(input);
+    },
+    async softDeletePersonasForVoice(voiceId, userId, deletionJobId) {
+      return softDeletePersonasForVoice(voiceId, userId, deletionJobId);
+    },
+    async purgeVoiceData(voiceId, userId) {
+      purgeVoiceData(voiceId, userId);
     },
     async replaceVoiceAuthorization(input) {
       return replaceVoiceAuthorization(input);

@@ -44,7 +44,9 @@ function runUploadProbe(durationSecs: number | number[]) {
       form.append("audio", new File([new Uint8Array(wav)], "reference-" + index + ".wav", { type: "audio/wav" }));
     });
     form.append("promptText", "这是一段用于测试的参考声音。");
-    const req = new NextRequest("http://localhost/api/voice/upload", { method: "POST", body: form });
+    const req = new NextRequest("http://localhost/api/voice/upload", {
+      method: "POST", body: form, headers: { Origin: "http://localhost" },
+    });
     const res = await POST(req);
     const json = await res.json().catch(() => ({}));
     const saved = await listVoicesForUser("__dev__");
@@ -76,7 +78,9 @@ function runWebmProbe(includeDuration: boolean) {
     form.append("audio", new File([new Uint8Array([1, 2, 3, 4])], "reference.webm", { type: "audio/webm" }));
     if (${JSON.stringify(includeDuration)}) form.append("durationSec", "12");
     form.append("promptText", "这是一段用于测试的参考声音。");
-    const req = new NextRequest("http://localhost/api/voice/upload", { method: "POST", body: form });
+    const req = new NextRequest("http://localhost/api/voice/upload", {
+      method: "POST", body: form, headers: { Origin: "http://localhost" },
+    });
     const res = await POST(req);
     const json = await res.json().catch(() => ({}));
     const saved = await listVoicesForUser("__dev__");

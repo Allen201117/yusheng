@@ -46,7 +46,6 @@ it("voice routes use the object store and data routes use the repository", async
   const voiceRoutes = [
     "voice/upload/route.ts",
     "voice/authorization/route.ts",
-    "persona/route.ts",
   ];
   for (const route of voiceRoutes) {
     const source = await readFile(new URL(`../src/app/api/${route}`, import.meta.url), "utf8");
@@ -216,16 +215,20 @@ it("routes use the provider preset fast path and provider-aware deletion lifecyc
   );
   assert.match(ttsVoiceBinding, /getPersonaForUser\(personaId, input\.userId\)/);
   assert.match(ttsVoiceBinding, /voiceId:\s*persona\.voiceId/);
-  assert.match(persona, /deleteVoiceEverywhere/);
-  assert.match(persona, /cleanupPending/);
+  assert.match(persona, /requireSameOrigin\(req\)/);
+  assert.equal(persona.match(/requireSameOrigin\(req\)/g)?.length, 2);
+  assert.doesNotMatch(persona, /deleteVoiceEverywhere/);
+  assert.doesNotMatch(persona, /cleanupPending/);
 
   const voiceUpload = await readFile(
     new URL("../src/app/api/voice/upload/route.ts", import.meta.url),
     "utf8",
   );
   assert.match(voiceUpload, /export async function DELETE/);
-  assert.match(voiceUpload, /countPersonasUsingVoice/);
-  assert.match(voiceUpload, /deleteVoiceEverywhere/);
+  assert.match(voiceUpload, /requireSameOrigin\(req\)/);
+  assert.equal(voiceUpload.match(/requireSameOrigin\(req\)/g)?.length, 2);
+  assert.match(voiceUpload, /VOICE_WITHDRAWAL_REQUIRED/);
+  assert.doesNotMatch(voiceUpload, /deleteVoiceEverywhere/);
 
   const authorization = await readFile(
     new URL("../src/app/api/voice/authorization/route.ts", import.meta.url),

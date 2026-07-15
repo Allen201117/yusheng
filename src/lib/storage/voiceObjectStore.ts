@@ -201,6 +201,7 @@ function mapLocalVoice(
     providerVoiceStatus: voice.providerVoiceStatus || "not_created",
     providerVoiceErrorCode: voice.providerVoiceErrorCode || null,
     providerVoiceUpdatedAt: voice.providerVoiceUpdatedAt || null,
+    providerVoiceGeneration: voice.providerVoiceGeneration || 0,
     createdAt: voice.createdAt,
   };
 }

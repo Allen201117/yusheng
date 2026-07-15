@@ -52,6 +52,9 @@ import type {
   SpeechStyleItem,
   User,
   VoiceAuthorization,
+  VoiceDeletionJob,
+  VoiceDeletionStatus,
+  VoiceDeletionStep,
   VoiceMeta,
 } from "./types";
 import {
@@ -285,6 +288,7 @@ type VoiceProfileRow = {
   provider_voice_status?: VoiceMeta["providerVoiceStatus"];
   provider_voice_error_code?: string | null;
   provider_voice_updated_at?: Date | string | null;
+  provider_generation?: number | string;
   created_at: Date | string;
 };
 
@@ -305,6 +309,24 @@ type VoiceAuthorizationRow = {
   reviewed_by: string | null;
   revoked_at: Date | string | null;
   created_at: Date | string;
+};
+
+type VoiceDeletionJobRow = {
+  id: string;
+  voice_id: string;
+  user_id: string;
+  authorization_id: string | null;
+  provider_voice_id: string | null;
+  provider_generation: number | string;
+  delete_conversation_data: boolean;
+  status: VoiceDeletionStatus;
+  current_step: VoiceDeletionStep;
+  last_error_code: string | null;
+  attempt_count: number | string;
+  lease_token: string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+  completed_at: Date | string | null;
 };
 
 function toIsoString(value: Date | string): string {
@@ -663,7 +685,28 @@ function mapVoiceProfile(row: VoiceProfileRow): VoiceMeta {
     providerVoiceUpdatedAt: row.provider_voice_updated_at
       ? toIsoString(row.provider_voice_updated_at)
       : null,
+    providerVoiceGeneration: Number(row.provider_generation || 0),
     createdAt: toIsoString(row.created_at),
+  };
+}
+
+function mapVoiceDeletionJob(row: VoiceDeletionJobRow): VoiceDeletionJob {
+  return {
+    id: row.id,
+    voiceId: row.voice_id,
+    userId: row.user_id,
+    authorizationId: row.authorization_id,
+    providerVoiceId: row.provider_voice_id,
+    providerGeneration: Number(row.provider_generation),
+    deleteConversationData: true,
+    status: row.status,
+    currentStep: row.current_step,
+    lastErrorCode: row.last_error_code,
+    attemptCount: Number(row.attempt_count),
+    leaseToken: row.lease_token,
+    createdAt: toIsoString(row.created_at),
+    updatedAt: toIsoString(row.updated_at),
+    completedAt: toNullableIsoString(row.completed_at),
   };
 }
 
@@ -983,7 +1026,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
     async listPersonas(userId: string): Promise<Persona[]> {
       const rows = await sql.query<PersonaRow>(
         `SELECT id, user_id, name, relation, voice_id, persona_desc, created_at
-         FROM personas WHERE user_id = $1 ORDER BY created_at DESC`,
+         FROM personas WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC`,
         [userId],
       );
       return rows.map(mapPersona);
@@ -993,7 +1036,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       const rows = await sql.query<PersonaRow>(
         `SELECT id, user_id, name, relation, voice_id, persona_desc, created_at
          FROM personas
-         WHERE id = $1 AND user_id = $2`,
+         WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
         [id, userId],
       );
       return rows[0] ? mapPersona(rows[0]) : null;
@@ -1061,7 +1104,8 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
 
     async countPersonasUsingVoice(voiceId: string, userId: string): Promise<number> {
       const rows = await sql.query<{ count: number | string }>(
-        `SELECT COUNT(*) AS count FROM personas WHERE voice_id = $1 AND user_id = $2`,
+        `SELECT COUNT(*) AS count FROM personas
+         WHERE voice_id = $1 AND user_id = $2 AND deleted_at IS NULL`,
         [voiceId, userId],
       );
       return Number(rows[0]?.count || 0);
@@ -1074,7 +1118,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
          VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING id, user_id, object_path, checksum_sha256, prompt_text, mime_type, duration_sec,
                    provider_voice_id, provider_voice_status, provider_voice_error_code,
-                   provider_voice_updated_at, created_at`,
+                   provider_voice_updated_at, provider_generation, created_at`,
         [input.voiceId, input.userId, input.objectPath, input.checksumSha256, input.promptText, input.mimeType, input.durationSec],
       );
       if (!rows[0]) throw new Error("Failed to create voice profile");
@@ -1085,7 +1129,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       const rows = await sql.query<VoiceProfileRow>(
         `SELECT id, user_id, object_path, checksum_sha256, prompt_text, mime_type, duration_sec,
                 provider_voice_id, provider_voice_status, provider_voice_error_code,
-                provider_voice_updated_at, created_at
+                provider_voice_updated_at, provider_generation, created_at
          FROM voice_profiles
          WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
         [voiceId, userId],
@@ -1097,7 +1141,7 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
       const rows = await sql.query<VoiceProfileRow>(
         `SELECT id, user_id, object_path, checksum_sha256, prompt_text, mime_type, duration_sec,
                 provider_voice_id, provider_voice_status, provider_voice_error_code,
-                provider_voice_updated_at, created_at
+                provider_voice_updated_at, provider_generation, created_at
          FROM voice_profiles
          WHERE user_id = $1 AND deleted_at IS NULL
          ORDER BY created_at DESC`,
@@ -1116,10 +1160,110 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
          WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
          RETURNING id, user_id, object_path, checksum_sha256, prompt_text, mime_type, duration_sec,
                    provider_voice_id, provider_voice_status, provider_voice_error_code,
-                   provider_voice_updated_at, created_at`,
+                   provider_voice_updated_at, provider_generation, created_at`,
         [voiceId, userId, input.providerVoiceId, input.status, input.errorCode],
       );
       return rows[0] ? mapVoiceProfile(rows[0]) : null;
+    },
+
+    async claimVoiceProviderOperation(voiceId, userId, status) {
+      return sql.transaction(async (transaction) => {
+        const voiceLock = await transaction.query<VoiceProfileRow>(
+          `SELECT id, user_id, object_path, checksum_sha256, prompt_text, mime_type, duration_sec,
+                  provider_voice_id, provider_voice_status, provider_voice_error_code,
+                  provider_voice_updated_at, provider_generation, created_at
+           FROM voice_profiles
+           WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+           FOR UPDATE`,
+          [voiceId, userId],
+        );
+        if (!voiceLock[0]) return { status: "not_found" as const };
+        const deletion = await transaction.query<{ id: string }>(
+          `SELECT id FROM voice_deletion_jobs
+           WHERE voice_id = $1 AND user_id = $2 AND status <> 'completed'
+           LIMIT 1 FOR UPDATE`,
+          [voiceId, userId],
+        );
+        if (deletion[0]) return { status: "deletion_pending" as const };
+        const rows = await transaction.query<VoiceProfileRow>(
+          `UPDATE voice_profiles
+           SET provider_generation = provider_generation + 1,
+               provider_voice_status = $3,
+               provider_voice_error_code = NULL,
+               provider_voice_updated_at = now()
+           WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+           RETURNING id, user_id, object_path, checksum_sha256, prompt_text, mime_type, duration_sec,
+                     provider_voice_id, provider_voice_status, provider_voice_error_code,
+                     provider_voice_updated_at, provider_generation, created_at`,
+          [voiceId, userId, status],
+        );
+        if (!rows[0]) return { status: "not_found" as const };
+        const meta = mapVoiceProfile(rows[0]);
+        await transaction.query(
+          `INSERT INTO voice_provider_operations
+             (voice_id, user_id, generation, status)
+           VALUES ($1, $2, $3, 'pending')`,
+          [voiceId, userId, meta.providerVoiceGeneration || 0],
+        );
+        return { status: "claimed" as const, generation: meta.providerVoiceGeneration || 0, meta };
+      });
+    },
+
+    async completeVoiceProviderOperation(voiceId, userId, generation, input) {
+      return sql.transaction(async (transaction) => {
+        const rows = await transaction.query<VoiceProfileRow>(
+          `UPDATE voice_profiles
+           SET provider_voice_id = $4,
+               provider_voice_status = $5,
+               provider_voice_error_code = $6,
+               provider_voice_updated_at = now()
+           WHERE id = $1 AND user_id = $2 AND provider_generation = $3 AND deleted_at IS NULL
+           RETURNING id, user_id, object_path, checksum_sha256, prompt_text, mime_type, duration_sec,
+                     provider_voice_id, provider_voice_status, provider_voice_error_code,
+                     provider_voice_updated_at, provider_generation, created_at`,
+          [voiceId, userId, generation, input.providerVoiceId, input.status, input.errorCode],
+        );
+        if (!rows[0]) return null;
+        await transaction.query(
+          `UPDATE voice_provider_operations SET status = 'closed', updated_at = now()
+           WHERE voice_id = $1 AND user_id = $2 AND generation = $3`,
+          [voiceId, userId, generation],
+        );
+        return mapVoiceProfile(rows[0]);
+      });
+    },
+
+    async settleSupersededVoiceProviderOperation(voiceId, userId, generation, input) {
+      await sql.query(
+        `UPDATE voice_provider_operations
+         SET status = $4, provider_voice_id = $5, error_code = $6, updated_at = now()
+         WHERE voice_id = $1 AND user_id = $2 AND generation = $3`,
+        [
+          voiceId, userId, generation, input.cleanupPending ? "cleanup_pending" : "closed",
+          input.providerVoiceId, input.errorCode,
+        ],
+      );
+    },
+
+    async listPendingVoiceProviderOperations(voiceId, userId) {
+      const rows = await sql.query<{
+        generation: number | string;
+        status: "pending" | "cleanup_pending";
+        provider_voice_id: string | null;
+        error_code: string | null;
+        updated_at: string | Date;
+      }>(
+        `SELECT generation, status, provider_voice_id, error_code, updated_at
+         FROM voice_provider_operations
+         WHERE voice_id = $1 AND user_id = $2 AND status <> 'closed'
+         ORDER BY generation`,
+        [voiceId, userId],
+      );
+      return rows.map((row) => ({
+        generation: Number(row.generation), status: row.status,
+        providerVoiceId: row.provider_voice_id, errorCode: row.error_code,
+        updatedAt: toIsoString(row.updated_at),
+      }));
     },
 
     async deleteVoiceProfile(voiceId: string, userId: string): Promise<boolean> {
@@ -1130,6 +1274,211 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
         [voiceId, userId],
       );
       return Boolean(rows[0]);
+    },
+
+    async getActiveVoiceDeletionJob(voiceId, userId) {
+      const rows = await sql.query<VoiceDeletionJobRow>(
+        `SELECT * FROM voice_deletion_jobs
+         WHERE voice_id = $1 AND user_id = $2 AND status <> 'completed'
+         ORDER BY created_at DESC LIMIT 1`,
+        [voiceId, userId],
+      );
+      return rows[0] ? mapVoiceDeletionJob(rows[0]) : null;
+    },
+
+    async listActiveVoiceDeletionJobs(userId) {
+      const rows = await sql.query<VoiceDeletionJobRow>(
+        `SELECT * FROM voice_deletion_jobs
+         WHERE user_id = $1 AND status <> 'completed'
+         ORDER BY created_at DESC`,
+        [userId],
+      );
+      return rows.map(mapVoiceDeletionJob);
+    },
+
+    async beginVoiceDeletion(input) {
+      return sql.transaction(async (transaction) => {
+        const voices = await transaction.query<VoiceProfileRow>(
+          `SELECT id, user_id, object_path, checksum_sha256, prompt_text, mime_type, duration_sec,
+                  provider_voice_id, provider_voice_status, provider_voice_error_code,
+                  provider_voice_updated_at, provider_generation, created_at
+           FROM voice_profiles
+           WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL FOR UPDATE`,
+          [input.voiceId, input.userId],
+        );
+        if (!voices[0]) return null;
+        const existing = await transaction.query<VoiceDeletionJobRow>(
+          `SELECT * FROM voice_deletion_jobs
+           WHERE voice_id = $1 AND user_id = $2 AND status <> 'completed'
+           LIMIT 1 FOR UPDATE`,
+          [input.voiceId, input.userId],
+        );
+        if (existing[0]) return mapVoiceDeletionJob(existing[0]);
+        const authorizations = await transaction.query<VoiceAuthorizationRow>(
+          `SELECT ${VOICE_AUTHORIZATION_COLUMNS} FROM voice_authorizations
+           WHERE voice_id = $1 AND user_id = $2
+           ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`,
+          [input.voiceId, input.userId],
+        );
+        const authorization = authorizations[0];
+        if (!authorization || authorization.id !== input.authorizationId) return null;
+        if (authorization.status !== "rejected") {
+          await transaction.query(
+            `UPDATE voice_authorizations
+             SET status = 'revoked', revoked_at = COALESCE(revoked_at, now())
+             WHERE id = $1 AND voice_id = $2 AND user_id = $3`,
+            [authorization.id, input.voiceId, input.userId],
+          );
+        }
+        const generationRows = await transaction.query<{ provider_generation: number | string }>(
+          `UPDATE voice_profiles
+           SET provider_generation = provider_generation + 1,
+               provider_voice_status = 'deleting',
+               provider_voice_error_code = NULL,
+               provider_voice_updated_at = now()
+           WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+           RETURNING provider_generation`,
+          [input.voiceId, input.userId],
+        );
+        if (!generationRows[0]) return null;
+        const rows = await transaction.query<VoiceDeletionJobRow>(
+          `INSERT INTO voice_deletion_jobs
+             (id, voice_id, user_id, authorization_id, provider_voice_id, provider_generation,
+              delete_conversation_data, status, current_step)
+           VALUES ($1, $2, $3, $4, $5, $6, TRUE, 'pending', 'provider')
+           RETURNING *`,
+          [
+            input.id, input.voiceId, input.userId, input.authorizationId,
+            voices[0].provider_voice_id || input.providerVoiceId,
+            Number(generationRows[0].provider_generation),
+          ],
+        );
+        if (rows[0]) {
+          await transaction.query(
+            `INSERT INTO voice_deletion_events
+               (id, job_id, voice_id, user_id, event_type, step, error_code)
+             VALUES ($1, $2, $3, $4, 'started', 'provider', NULL)`,
+            [randomUUID(), input.id, input.voiceId, input.userId],
+          );
+        }
+        return rows[0] ? mapVoiceDeletionJob(rows[0]) : null;
+      });
+    },
+
+    async claimVoiceDeletionJob(id, userId, leaseToken) {
+      const rows = await sql.query<VoiceDeletionJobRow>(
+        `UPDATE voice_deletion_jobs
+         SET status = 'processing', lease_token = $3,
+             attempt_count = attempt_count + 1, updated_at = now()
+         WHERE id = $1 AND user_id = $2
+           AND (
+             status IN ('pending','retry_pending')
+             OR (status = 'processing' AND updated_at <= now() - interval '5 minutes')
+           )
+         RETURNING *`,
+        [id, userId, leaseToken],
+      );
+      return rows[0] ? mapVoiceDeletionJob(rows[0]) : null;
+    },
+
+    async updateVoiceDeletionJob(input) {
+      return sql.transaction(async (transaction) => {
+        const rows = await transaction.query<VoiceDeletionJobRow>(
+          `UPDATE voice_deletion_jobs
+           SET current_step = $4, status = $5, last_error_code = $6, updated_at = now(),
+               completed_at = CASE WHEN $5 = 'completed' THEN now() ELSE completed_at END,
+               lease_token = CASE WHEN $5 = 'processing' THEN lease_token ELSE NULL END
+           WHERE id = $1 AND user_id = $2 AND lease_token = $3 AND status = 'processing'
+           RETURNING *`,
+          [
+            input.id, input.userId, input.leaseToken, input.currentStep,
+            input.status, input.lastErrorCode,
+          ],
+        );
+        if (!rows[0]) return null;
+        const eventType = input.status === "completed"
+          ? "completed"
+          : input.status === "retry_pending" ? "retry_pending" : "step_advanced";
+        await transaction.query(
+          `INSERT INTO voice_deletion_events
+             (id, job_id, voice_id, user_id, event_type, step, error_code)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            randomUUID(), rows[0].id, rows[0].voice_id, rows[0].user_id,
+            eventType, input.currentStep, input.lastErrorCode,
+          ],
+        );
+        return mapVoiceDeletionJob(rows[0]);
+      });
+    },
+
+    async softDeletePersonasForVoice(voiceId, userId, deletionJobId) {
+      return sql.transaction(async (transaction) => {
+        const personas = await transaction.query<{ id: string }>(
+          `SELECT id FROM personas
+           WHERE voice_id = $1 AND user_id = $2 AND deleted_at IS NULL
+           FOR UPDATE`,
+          [voiceId, userId],
+        );
+        if (personas.length === 0) return 0;
+        await transaction.query(
+          `INSERT INTO persona_deletion_tombstones
+             (persona_id, user_id, voice_id, deletion_job_id)
+           SELECT id, user_id, voice_id, $3 FROM personas
+           WHERE voice_id = $1 AND user_id = $2 AND deleted_at IS NULL
+           ON CONFLICT (persona_id) DO NOTHING`,
+          [voiceId, userId, deletionJobId],
+        );
+        for (const table of [
+          "conversation_sessions",
+          "conversation_turns",
+          "messages",
+          "memories",
+          "persona_sources",
+          "persona_facts",
+          "relationship_memories",
+          "speech_style_items",
+        ]) {
+          await transaction.query(
+            `DELETE FROM ${table}
+             WHERE persona_id IN (
+               SELECT id FROM personas WHERE voice_id = $1 AND user_id = $2 AND deleted_at IS NULL
+             )`,
+            [voiceId, userId],
+          );
+        }
+        await transaction.query(
+          `UPDATE personas
+           SET name = '', relation = '', persona_desc = '', deleted_at = now()
+           WHERE voice_id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+          [voiceId, userId],
+        );
+        return personas.length;
+      });
+    },
+
+    async purgeVoiceData(voiceId, userId) {
+      await sql.transaction(async (transaction) => {
+        await transaction.query(
+          `DELETE FROM voice_provider_operations
+           WHERE voice_id = $1 AND user_id = $2 AND status = 'closed'`,
+          [voiceId, userId],
+        );
+        await transaction.query(
+          `DELETE FROM voice_authorizations WHERE voice_id = $1 AND user_id = $2`,
+          [voiceId, userId],
+        );
+        await transaction.query(
+          `UPDATE voice_profiles
+           SET object_path = 'deleted:' || id,
+               checksum_sha256 = '', prompt_text = '', mime_type = 'application/octet-stream',
+               duration_sec = NULL, provider_voice_id = NULL,
+               provider_voice_status = 'not_created', provider_voice_error_code = NULL,
+               provider_voice_updated_at = now(), deleted_at = COALESCE(deleted_at, now())
+           WHERE id = $1 AND user_id = $2`,
+          [voiceId, userId],
+        );
+      });
     },
 
     async replaceVoiceAuthorization(
@@ -1143,6 +1492,13 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
           [input.voiceId, input.userId],
         );
         if (!owner[0]) throw new Error("voice_not_found");
+        const deletion = await transaction.query<{ id: string }>(
+          `SELECT id FROM voice_deletion_jobs
+           WHERE voice_id = $1 AND user_id = $2 AND status <> 'completed'
+           LIMIT 1 FOR UPDATE`,
+          [input.voiceId, input.userId],
+        );
+        if (deletion[0]) throw new Error("voice_deletion_pending");
         const priorRows = await transaction.query<VoiceAuthorizationRow>(
           `SELECT ${VOICE_AUTHORIZATION_COLUMNS}
            FROM voice_authorizations

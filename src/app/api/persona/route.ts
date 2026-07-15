@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import { requireAuth } from "@/lib/guard";
+import { requireSameOrigin } from "@/lib/sensitiveWriteGuard";
 import { getRepository } from "@/lib/storage/repository";
-import { getVoiceObjectStore } from "@/lib/storage/voiceObjectStore";
-import { deleteVoiceEverywhere } from "@/lib/voicePresetService";
-import { logger } from "@/lib/logger";
 import { executePersonaCreation } from "@/lib/personaCreation";
 
 export const runtime = "nodejs";
@@ -16,6 +14,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const originError = requireSameOrigin(req);
+  if (originError) return originError;
   const auth = await requireAuth(req);
   if ("error" in auth) return auth.error;
 
@@ -46,6 +46,8 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const originError = requireSameOrigin(req);
+  if (originError) return originError;
   const auth = await requireAuth(req);
   if ("error" in auth) return auth.error;
 
@@ -56,30 +58,7 @@ export async function DELETE(req: NextRequest) {
   const persona = await repository.getPersonaForUser(id, auth.userId);
   if (!persona) return NextResponse.json({ error: "persona 不存在或不属于你" }, { status: 403 });
 
-  const voiceId = persona.voiceId;
-
-  // 先删 persona（memories/messages 级联删除）
+  // 删除人物不会顺带撤回声音授权；声音撤回应走可审计、可重试的统一流程。
   await repository.deletePersona(id, auth.userId);
-
-  // 仅当当前用户没有其他 persona 复用该 voice 时才清参考音频
-  if (await repository.countPersonasUsingVoice(voiceId, auth.userId) === 0) {
-    try {
-      await deleteVoiceEverywhere(voiceId, auth.userId, {
-        repository,
-        store: getVoiceObjectStore(),
-      });
-    } catch (error) {
-      logger.error("voice_cleanup_pending", {
-        voiceId,
-        userId: auth.userId,
-        errorType: error instanceof Error ? error.name : "unknown",
-      });
-      return NextResponse.json(
-        { ok: true, cleanupPending: true, voiceId },
-        { status: 202 },
-      );
-    }
-  }
-
   return NextResponse.json({ ok: true });
 }

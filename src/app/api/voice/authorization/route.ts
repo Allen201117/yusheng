@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/guard";
+import { requireSameOrigin } from "@/lib/sensitiveWriteGuard";
 import { getRepository } from "@/lib/storage/repository";
 import { getVoiceObjectStore } from "@/lib/storage/voiceObjectStore";
 import type {
   VoiceAuthorization,
   VoiceAuthorizationBasis,
+  VoiceDeletionJob,
   VoiceSpeakerStatus,
 } from "@/lib/storage/types";
 import {
@@ -37,15 +39,46 @@ function toClientAuthorization(authorization: VoiceAuthorization) {
   };
 }
 
+function toClientDeletion(job: VoiceDeletionJob | null) {
+  if (!job) return null;
+  return {
+    jobId: job.id,
+    voiceId: job.voiceId,
+    status: job.status,
+    currentStep: job.currentStep,
+    errorCode: job.lastErrorCode,
+  };
+}
+
 export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if ("error" in auth) return auth.error;
   const voiceId = (req.nextUrl.searchParams.get("voiceId") || "").trim();
-  if (!voiceId) return NextResponse.json({ error: "缺少 voiceId" }, { status: 400 });
+  const repository = getRepository();
+  if (!voiceId) {
+    const jobs = await repository.listActiveVoiceDeletionJobs(auth.userId);
+    return NextResponse.json({ deletionJobs: jobs.map(toClientDeletion) });
+  }
+
+  const deletion = await repository.getActiveVoiceDeletionJob(voiceId, auth.userId);
+  if (deletion) {
+    const [voice, authorization] = await Promise.all([
+      getVoiceObjectStore().getMeta(voiceId, auth.userId),
+      repository.getCurrentVoiceAuthorization(voiceId, auth.userId),
+    ]);
+    return NextResponse.json({
+      deletion: toClientDeletion(deletion),
+      ...(authorization ? { authorization: toClientAuthorization(authorization) } : {}),
+      ...(voice ? {
+        presetStatus: voice.providerVoiceStatus,
+        ...(voice.providerVoiceErrorCode ? { presetErrorCode: voice.providerVoiceErrorCode } : {}),
+      } : {}),
+    });
+  }
 
   const voice = await getVoiceObjectStore().getMeta(voiceId, auth.userId);
   if (!voice) return NextResponse.json({ error: "声音不存在或不属于你" }, { status: 404 });
-  const authorization = await getRepository().getCurrentVoiceAuthorization(
+  const authorization = await repository.getCurrentVoiceAuthorization(
     voiceId,
     auth.userId,
   );
@@ -60,6 +93,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const originError = requireSameOrigin(req);
+  if (originError) return originError;
   const auth = await requireAuth(req);
   if ("error" in auth) return auth.error;
 
@@ -120,20 +155,42 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const originError = requireSameOrigin(req);
+  if (originError) return originError;
   const auth = await requireAuth(req);
   if ("error" in auth) return auth.error;
   const voiceId = (req.nextUrl.searchParams.get("voiceId") || "").trim();
   if (!voiceId) return NextResponse.json({ error: "缺少 voiceId" }, { status: 400 });
 
+  let body: Record<string, unknown> = {};
+  try {
+    body = await req.json();
+  } catch {
+    // Missing JSON is handled as an absent destructive-action confirmation.
+  }
+
   const result = await revokeStoredVoiceAuthorization(voiceId, auth.userId, {
     repository: getRepository(),
     store: getVoiceObjectStore(),
-  });
+  }, { deleteConversationData: body.deleteConversationData === true });
   if (result.status === "not_found") {
     return NextResponse.json({ error: "声音或授权记录不存在" }, { status: 404 });
   }
-  return NextResponse.json(
-    { ok: true, status: result.status, cleanupPending: result.cleanupPending },
-    { status: result.cleanupPending ? 202 : 200 },
-  );
+  if (result.status === "confirmation_required") {
+    return NextResponse.json({
+      ok: false,
+      status: result.status,
+      error: "必须明确确认删除关联人物和全部对话数据",
+    }, { status: 409 });
+  }
+  if (result.status === "processing") {
+    return NextResponse.json({
+      ok: false,
+      status: result.status,
+      jobId: result.jobId,
+      currentStep: result.currentStep,
+      errorCode: result.errorCode,
+    }, { status: 202 });
+  }
+  return NextResponse.json({ ok: true, status: result.status, jobId: result.jobId });
 }

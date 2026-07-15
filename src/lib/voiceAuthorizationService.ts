@@ -13,6 +13,13 @@ import {
   provisionVoicePreset,
   revokeVoicePreset,
 } from "./voicePresetService";
+import {
+  createPresetVoiceName,
+  deletePresetVoice,
+  listPresetVoices,
+  type ListedPresetVoice,
+} from "./siliconFlowVoice";
+import { stableProviderErrorCode } from "./providerErrors";
 
 type Dependencies = {
   repository: AppRepository;
@@ -25,7 +32,8 @@ type SubmitDependencies = Dependencies & {
 };
 
 type RevokeDependencies = Dependencies & {
-  revokePreset?: typeof revokeVoicePreset;
+  removePreset?: (uri: string) => Promise<void>;
+  listPresets?: () => Promise<ListedPresetVoice[]>;
 };
 
 type ReviewDependencies = SubmitDependencies & {
@@ -79,6 +87,11 @@ export async function submitVoiceAuthorization(
   input: SubmitVoiceAuthorizationInput,
   dependencies: SubmitDependencies,
 ) {
+  const deletion = await dependencies.repository.getActiveVoiceDeletionJob?.(
+    input.voiceId,
+    input.userId,
+  );
+  if (deletion) return { status: "rejected" as const, reasonCode: "voice_deletion_pending" };
   const voice = await dependencies.store.getMeta(input.voiceId, input.userId);
   if (!voice) return { status: "not_found" as const };
 
@@ -141,6 +154,9 @@ export async function submitVoiceAuthorization(
     if (error instanceof Error && error.message === "authorization_state_changed") {
       return submitVoiceAuthorization(input, dependencies);
     }
+    if (error instanceof Error && error.message === "voice_deletion_pending") {
+      return { status: "rejected" as const, reasonCode: "voice_deletion_pending" };
+    }
     throw error;
   }
 
@@ -202,25 +218,156 @@ export async function revokeStoredVoiceAuthorization(
   voiceId: string,
   userId: string,
   dependencies: RevokeDependencies,
+  options: { deleteConversationData: boolean },
 ): Promise<
   | { status: "not_found" }
-  | { status: "revoked"; cleanupPending: boolean; authorization?: VoiceAuthorization }
-  | { status: "rejected"; cleanupPending: boolean; authorization: VoiceAuthorization }
+  | { status: "confirmation_required" }
+  | { status: "processing"; jobId: string; currentStep: string; errorCode: string | null }
+  | { status: "completed"; jobId: string }
 > {
-  const voice = await dependencies.store.getMeta(voiceId, userId);
-  if (!voice) return { status: "not_found" };
+  if (!options.deleteConversationData) return { status: "confirmation_required" };
 
-  const authorization = await dependencies.repository.revokeVoiceAuthorization(voiceId, userId);
-  if (!authorization) return { status: "not_found" };
-  const status = authorization.status === "rejected" ? "rejected" as const : "revoked" as const;
-
-  try {
-    const revokePreset = dependencies.revokePreset || revokeVoicePreset;
-    await revokePreset(voiceId, userId, dependencies);
-    return { status, cleanupPending: false, authorization };
-  } catch {
-    return status === "rejected"
-      ? { status, cleanupPending: true, authorization }
-      : { status, cleanupPending: true };
+  let job = await dependencies.repository.getActiveVoiceDeletionJob(voiceId, userId);
+  if (!job) {
+    const [voice, authorization] = await Promise.all([
+      dependencies.store.getMeta(voiceId, userId),
+      dependencies.repository.getCurrentVoiceAuthorization(voiceId, userId),
+    ]);
+    if (!voice || !authorization) return { status: "not_found" };
+    job = await dependencies.repository.beginVoiceDeletion({
+      id: randomUUID(),
+      voiceId,
+      userId,
+      authorizationId: authorization.id,
+      providerVoiceId: voice.providerVoiceId,
+      deleteConversationData: true,
+    });
+    if (!job) return { status: "not_found" };
   }
+
+  const leaseToken = randomUUID();
+  const claimed = await dependencies.repository.claimVoiceDeletionJob(job.id, userId, leaseToken);
+  if (!claimed) {
+    return { status: "processing", jobId: job.id, currentStep: job.currentStep, errorCode: job.lastErrorCode };
+  }
+  job = claimed;
+  let currentJob = claimed;
+
+  const retry = async (error: unknown) => {
+    const explicitCode = error && typeof error === "object" && "code" in error
+      ? String((error as { code?: unknown }).code || "")
+      : "";
+    const errorCode = currentJob.currentStep === "provider"
+      ? (explicitCode.startsWith("voice_provider_") ? explicitCode : stableProviderErrorCode(error))
+      : `voice_deletion_${currentJob.currentStep}_failed`;
+    await dependencies.repository.updateVoiceDeletionJob({
+      id: currentJob.id, userId, leaseToken, currentStep: currentJob.currentStep,
+      status: "retry_pending", lastErrorCode: errorCode,
+    });
+    return { status: "processing" as const, jobId: currentJob.id, currentStep: currentJob.currentStep, errorCode };
+  };
+
+  if (job.currentStep === "provider") {
+    try {
+      let reconcileByName = false;
+      const staleUnknownOperations: number[] = [];
+      const pendingOperations = await dependencies.repository.listPendingVoiceProviderOperations(
+        voiceId,
+        userId,
+      );
+      for (const operation of pendingOperations) {
+        if (!operation.providerVoiceId) {
+          const updatedAt = Date.parse(operation.updatedAt);
+          if (Number.isFinite(updatedAt) && Date.now() - updatedAt >= 5 * 60_000) {
+            staleUnknownOperations.push(operation.generation);
+            reconcileByName = true;
+            continue;
+          }
+          throw Object.assign(new Error("provider operation is still in flight"), {
+            code: "voice_provider_operation_in_flight",
+          });
+        }
+        try {
+          await (dependencies.removePreset || deletePresetVoice)(operation.providerVoiceId);
+        } catch (error) {
+          await dependencies.repository.settleSupersededVoiceProviderOperation(
+            voiceId, userId, operation.generation,
+            {
+              providerVoiceId: operation.providerVoiceId,
+              cleanupPending: true,
+              errorCode: stableProviderErrorCode(error),
+            },
+          );
+          throw error;
+        }
+        await dependencies.repository.settleSupersededVoiceProviderOperation(
+          voiceId, userId, operation.generation,
+          { providerVoiceId: null, cleanupPending: false, errorCode: null },
+        );
+      }
+      const providerVoiceIds = new Set<string>();
+      if (job.providerVoiceId) providerVoiceIds.add(job.providerVoiceId);
+      if (reconcileByName) {
+        const presets = await (dependencies.listPresets || listPresetVoices)();
+        const customName = createPresetVoiceName(voiceId);
+        for (const preset of presets) {
+          if (preset.customName === customName) providerVoiceIds.add(preset.uri);
+        }
+      }
+      for (const providerVoiceId of providerVoiceIds) {
+        await (dependencies.removePreset || deletePresetVoice)(providerVoiceId);
+      }
+      for (const generation of staleUnknownOperations) {
+        await dependencies.repository.settleSupersededVoiceProviderOperation(
+          voiceId, userId, generation,
+          { providerVoiceId: null, cleanupPending: false, errorCode: null },
+        );
+      }
+      const advanced = await dependencies.repository.updateVoiceDeletionJob({
+        id: job.id, userId, leaseToken, currentStep: "personas",
+        status: "processing", lastErrorCode: null,
+      });
+      if (!advanced) return retry(new Error("deletion lease lost"));
+      job = advanced;
+      currentJob = advanced;
+    } catch (error) {
+      return retry(error);
+    }
+  }
+
+  if (job.currentStep === "personas") {
+    try {
+      await dependencies.repository.softDeletePersonasForVoice(voiceId, userId, job.id);
+      const advanced = await dependencies.repository.updateVoiceDeletionJob({
+        id: job.id, userId, leaseToken, currentStep: "source",
+        status: "processing", lastErrorCode: null,
+      });
+      if (!advanced) return retry(new Error("deletion lease lost"));
+      job = advanced;
+      currentJob = advanced;
+    } catch (error) {
+      return retry(error);
+    }
+  }
+
+  if (job.currentStep === "source") {
+    try {
+      const existing = await dependencies.store.getMeta(voiceId, userId);
+      if (existing) {
+        const deleted = await dependencies.store.delete(voiceId, userId);
+        if (!deleted) throw new Error("private source was not deleted");
+      }
+      await dependencies.repository.purgeVoiceData(voiceId, userId);
+      const completed = await dependencies.repository.updateVoiceDeletionJob({
+        id: job.id, userId, leaseToken, currentStep: "completed",
+        status: "completed", lastErrorCode: null,
+      });
+      if (!completed) return retry(new Error("deletion lease lost"));
+      return { status: "completed", jobId: job.id };
+    } catch (error) {
+      return retry(error);
+    }
+  }
+
+  return { status: "completed", jobId: job.id };
 }

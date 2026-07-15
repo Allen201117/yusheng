@@ -27,6 +27,7 @@ export type VoiceMeta = {
   providerVoiceStatus?: "not_created" | "pending" | "ready" | "failed" | "deleting";
   providerVoiceErrorCode?: string | null;
   providerVoiceUpdatedAt?: string | null;
+  providerVoiceGeneration?: number;
 };
 
 /** 根据 MIME 类型推断文件扩展名 */
@@ -120,11 +121,25 @@ export async function deleteVoice(voiceId: string): Promise<void> {
   try {
     const raw = await fs.readFile(metaFile, "utf-8");
     meta = JSON.parse(raw) as VoiceMeta;
-  } catch {
-    return; // meta 不存在就不清
+  } catch (error) {
+    if (isMissingFile(error)) return;
+    throw error;
   }
-  await fs.unlink(meta.audioFile).catch(() => {});
-  await fs.unlink(metaFile).catch(() => {});
+  await unlinkIfPresent(meta.audioFile);
+  await unlinkIfPresent(metaFile);
+}
+
+function isMissingFile(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error
+    && (error as { code?: unknown }).code === "ENOENT");
+}
+
+async function unlinkIfPresent(file: string): Promise<void> {
+  try {
+    await fs.unlink(file);
+  } catch (error) {
+    if (!isMissingFile(error)) throw error;
+  }
 }
 
 export async function deleteVoiceForUser(voiceId: string, userId: string): Promise<boolean> {
@@ -141,6 +156,7 @@ export async function updateVoiceProviderStateForUser(
     status: "not_created" | "pending" | "ready" | "failed" | "deleting";
     providerVoiceId: string | null;
     errorCode: string | null;
+    generation?: number;
   },
 ): Promise<VoiceMeta | null> {
   const meta = await loadVoiceForUser(voiceId, userId);
@@ -151,6 +167,7 @@ export async function updateVoiceProviderStateForUser(
     providerVoiceStatus: input.status,
     providerVoiceErrorCode: input.errorCode,
     providerVoiceUpdatedAt: new Date().toISOString(),
+    providerVoiceGeneration: input.generation ?? meta.providerVoiceGeneration ?? 0,
   };
   const metaFile = path.join(voicesDir(), `${voiceId}.meta.json`);
   const temporary = `${metaFile}.${randomUUID()}.tmp`;

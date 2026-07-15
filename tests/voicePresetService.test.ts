@@ -47,6 +47,31 @@ function fixture(initial = voiceMeta()) {
       };
       return meta;
     },
+    async claimVoiceProviderOperation(_voiceId: string, userId: string, status: "pending" | "deleting") {
+      if (!meta || meta.userId !== userId) return { status: "not_found" as const };
+      const generation = (meta.providerVoiceGeneration || 0) + 1;
+      calls.push(`state:${status}`);
+      meta = { ...meta, providerVoiceStatus: status, providerVoiceGeneration: generation };
+      return { status: "claimed" as const, generation, meta };
+    },
+    async completeVoiceProviderOperation(_voiceId: string, userId: string, generation: number, input: {
+      status: VoiceMeta["providerVoiceStatus"];
+      providerVoiceId: string | null;
+      errorCode: string | null;
+    }) {
+      if (!meta || meta.userId !== userId || meta.providerVoiceGeneration !== generation) return null;
+      calls.push(`state:${input.status}`);
+      meta = {
+        ...meta, providerVoiceStatus: input.status, providerVoiceId: input.providerVoiceId,
+        providerVoiceErrorCode: input.errorCode,
+      };
+      return meta;
+    },
+    async settleSupersededVoiceProviderOperation(_voiceId: string, _userId: string, _generation: number, input: {
+      providerVoiceId: string | null; cleanupPending: boolean; errorCode: string | null;
+    }) {
+      calls.push(`operation:${input.cleanupPending ? "cleanup_pending" : "closed"}`);
+    },
   } as AppRepository;
   const store = {
     async getMeta(_voiceId: string, userId: string) {
@@ -119,6 +144,75 @@ it("records a stable failed state while keeping dynamic audio available", async 
   assert.equal(result.errorCode, "provider_http_403_10001");
   assert.equal(f.meta?.providerVoiceStatus, "failed");
   assert.equal((await f.store.get("voice-1", "user-1"))?.body.toString(), "reference");
+});
+
+it("closes a superseded provider operation when source audio disappears after the claim", async () => {
+  const settled: Array<{
+    cleanupPending: boolean;
+    providerVoiceId: string | null;
+    errorCode: string | null;
+  }> = [];
+  const repository = {
+    async claimVoiceProviderOperation() {
+      return { status: "claimed" as const, generation: 4, meta: voiceMeta({ providerVoiceGeneration: 4 }) };
+    },
+    async completeVoiceProviderOperation() { return null; },
+    async settleSupersededVoiceProviderOperation(
+      _voiceId: string,
+      _userId: string,
+      _generation: number,
+      input: { cleanupPending: boolean; providerVoiceId: string | null; errorCode: string | null },
+    ) {
+      settled.push(input);
+    },
+  } as unknown as AppRepository;
+  const store = {
+    async getMeta() { return voiceMeta(); },
+    async get() { return null; },
+  } as unknown as VoiceObjectStore;
+
+  const result = await provisionVoicePreset("voice-1", "user-1", { repository, store });
+
+  assert.equal(result.status, "failed");
+  assert.deepEqual(settled, [{ cleanupPending: false, providerVoiceId: null, errorCode: null }]);
+});
+
+it("deletes an uploaded provider voice when a newer generation supersedes provisioning", async () => {
+  const f = fixture();
+  const removed: string[] = [];
+  const result = await provisionVoicePreset("voice-1", "user-1", {
+    repository: f.repository,
+    store: f.store,
+    upload: async () => {
+      await f.repository.claimVoiceProviderOperation("voice-1", "user-1", "deleting");
+      return "speech:orphaned-upload";
+    },
+    removePreset: async (uri) => { removed.push(uri); },
+  });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.errorCode, "provider_operation_superseded");
+  assert.deepEqual(removed, ["speech:orphaned-upload"]);
+  assert.notEqual(f.meta?.providerVoiceId, "speech:orphaned-upload");
+});
+
+it("persists orphan cleanup when a superseded upload cannot be deleted", async () => {
+  const f = fixture();
+  const result = await provisionVoicePreset("voice-1", "user-1", {
+    repository: f.repository,
+    store: f.store,
+    upload: async () => {
+      await f.repository.claimVoiceProviderOperation("voice-1", "user-1", "deleting");
+      return "speech:cleanup-pending";
+    },
+    removePreset: async () => {
+      throw Object.assign(new Error("down"), { code: "provider_http_503" });
+    },
+  });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.errorCode, "provider_orphan_cleanup_pending");
+  assert.match(f.calls.join(","), /operation:cleanup_pending/);
 });
 
 it("removes the provider preset before deleting private storage", async () => {

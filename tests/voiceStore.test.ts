@@ -12,6 +12,7 @@ import {
   loadVoice,
   deleteVoice,
   saveVoiceForUser,
+  deleteVoiceForUser,
   loadVoiceForUser,
   listVoicesForUser,
 } from "../src/lib/voiceStore";
@@ -58,6 +59,28 @@ describe("voiceStore", () => {
     await deleteVoice(meta.voiceId);
     const loaded = await loadVoice(meta.voiceId);
     assert.equal(loaded, null);
+  });
+
+  it("不会吞掉原始录音删除失败并虚报完成", async () => {
+    const meta = await saveVoiceForUser(
+      Buffer.from("must remain observable"),
+      "测试",
+      "audio/wav",
+      "owner",
+    );
+    const metaFile = path.join(testDir, "voices", `${meta.voiceId}.meta.json`);
+    await fs.writeFile(metaFile, JSON.stringify({ ...meta, audioFile: path.join(testDir, "voices") }));
+
+    await assert.rejects(() => deleteVoiceForUser(meta.voiceId, "owner"));
+    assert.ok(await loadVoiceForUser(meta.voiceId, "owner"));
+  });
+
+  it("重试删除时只忽略已经不存在的音频文件", async () => {
+    const meta = await saveVoiceForUser(Buffer.from("partial"), "测试", "audio/wav", "owner");
+    await fs.unlink(meta.audioFile);
+
+    assert.equal(await deleteVoiceForUser(meta.voiceId, "owner"), true);
+    assert.equal(await loadVoiceForUser(meta.voiceId, "owner"), null);
   });
 
   it("load 不存在的 id 返回 null", async () => {

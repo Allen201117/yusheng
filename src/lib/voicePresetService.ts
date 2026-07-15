@@ -7,6 +7,7 @@ type ProvisionDependencies = {
   repository: AppRepository;
   store: VoiceObjectStore;
   upload?: (input: UploadPresetVoiceInput) => Promise<string>;
+  removePreset?: (uri: string) => Promise<void>;
 };
 
 type DeleteDependencies = {
@@ -26,28 +27,41 @@ async function removeProviderPreset(
   providerVoiceId: string,
   dependencies: DeleteDependencies,
   failureMessage: string,
+  generation?: number,
 ): Promise<void> {
-  await dependencies.repository.updateVoiceProviderState(voiceId, userId, {
-    status: "deleting",
-    providerVoiceId,
-    errorCode: null,
-  });
+  const claimed = generation === undefined
+    ? await dependencies.repository.claimVoiceProviderOperation(voiceId, userId, "deleting")
+    : null;
+  const operationGeneration = generation ?? (claimed?.status === "claimed" ? claimed.generation : null);
+  if (operationGeneration === null) throw new Error(failureMessage);
   try {
     const removePreset = dependencies.removePreset || deletePresetVoice;
     await removePreset(providerVoiceId);
   } catch (error) {
-    await dependencies.repository.updateVoiceProviderState(voiceId, userId, {
+    const failed = await dependencies.repository.completeVoiceProviderOperation(voiceId, userId, operationGeneration, {
       status: "failed",
       providerVoiceId,
       errorCode: stableProviderErrorCode(error),
     });
+    if (!failed) {
+      await dependencies.repository.settleSupersededVoiceProviderOperation(
+        voiceId, userId, operationGeneration,
+        { providerVoiceId, cleanupPending: true, errorCode: stableProviderErrorCode(error) },
+      );
+    }
     throw new Error(failureMessage);
   }
-  await dependencies.repository.updateVoiceProviderState(voiceId, userId, {
+  const completed = await dependencies.repository.completeVoiceProviderOperation(voiceId, userId, operationGeneration, {
     status: "not_created",
     providerVoiceId: null,
     errorCode: null,
   });
+  if (!completed) {
+    await dependencies.repository.settleSupersededVoiceProviderOperation(
+      voiceId, userId, operationGeneration,
+      { providerVoiceId: null, cleanupPending: false, errorCode: null },
+    );
+  }
 }
 
 export async function provisionVoicePreset(
@@ -61,19 +75,29 @@ export async function provisionVoicePreset(
     return { status: "ready", meta };
   }
 
-  await dependencies.repository.updateVoiceProviderState(voiceId, userId, {
-    status: "pending",
-    providerVoiceId: meta.providerVoiceId,
-    errorCode: null,
-  });
+  const claim = await dependencies.repository.claimVoiceProviderOperation(voiceId, userId, "pending");
+  if (claim.status === "not_found") return { status: "not_found", meta: null };
+  if (claim.status === "deletion_pending") {
+    return { status: "failed", meta, errorCode: "voice_deletion_pending" };
+  }
+  if (claim.status !== "claimed") return { status: "not_found", meta: null };
+  const generation = claim.generation;
   const voice = await dependencies.store.get(voiceId, userId);
   if (!voice) {
     const errorCode = "private_audio_missing";
-    const failed = await dependencies.repository.updateVoiceProviderState(voiceId, userId, {
+    const failed = await dependencies.repository.completeVoiceProviderOperation(voiceId, userId, generation, {
       status: "failed",
       providerVoiceId: meta.providerVoiceId,
       errorCode,
     });
+    if (!failed) {
+      await dependencies.repository.settleSupersededVoiceProviderOperation(
+        voiceId,
+        userId,
+        generation,
+        { providerVoiceId: null, cleanupPending: false, errorCode: null },
+      );
+    }
     return { status: "failed", meta: failed, errorCode };
   }
 
@@ -85,20 +109,46 @@ export async function provisionVoicePreset(
       mimeType: voice.meta.mimeType,
       promptText: voice.meta.promptText,
     });
-    const ready = await dependencies.repository.updateVoiceProviderState(voiceId, userId, {
+    const ready = await dependencies.repository.completeVoiceProviderOperation(voiceId, userId, generation, {
       status: "ready",
       providerVoiceId: uri,
       errorCode: null,
     });
-    if (!ready) return { status: "not_found", meta: null };
+    if (!ready) {
+      const removePreset = dependencies.removePreset || deletePresetVoice;
+      try {
+        await removePreset(uri);
+        await dependencies.repository.settleSupersededVoiceProviderOperation(
+          voiceId, userId, generation,
+          { providerVoiceId: null, cleanupPending: false, errorCode: null },
+        );
+        return { status: "failed", meta: null, errorCode: "provider_operation_superseded" };
+      } catch (cleanupError) {
+        await dependencies.repository.settleSupersededVoiceProviderOperation(
+          voiceId, userId, generation,
+          {
+            providerVoiceId: uri,
+            cleanupPending: true,
+            errorCode: stableProviderErrorCode(cleanupError),
+          },
+        );
+        return { status: "failed", meta: null, errorCode: "provider_orphan_cleanup_pending" };
+      }
+    }
     return { status: "ready", meta: ready };
   } catch (error) {
     const errorCode = stableProviderErrorCode(error);
-    const failed = await dependencies.repository.updateVoiceProviderState(voiceId, userId, {
+    const failed = await dependencies.repository.completeVoiceProviderOperation(voiceId, userId, generation, {
       status: "failed",
       providerVoiceId: meta.providerVoiceId,
       errorCode,
     });
+    if (!failed) {
+      await dependencies.repository.settleSupersededVoiceProviderOperation(
+        voiceId, userId, generation,
+        { providerVoiceId: null, cleanupPending: false, errorCode: null },
+      );
+    }
     return { status: "failed", meta: failed, errorCode };
   }
 }
@@ -131,14 +181,25 @@ export async function revokeVoicePreset(
 ): Promise<"not_found" | "not_configured" | "revoked"> {
   const meta = await dependencies.store.getMeta(voiceId, userId);
   if (!meta) return "not_found";
-  if (!meta.providerVoiceId) return "not_configured";
+  const claim = await dependencies.repository.claimVoiceProviderOperation(voiceId, userId, "deleting");
+  if (claim.status === "not_found") return "not_found";
+  if (claim.status === "deletion_pending") return "not_configured";
+  if (claim.status !== "claimed") return "not_found";
+  const providerVoiceId = claim.meta.providerVoiceId;
+  if (!providerVoiceId) {
+    await dependencies.repository.completeVoiceProviderOperation(voiceId, userId, claim.generation, {
+      status: "not_created", providerVoiceId: null, errorCode: null,
+    });
+    return "not_configured";
+  }
 
   await removeProviderPreset(
     voiceId,
     userId,
-    meta.providerVoiceId,
+    providerVoiceId,
     dependencies,
     "provider preset revocation failed",
+    claim.generation,
   );
   return "revoked";
 }

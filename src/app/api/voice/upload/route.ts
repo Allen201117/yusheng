@@ -2,10 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { probeAudioDuration } from "@/lib/audioProbe";
 import { transcribeAudio } from "@/lib/asr";
 import { requireAuth } from "@/lib/guard";
+import { requireSameOrigin } from "@/lib/sensitiveWriteGuard";
 import { getVoiceObjectStore } from "@/lib/storage/voiceObjectStore";
-import { getRepository } from "@/lib/storage/repository";
-import { deleteVoiceEverywhere } from "@/lib/voicePresetService";
-import { logger } from "@/lib/logger";
 import {
   MAX_REFERENCE_AUDIO_DURATION_SEC,
   MAX_VOICE_MATERIAL_TOTAL_DURATION_SEC,
@@ -26,44 +24,25 @@ export async function GET(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const originError = requireSameOrigin(req);
+  if (originError) return originError;
   const auth = await requireAuth(req);
   if ("error" in auth) return auth.error;
 
   const voiceId = (req.nextUrl.searchParams.get("id") || "").trim();
   if (!voiceId) return NextResponse.json({ error: "缺少 id" }, { status: 400 });
 
-  const repository = getRepository();
-  if (await repository.countPersonasUsingVoice(voiceId, auth.userId) > 0) {
-    return NextResponse.json(
-      { error: "该声音仍被人物使用，请先删除或更换人物声音" },
-      { status: 409 },
-    );
-  }
-
-  try {
-    const deleted = await deleteVoiceEverywhere(voiceId, auth.userId, {
-      repository,
-      store: getVoiceObjectStore(),
-    });
-    if (!deleted) {
-      return NextResponse.json({ error: "声音不存在或不属于你" }, { status: 404 });
-    }
-    return NextResponse.json({ ok: true });
-  } catch (error) {
-    logger.error("voice_delete_retry_required", {
-      voiceId,
-      userId: auth.userId,
-      errorType: error instanceof Error ? error.name : "unknown",
-    });
-    return NextResponse.json(
-      { error: "供应商音色尚未删除，请稍后重试", cleanupPending: true },
-      { status: 502 },
-    );
-  }
+  return NextResponse.json({
+    error: "请通过声音授权页撤回并删除声音，以确保本地与供应商数据完整清理",
+    code: "VOICE_WITHDRAWAL_REQUIRED",
+    voiceId,
+  }, { status: 409 });
 }
 
 export async function POST(req: NextRequest) {
   try {
+    const originError = requireSameOrigin(req);
+    if (originError) return originError;
     const auth = await requireAuth(req);
     if ("error" in auth) return auth.error;
 

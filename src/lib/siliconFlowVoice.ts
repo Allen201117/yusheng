@@ -1,4 +1,5 @@
 import { providerHttpErrorCode } from "./providerErrors";
+import { createHash } from "node:crypto";
 
 const API_BASE = "https://api.siliconflow.cn/v1";
 const DEFAULT_MODEL = process.env.COSYVOICE_MODEL || "FunAudioLLM/CosyVoice2-0.5B";
@@ -49,13 +50,14 @@ async function providerError(response: Response): Promise<SiliconFlowVoiceError>
 }
 
 export function createPresetVoiceName(voiceId: string): string {
-  const segment = voiceId
-    .trim()
+  const raw = voiceId.trim();
+  const segment = raw
     .replace(/[^a-zA-Z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 48);
+    .slice(0, 31);
   if (!segment) throw new Error("voiceId 不能为空");
-  return `yusheng-${segment}`;
+  const digest = createHash("sha256").update(raw).digest("hex").slice(0, 16);
+  return `yusheng-${segment}-${digest}`;
 }
 
 export function createUploadVoiceBody(input: UploadPresetVoiceInput) {
@@ -109,4 +111,38 @@ export async function deletePresetVoice(
     signal: AbortSignal.timeout(options.timeoutMs ?? 20_000),
   });
   if (!response.ok && response.status !== 404) throw await providerError(response);
+}
+
+export type ListedPresetVoice = { customName: string; uri: string };
+
+export async function listPresetVoices(
+  options: VoiceClientOptions = {},
+): Promise<ListedPresetVoice[]> {
+  const apiKey = requireApiKey(options.apiKey);
+  const fetcher = options.fetcher || fetch;
+  const response = await fetcher(`${API_BASE}/audio/voice/list`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(options.timeoutMs ?? 20_000),
+  });
+  if (!response.ok) throw await providerError(response);
+  const payload = await response.json() as { results?: unknown };
+  if (!Array.isArray(payload.results)) {
+    throw new SiliconFlowVoiceError("provider_invalid_response", response.status);
+  }
+  return payload.results.map((item): ListedPresetVoice => {
+    if (!item || typeof item !== "object") {
+      throw new SiliconFlowVoiceError("provider_invalid_response", response.status);
+    }
+    const customName = typeof (item as { customName?: unknown }).customName === "string"
+      ? (item as { customName: string }).customName.trim()
+      : "";
+    const uri = typeof (item as { uri?: unknown }).uri === "string"
+      ? (item as { uri: string }).uri.trim()
+      : "";
+    if (!customName || !uri.startsWith("speech:")) {
+      throw new SiliconFlowVoiceError("provider_invalid_response", response.status);
+    }
+    return { customName, uri };
+  });
 }
