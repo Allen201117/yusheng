@@ -14,6 +14,7 @@ import type {
   VoiceMeta,
 } from "../src/lib/storage/types";
 import type { VoiceObjectStore } from "../src/lib/storage/voiceObjectStore";
+import { buildTrackedTtsRequest } from "../src/lib/chatSpeechClient";
 
 const sentence: ConversationSentence & { voiceId: string } = {
   id: "sentence-1",
@@ -218,6 +219,27 @@ it("tracked TTS trusts only the stored sentence, controls, persona and voice", a
   assert.equal(f.failures.length, 0);
 });
 
+it("tracks the exact request body produced from a browser SSE sentence", async () => {
+  const f = fixture();
+  const browserRequest = buildTrackedTtsRequest({
+    sentenceId: sentence.id,
+    index: sentence.sentenceIndex,
+    text: sentence.text,
+    emotion: sentence.emotion,
+    intensity: sentence.intensity,
+    speed: sentence.speed,
+    pauseAfterMs: sentence.pauseAfterMs,
+  });
+
+  const response = await f.handlers.POST(request(browserRequest));
+
+  assert.deepEqual(browserRequest, { sentenceId: sentence.id });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("X-TTS-Attempt-ID"), "attempt-1");
+  assert.equal(f.starts.length, 1);
+  assert.equal(f.completes.length, 1);
+});
+
 it("rejects a cross-owner sentence before source lookup, rate limit, attempt or provider", async () => {
   const f = fixture({ sentenceOwner: false });
   const response = await f.handlers.POST(request({ sentenceId: sentence.id }));
@@ -240,11 +262,11 @@ it("does not start an attempt when authorization is revoked or rate limit is den
   assert.equal(limited.starts.length, 0);
 });
 
-it("records one stable failed attempt for a provider 503 without leaking its raw body", async () => {
+it("reduces an arbitrary provider code to provider_unknown without leaking it", async () => {
   const f = fixture({
     providerError: Object.assign(new Error("raw provider secret response"), {
       status: 503,
-      code: "provider_http_503_busy",
+      code: "customer_token_sk_live_ABC123",
       body: "sensitive upstream body",
     }),
   });
@@ -253,7 +275,7 @@ it("records one stable failed attempt for a provider 503 without leaking its raw
   assert.equal(f.providerCalls(), 1);
   assert.equal(f.starts.length, 1);
   assert.equal(f.failures.length, 1);
-  assert.equal(f.failures[0].stableErrorCode, "provider_http_503_busy");
+  assert.equal(f.failures[0].stableErrorCode, "provider_unknown");
   assert.doesNotMatch(JSON.stringify(await response.json()), /raw provider secret response|busy/);
   assert.deepEqual(f.logs, [{
     level: "error",
@@ -262,14 +284,14 @@ it("records one stable failed attempt for a provider 503 without leaking its raw
       voiceId: "voice-1",
       userId: "user-1",
       attemptId: "attempt-1",
-      stableErrorCode: "provider_http_503_busy",
+      stableErrorCode: "provider_unknown",
       errorName: "Error",
       totalMs: 30,
     },
   }]);
   assert.doesNotMatch(
     JSON.stringify(f.logs),
-    /raw provider secret response|sensitive upstream body/,
+    /raw provider secret response|sensitive upstream body|customer_token_sk_live_ABC123/,
   );
 });
 

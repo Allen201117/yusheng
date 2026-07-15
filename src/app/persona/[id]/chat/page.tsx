@@ -5,7 +5,11 @@ import Link from "next/link";
 import { use } from "react";
 import AppShell from "@/components/AppShell";
 import { OrderedPlaybackQueue } from "@/lib/orderedPlaybackQueue";
-import type { SpeechPlan } from "@/lib/speechPlanning";
+import {
+  buildTrackedTtsRequest,
+  trackedSpeechFromSseEvent,
+} from "@/lib/chatSpeechClient";
+import type { SpeechPlan, TrackedSpeechPlan } from "@/lib/speechPlanning";
 
 type Msg = { id: string; role: "user" | "assistant"; content: string; createdAt: string };
 type RetrievedMemory = { content: string; score: number };
@@ -118,14 +122,16 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     setSpeaking(false);
   }
 
-  async function requestSpeech(plan: SpeechPlan): Promise<PreparedSpeech> {
+  async function requestSpeech(plan: SpeechPlan | TrackedSpeechPlan): Promise<PreparedSpeech> {
     const controller = new AbortController();
     ttsControllersRef.current.add(controller);
     const requestedAt = performance.now();
     try {
       const r = await fetch("/api/tts", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ personaId, text: plan.text, speech: plan }),
+        body: JSON.stringify("sentenceId" in plan
+          ? buildTrackedTtsRequest(plan)
+          : { personaId, text: plan.text, speech: plan }),
         signal: controller.signal,
       });
       if (!r.ok) throw new Error(((await r.json().catch(() => ({})))).error || `TTS 失败`);
@@ -135,7 +141,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     }
   }
 
-  function enqueueSpeech(plan: SpeechPlan) {
+  function enqueueSpeech(plan: SpeechPlan | TrackedSpeechPlan) {
     pendingSpeechRef.current += 1;
     setSpeaking(true);
     getPlaybackQueue().enqueue(requestSpeech(plan));
@@ -173,8 +179,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     const abort = new AbortController();
     abortRef.current = abort;
     let fullReply = "";
-    let receivedSentence = false;
-
     try {
       const r = await fetch("/api/chat", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -202,11 +206,11 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               fullReply += json.token;
               setMessages((prev) => prev.map((m) => m.id === aiMsgId ? { ...m, content: fullReply } : m));
             } else if (json.sentence) {
-              receivedSentence = true;
-              enqueueSpeech(json.sentence as SpeechPlan);
+              const plan = trackedSpeechFromSseEvent(json);
+              if (!plan) throw new Error("语音追踪数据无效");
+              enqueueSpeech(plan);
             } else if (json.done) {
               await loadHistory();
-              if (json.reply && !receivedSentence && !json.safety) speak(json.reply);
             } else if (json.error) throw new Error(json.error);
           } catch (err) {
             if (!(err instanceof SyntaxError)) throw err;

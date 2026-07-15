@@ -39,6 +39,7 @@ import type {
   PersonaKnowledgeStatusChange,
   PersonaSource,
   RelationshipMemory,
+  RestorationCohort,
   SpeechStyleItem,
   User,
   VoiceAuthorization,
@@ -1879,6 +1880,58 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
 
     async startTtsAttempt(input): Promise<TtsAttempt> {
       return sql.transaction(async (transaction) => {
+        const owners = await transaction.query<{
+          persona_id: string;
+          session_id: string;
+          voice_id: string;
+          voice_authorization_id: string;
+          cohort: RestorationCohort;
+        }>(
+          `SELECT persona.id AS persona_id, sessions.id AS session_id, sessions.voice_id,
+                  sessions.voice_authorization_id, sessions.cohort
+           FROM conversation_sentences sentence
+           JOIN conversation_sessions sessions
+             ON sessions.id = sentence.session_id AND sessions.persona_id = sentence.persona_id
+           JOIN personas persona
+             ON persona.id = sessions.persona_id AND persona.user_id = sessions.evaluator_user_id
+           WHERE sentence.id = $1 AND sessions.evaluator_user_id = $2
+           FOR UPDATE OF persona`,
+          [input.sentenceId, input.evaluatorUserId],
+        );
+        if (owners.length !== 1) throw new Error("tts_attempt_sentence_unavailable");
+        const owner = owners[0];
+
+        const authorizations = await transaction.query<{ id: string }>(
+          `SELECT id FROM voice_authorizations
+           WHERE id = $1 AND voice_id = $2 AND user_id = $3
+             AND speaker_status = $4 AND status = 'approved'
+           FOR UPDATE`,
+          [
+            owner.voice_authorization_id,
+            owner.voice_id,
+            input.evaluatorUserId,
+            owner.cohort,
+          ],
+        );
+        if (authorizations.length !== 1) throw new Error("tts_attempt_authorization_denied");
+
+        const sessions = await transaction.query<{ id: string }>(
+          `SELECT id FROM conversation_sessions
+           WHERE id = $1 AND persona_id = $2 AND evaluator_user_id = $3
+             AND voice_id = $4 AND voice_authorization_id = $5 AND cohort = $6
+             AND status = 'active'
+           FOR UPDATE`,
+          [
+            owner.session_id,
+            owner.persona_id,
+            input.evaluatorUserId,
+            owner.voice_id,
+            owner.voice_authorization_id,
+            owner.cohort,
+          ],
+        );
+        if (sessions.length !== 1) throw new Error("tts_attempt_session_unavailable");
+
         const sentences = await transaction.query<ConversationSentenceRow & { voice_id: string }>(
           `SELECT sentence.id, sentence.session_id, sentence.turn_id, sentence.persona_id,
                   sentence.sentence_index, sentence.text, sentence.emotion, sentence.intensity,
@@ -1887,17 +1940,10 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
            FROM conversation_sentences sentence
            JOIN conversation_sessions sessions
              ON sessions.id = sentence.session_id AND sessions.persona_id = sentence.persona_id
-           JOIN personas persona
-             ON persona.id = sessions.persona_id AND persona.user_id = sessions.evaluator_user_id
-           JOIN voice_authorizations authorization
-             ON authorization.id = sessions.voice_authorization_id
-            AND authorization.voice_id = sessions.voice_id
-            AND authorization.user_id = sessions.evaluator_user_id
-            AND authorization.status = 'approved'
-           WHERE sentence.id = $1 AND sessions.evaluator_user_id = $2
-             AND sessions.status = 'active'
+           WHERE sentence.id = $1 AND sentence.session_id = $2 AND sentence.persona_id = $3
+             AND sessions.evaluator_user_id = $4 AND sessions.status = 'active'
            FOR UPDATE OF sentence`,
-          [input.sentenceId, input.evaluatorUserId],
+          [input.sentenceId, owner.session_id, owner.persona_id, input.evaluatorUserId],
         );
         if (sentences.length !== 1) throw new Error("tts_attempt_sentence_unavailable");
         const rows = await transaction.query<TtsAttemptRow>(
@@ -1952,8 +1998,8 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
         if (eligible.length !== 1) throw new Error("tts_attempt_authorization_denied");
         const rows = await transaction.query<TtsAttemptRow>(
           `UPDATE tts_attempts
-           SET status = 'completed', voice_source = $3, fell_back = $4,
-               storage_ms = $5, provider_ms = $6, total_ms = $7,
+           SET status = 'completed', voice_source = $2, fell_back = $3,
+               storage_ms = $4, provider_ms = $5, total_ms = $6,
                stable_error_code = NULL, completed_at = now()
            WHERE id = $1 AND status = 'started'
            RETURNING id, sentence_id, session_id, turn_id, persona_id, voice_id,
@@ -1962,7 +2008,6 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
                      stable_error_code, created_at, completed_at`,
           [
             input.id,
-            input.evaluatorUserId,
             input.voiceSource,
             input.fellBack,
             input.storageMs,

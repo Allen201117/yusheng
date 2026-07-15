@@ -76,7 +76,7 @@ it("marks a stale preset failed and retries once with private reference audio", 
       if (attempts === 1) {
         throw Object.assign(new Error("stale voice"), {
           status: 404,
-          code: "provider_http_404_voice_not_found",
+          code: "provider_http_404",
         });
       }
       return Buffer.from("fallback-audio");
@@ -89,7 +89,7 @@ it("marks a stale preset failed and retries once with private reference audio", 
   assert.deepEqual(f.calls, [
     "meta",
     "tts:preset",
-    "state:failed:provider_http_404_voice_not_found",
+    "state:failed:provider_http_404",
     "audio",
     "tts:dynamic",
   ]);

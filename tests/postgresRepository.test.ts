@@ -23,6 +23,17 @@ function createFakeSql(
   return { executor, calls, get transactions() { return transactions; } };
 }
 
+function assertContiguousPostgresPlaceholders(call: { text: string; params: unknown[] }) {
+  const placeholders = Array.from(
+    new Set(Array.from(call.text.matchAll(/\$(\d+)/g), (match) => Number(match[1]))),
+  ).sort((left, right) => left - right);
+  assert.deepEqual(
+    placeholders,
+    Array.from({ length: call.params.length }, (_, index) => index + 1),
+    `SQL placeholders and parameters diverged: ${placeholders.join(",")} / ${call.params.length}`,
+  );
+}
+
 it("applies only migrations missing from schema_migrations", () => {
   const plan = createMigrationPlan(["001_production_foundation.sql"], new Set());
   assert.deepEqual(plan, ["001_production_foundation.sql"]);
@@ -1364,6 +1375,21 @@ it("locks Postgres sentences while allocating attempts and uses owner-scoped CAS
       return [{ id: "turn-1" }];
     }
     if (text.includes("INSERT INTO conversation_sentences")) return [sentenceRow];
+    if (text.includes("FROM conversation_sentences sentence") && text.includes("FOR UPDATE OF persona")) {
+      return [{
+        persona_id: "persona-1",
+        session_id: "session-1",
+        voice_id: "voice-1",
+        voice_authorization_id: "auth-1",
+        cohort: "living",
+      }];
+    }
+    if (text.includes("FROM voice_authorizations") && text.includes("FOR UPDATE")) {
+      return [{ id: "auth-1" }];
+    }
+    if (text.includes("FROM conversation_sessions") && text.includes("FOR UPDATE")) {
+      return [{ id: "session-1" }];
+    }
     if (text.includes("FROM conversation_sentences sentence") && text.includes("FOR UPDATE OF sentence")) {
       return [sentenceRow];
     }
@@ -1433,8 +1459,24 @@ it("locks Postgres sentences while allocating attempts and uses owner-scoped CAS
   const sentenceLock = fake.calls.find((call) =>
     call.text.includes("FROM conversation_sentences sentence")
       && call.text.includes("FOR UPDATE OF sentence"))!;
-  assert.match(sentenceLock.text, /sessions\.evaluator_user_id = \$2/);
-  assert.match(sentenceLock.text, /authorization\.status = 'approved'/);
+  assert.match(sentenceLock.text, /sessions\.evaluator_user_id = \$4/);
+  const personaLock = fake.calls.find((call) => call.text.includes("FOR UPDATE OF persona"))!;
+  const authorizationLock = fake.calls.find((call) =>
+    call.text.includes("FROM voice_authorizations") && call.text.includes("FOR UPDATE"))!;
+  const sessionLock = fake.calls.find((call) =>
+    call.text.includes("FROM conversation_sessions") && call.text.includes("FOR UPDATE"))!;
+  assert.ok(personaLock);
+  assert.ok(authorizationLock);
+  assert.ok(sessionLock);
+  assert.match(personaLock.text, /FOR UPDATE OF persona/);
+  assert.match(authorizationLock.text, /status = 'approved'/);
+  assert.match(authorizationLock.text, /FOR UPDATE\s*$/);
+  assert.match(sessionLock.text, /status = 'active'[\s\S]*FOR UPDATE\s*$/);
+  assert.match(sentenceLock.text, /FOR UPDATE OF sentence/);
+  assert.deepEqual(authorizationLock.params, ["auth-1", "voice-1", "user-1", "living"]);
+  assert.ok(fake.calls.indexOf(personaLock) < fake.calls.indexOf(authorizationLock));
+  assert.ok(fake.calls.indexOf(authorizationLock) < fake.calls.indexOf(sessionLock));
+  assert.ok(fake.calls.indexOf(sessionLock) < fake.calls.indexOf(sentenceLock));
   const attemptInsert = fake.calls.find((call) => call.text.includes("INSERT INTO tts_attempts"))!;
   assert.match(attemptInsert.text, /COALESCE\(MAX\(attempt_no\), 0\) \+ 1/);
   const completionLock = fake.calls.find((call) =>
@@ -1444,6 +1486,38 @@ it("locks Postgres sentences while allocating attempts and uses owner-scoped CAS
   const completionUpdate = fake.calls.find((call) =>
     call.text.includes("UPDATE tts_attempts") && call.text.includes("status = 'completed'"))!;
   assert.match(completionUpdate.text, /WHERE id = \$1 AND status = 'started'/);
+  assertContiguousPostgresPlaceholders(completionUpdate);
+  for (const call of fake.calls) assertContiguousPostgresPlaceholders(call);
+});
+
+it("rejects a revoked authorization after the persona lock and before session or sentence locks", async () => {
+  const fake = createFakeSql((text) => {
+    if (text.includes("FOR UPDATE OF persona")) return [{
+      persona_id: "persona-1",
+      session_id: "session-1",
+      voice_id: "voice-1",
+      voice_authorization_id: "auth-1",
+      cohort: "living",
+    }];
+    if (text.includes("FROM voice_authorizations") && text.includes("FOR UPDATE")) return [];
+    throw new Error(`unexpected query after revoked authorization: ${text}`);
+  });
+  const repo = createPostgresRepository(fake.executor);
+
+  await assert.rejects(repo.startTtsAttempt({
+    id: "attempt-revoked",
+    sentenceId: "sentence-1",
+    evaluatorUserId: "user-1",
+    voiceSource: "preset",
+    providerVoiceId: "provider-1",
+    ttsModel: "cosyvoice-v1",
+    ttsConfigVersion: "config-v1",
+  }), /tts_attempt_authorization_denied/);
+
+  assert.equal(fake.calls[0].text.includes("FOR UPDATE OF persona"), true);
+  assert.equal(fake.calls[1].text.includes("FROM voice_authorizations"), true);
+  assert.equal(fake.calls.some((call) => call.text.includes("INSERT INTO tts_attempts")), false);
+  assert.equal(fake.calls.some((call) => call.text.includes("FOR UPDATE OF sentence")), false);
 });
 
 it("fails a Postgres TTS attempt only for its evaluator and started status", async () => {

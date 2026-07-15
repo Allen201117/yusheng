@@ -12,6 +12,7 @@ import type {
 } from "../src/lib/storage/types";
 import type { ChatMessage } from "../src/lib/llm";
 import { detectConversationBoundary } from "../src/lib/conversationBoundary";
+import { buildTrackedTtsRequest, trackedSpeechFromSseEvent } from "../src/lib/chatSpeechClient";
 
 const vector = (value = 1) => {
   const result = new Float32Array(EMBEDDING_DIM);
@@ -491,6 +492,13 @@ it("binds confirmed evidence before one model stream and persists legacy and new
     sentenceEvents.map((sentence) => sentence.sentenceId),
     h.calls.sentences.map((call) => call.id),
   );
+  const browserPlan = trackedSpeechFromSseEvent(
+    events.find((event) => "sentence" in event),
+  );
+  assert.ok(browserPlan);
+  assert.deepEqual(buildTrackedTtsRequest(browserPlan), {
+    sentenceId: h.calls.sentences[0].id,
+  });
   assert.ok(h.calls.sentences.every((call) => call.plannerVersion === "keyword-v1"));
   assert.deepEqual(h.calls.binds[0].evidence, [
     { kind: "fact", itemId: "fact-1" },

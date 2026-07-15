@@ -70,7 +70,7 @@ it("returns a structured provider error without exposing raw response details", 
       }),
       (error: unknown) => {
         assert.equal((error as { status?: number }).status, 404);
-        assert.equal((error as { code?: string }).code, "provider_http_404_voice_not_found");
+        assert.equal((error as { code?: string }).code, "provider_http_404");
         assert.doesNotMatch((error as Error).message, /sensitive provider detail/);
         return true;
       },
