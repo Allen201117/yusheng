@@ -114,7 +114,7 @@ npm run --silent report:restoration
 git diff --check
 ```
 
-`report:restoration` 是只读运营命令：只有 `ENOENT` 才当作空库，权限/路径/存储错误稳定失败。已存在的 SQLite 由同一只读 fd 串流复制到临时磁盘，复制前后校验 inode/设备/大小/mtime/ctime 和 WAL/SHM/journal，临时目录最后必须清空。文件上限 256 MiB；超限、未迁移、活跃 WAL 或复制期间源库改变都只返回 `report_unavailable`，不初始化/迁移源库，不输出过时报告。
+`report:restoration` 是只读运营命令：只有 `ENOENT` 才当作空库，权限/路径/存储错误稳定失败。源库必须是非空、非符号链接的普通文件，且不超过 256 MiB。它由同一只读 fd 按首次 `fstat` 的固定长度串流复制到临时磁盘，并核对复制字节数、快照大小、源库指纹；最终采用 `fstat A → WAL/SHM/journal 检查 → fstat B`，防止 WAL 在检查窗口关闭并 checkpoint 后输出旧报告。临时目录最后必须清空；超限、未迁移、活跃 WAL 或复制期间源库改变都只返回 `report_unavailable`，不初始化/迁移源库。
 
 生产保护的直接验证：
 

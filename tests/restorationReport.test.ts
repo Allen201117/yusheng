@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  appendFileSync,
   chmodSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   truncateSync,
   writeFileSync,
 } from "node:fs";
@@ -187,6 +189,60 @@ it("refuses to place a temporary snapshot inside the source data directory", asy
   }
 });
 
+it("rejects symlink database paths even when the target is a regular SQLite file", async () => {
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-symlink-data-"));
+  const targetDir = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-symlink-target-"));
+  try {
+    createReportDatabase(targetDir);
+    symlinkSync(path.join(targetDir, "yusheng.sqlite"), path.join(dataDir, "yusheng.sqlite"));
+    const command = await runRestorationReportCommand(() =>
+      listRestorationMetricRowsForReport({
+        DATA_DIR: dataDir,
+        NODE_ENV: "test",
+        STORAGE_BACKEND: "local",
+      }),
+    );
+
+    assert.equal(command.exitCode, 1);
+    assert.equal(command.stdout, `${JSON.stringify({ error: "report_unavailable" })}\n`);
+    assert.deepEqual(readdirSync(dataDir), ["yusheng.sqlite"]);
+    assert.deepEqual(readdirSync(targetDir), ["yusheng.sqlite"]);
+  } finally {
+    rmSync(targetDir, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+it("rejects zero-length and non-regular opened sources before starting a copy", async () => {
+  for (const target of ["empty", "device"] as const) {
+    const dataDir = mkdtempSync(path.join(os.tmpdir(), `yusheng-restoration-${target}-`));
+    const databasePath = path.join(dataDir, "yusheng.sqlite");
+    let copyStarted = false;
+    try {
+      if (target === "empty") writeFileSync(databasePath, "");
+      else symlinkSync("/dev/null", databasePath);
+
+      const command = await runRestorationReportCommand(() =>
+        listRestorationMetricRowsForReport(
+          {
+            DATA_DIR: dataDir,
+            NODE_ENV: "test",
+            STORAGE_BACKEND: "local",
+          },
+          { afterCopy: () => { copyStarted = true; } },
+        ),
+      );
+
+      assert.equal(command.exitCode, 1, target);
+      assert.equal(command.stdout, `${JSON.stringify({ error: "report_unavailable" })}\n`);
+      assert.equal(copyStarted, false, `${target} must be rejected before copying`);
+      assert.deepEqual(readdirSync(dataDir), ["yusheng.sqlite"]);
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  }
+});
+
 it("fails stably on an unmigrated SQLite database without upgrading or changing it", () => {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-legacy-"));
   try {
@@ -312,6 +368,45 @@ it("rejects an oversized sparse SQLite file before copying or allocating its con
   }
 });
 
+it("bounds a snapshot to the original size when the source grows during copying", async () => {
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-grow-"));
+  const tempRoot = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-grow-temp-"));
+  const databasePath = path.join(dataDir, "yusheng.sqlite");
+  let snapshotSize = -1;
+  try {
+    createReportDatabase(dataDir);
+    const originalSize = statSync(databasePath).size;
+    const command = await runRestorationReportCommand(() =>
+      listRestorationMetricRowsForReport(
+        {
+          DATA_DIR: dataDir,
+          NODE_ENV: "test",
+          STORAGE_BACKEND: "local",
+        },
+        {
+          tempRoot,
+          onFirstCopyChunk({ snapshotPath }) {
+            appendFileSync(databasePath, Buffer.alloc(1024 * 1024));
+            snapshotSize = statSync(snapshotPath).size;
+          },
+          afterCopy({ snapshotPath }) {
+            snapshotSize = statSync(snapshotPath).size;
+          },
+        },
+      ),
+    );
+
+    assert.equal(command.exitCode, 1);
+    assert.equal(command.stdout, `${JSON.stringify({ error: "report_unavailable" })}\n`);
+    assert.equal(snapshotSize, originalSize);
+    assert.ok(snapshotSize <= MAX_LOCAL_REPORT_DB_BYTES);
+    assert.deepEqual(readdirSync(tempRoot), [], "grown-source snapshots must be cleaned up");
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 it("discards a copied snapshot when the source changes during the copy window", async () => {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-race-"));
   const tempRoot = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-race-temp-"));
@@ -341,6 +436,48 @@ it("discards a copied snapshot when the source changes during the copy window", 
     assert.equal(command.stdout, `${JSON.stringify({ error: "report_unavailable" })}\n`);
     assert.doesNotMatch(command.stdout, /session-existing|evaluator-existing/);
     assert.deepEqual(readdirSync(tempRoot), [], "rejected snapshots must be cleaned up");
+  } finally {
+    concurrent.database?.close();
+    rmSync(tempRoot, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+it("rechecks the source after a WAL closes between the first post-copy fstat and sidecar check", async () => {
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-wal-close-race-"));
+  const tempRoot = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-wal-close-temp-"));
+  const concurrent: { database: Database.Database | null } = { database: null };
+  let closedAfterFirstPostCopyFingerprint = false;
+  try {
+    createReportDatabase(dataDir);
+    const command = await runRestorationReportCommand(() =>
+      listRestorationMetricRowsForReport(
+        {
+          DATA_DIR: dataDir,
+          NODE_ENV: "test",
+          STORAGE_BACKEND: "local",
+        },
+        {
+          tempRoot,
+          afterCopy() {
+            concurrent.database = new Database(path.join(dataDir, "yusheng.sqlite"));
+            concurrent.database.pragma("journal_mode = WAL");
+            concurrent.database.exec("CREATE TABLE wal_close_change (id TEXT PRIMARY KEY)");
+            concurrent.database.prepare("INSERT INTO wal_close_change (id) VALUES (?)").run("changed");
+          },
+          afterFirstPostCopyFingerprint() {
+            concurrent.database?.close();
+            concurrent.database = null;
+            closedAfterFirstPostCopyFingerprint = true;
+          },
+        },
+      ),
+    );
+
+    assert.equal(closedAfterFirstPostCopyFingerprint, true);
+    assert.equal(command.exitCode, 1);
+    assert.equal(command.stdout, `${JSON.stringify({ error: "report_unavailable" })}\n`);
+    assert.deepEqual(readdirSync(tempRoot), [], "WAL-close race snapshots must be cleaned up");
   } finally {
     concurrent.database?.close();
     rmSync(tempRoot, { recursive: true, force: true });

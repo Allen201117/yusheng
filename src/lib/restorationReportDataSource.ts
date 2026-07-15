@@ -1,9 +1,10 @@
 import Database from "better-sqlite3";
-import { createWriteStream } from "node:fs";
+import { constants, createWriteStream } from "node:fs";
 import type { BigIntStats } from "node:fs";
 import { lstat, mkdtemp, open, realpath, rm, type FileHandle } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { resolveStorageConfig, type StorageEnvironment } from "./storage/config";
 import { getSql } from "./storage/postgres";
@@ -17,6 +18,11 @@ import type { RestorationMetricRow } from "./storage/types";
 
 export const MAX_LOCAL_REPORT_DB_BYTES = 256 * 1024 * 1024;
 
+type SnapshotContext = {
+  snapshotPath: string;
+  sourceSize: number;
+};
+
 type SourceFingerprint = {
   dev: bigint;
   ino: bigint;
@@ -27,7 +33,9 @@ type SourceFingerprint = {
 
 export type RestorationReportSnapshotOptions = {
   tempRoot?: string;
-  afterCopy?: () => void | Promise<void>;
+  onFirstCopyChunk?: (context: SnapshotContext) => void | Promise<void>;
+  afterCopy?: (context: SnapshotContext) => void | Promise<void>;
+  afterFirstPostCopyFingerprint?: (context: SnapshotContext) => void | Promise<void>;
 };
 
 function stableFingerprint(stat: BigIntStats): SourceFingerprint {
@@ -94,7 +102,10 @@ async function resolveSafeTempRoot(databasePath: string, configuredTempRoot?: st
 
 async function openLocalDatabaseIfPresent(databasePath: string): Promise<FileHandle | null> {
   try {
-    return await open(databasePath, "r");
+    return await open(
+      databasePath,
+      constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
+    );
   } catch (error) {
     if (isMissingFileError(error)) return null;
     throw error;
@@ -111,7 +122,14 @@ async function listLocalRestorationMetricRows(
 
   let tempDirectory: string | null = null;
   try {
-    const before = stableFingerprint(await source.stat({ bigint: true }));
+    const beforeStat = await source.stat({ bigint: true });
+    if (!beforeStat.isFile()) {
+      throw new Error("restoration_report_database_not_regular");
+    }
+    const before = stableFingerprint(beforeStat);
+    if (before.size <= 0n) {
+      throw new Error("restoration_report_database_empty");
+    }
     if (before.size > BigInt(MAX_LOCAL_REPORT_DB_BYTES)) {
       throw new Error("restoration_report_database_too_large");
     }
@@ -120,16 +138,52 @@ async function listLocalRestorationMetricRows(
     const tempRoot = await resolveSafeTempRoot(databasePath, options.tempRoot);
     tempDirectory = await mkdtemp(path.join(tempRoot, "yusheng-report-"));
     const snapshotPath = path.join(tempDirectory, "yusheng.sqlite");
+    const sourceSize = Number(before.size);
+    const snapshotContext = { snapshotPath, sourceSize };
+    let bytesCopied = 0;
+    let firstChunk = true;
+    const copyMeter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        const forwardChunk = () => {
+          bytesCopied += chunk.length;
+          if (bytesCopied > sourceSize) {
+            callback(new Error("restoration_report_snapshot_exceeded_source"));
+            return;
+          }
+          callback(null, chunk);
+        };
+        if (!firstChunk) {
+          forwardChunk();
+          return;
+        }
+        firstChunk = false;
+        Promise.resolve(options.onFirstCopyChunk?.(snapshotContext)).then(
+          forwardChunk,
+          (error: unknown) => callback(error instanceof Error ? error : new Error("copy_hook_failed")),
+        );
+      },
+    });
     await pipeline(
-      source.createReadStream({ autoClose: false, start: 0 }),
+      source.createReadStream({ autoClose: false, start: 0, end: sourceSize - 1 }),
+      copyMeter,
       createWriteStream(snapshotPath, { flags: "wx", mode: 0o600 }),
     );
+    if (bytesCopied !== sourceSize) {
+      throw new Error("restoration_report_snapshot_incomplete");
+    }
+    const snapshotStat = await lstat(snapshotPath, { bigint: true });
+    if (!snapshotStat.isFile() || snapshotStat.size !== before.size) {
+      throw new Error("restoration_report_snapshot_size_mismatch");
+    }
 
-    await options.afterCopy?.();
+    await options.afterCopy?.(snapshotContext);
 
-    const after = stableFingerprint(await source.stat({ bigint: true }));
-    assertSameFingerprint(before, after);
+    const afterCopyA = stableFingerprint(await source.stat({ bigint: true }));
+    assertSameFingerprint(before, afterCopyA);
+    await options.afterFirstPostCopyFingerprint?.(snapshotContext);
     await assertNoActiveSidecars(databasePath);
+    const afterCopyB = stableFingerprint(await source.stat({ bigint: true }));
+    assertSameFingerprint(before, afterCopyB);
 
     const database = new Database(snapshotPath, {
       readonly: true,
