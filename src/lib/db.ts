@@ -49,6 +49,11 @@ import type {
   GroundingEvidenceKind,
   MessageEvidence,
 } from "./storage/types";
+import {
+  mapRestorationMetricRow,
+  RESTORATION_METRIC_SELECT_SQL,
+  type RestorationMetricDbRow,
+} from "./storage/restorationMetricRows";
 
 const DATA_DIR = process.env.DATA_DIR || "./data";
 
@@ -2270,48 +2275,9 @@ export function submitConversationFeedback(input: {
 }
 
 export function listRestorationMetricRows(): RestorationMetricRow[] {
-  return (getDb().prepare(
-    `SELECT feedback.session_id,
-            feedback.evaluator_user_id,
-            sessions.cohort,
-            feedback.voice_similarity,
-            feedback.expression_similarity,
-            feedback.emotion_fit,
-            feedback.fact_trust,
-            feedback.discomfort,
-            feedback.major_fabrication,
-            feedback.identity_impersonation,
-            feedback.authorization_violation
-     FROM conversation_feedback feedback
-     JOIN conversation_sessions sessions
-       ON sessions.id = feedback.session_id
-      AND sessions.evaluator_user_id = feedback.evaluator_user_id
-     ORDER BY feedback.session_id`,
-  ).all() as Array<{
-    session_id: string;
-    evaluator_user_id: string;
-    cohort: RestorationMetricRow["cohort"];
-    voice_similarity: number;
-    expression_similarity: number;
-    emotion_fit: number;
-    fact_trust: number;
-    discomfort: number;
-    major_fabrication: number;
-    identity_impersonation: number;
-    authorization_violation: number;
-  }>).map((row) => ({
-    sessionId: row.session_id,
-    evaluatorUserId: row.evaluator_user_id,
-    cohort: row.cohort,
-    voiceSimilarity: Number(row.voice_similarity),
-    expressionSimilarity: Number(row.expression_similarity),
-    emotionFit: Number(row.emotion_fit),
-    factTrust: Number(row.fact_trust),
-    discomfort: Number(row.discomfort),
-    majorFabrication: Boolean(row.major_fabrication),
-    identityImpersonation: Boolean(row.identity_impersonation),
-    authorizationViolation: Boolean(row.authorization_violation),
-  }));
+  return getDb().prepare<[], RestorationMetricDbRow>(RESTORATION_METRIC_SELECT_SQL)
+    .all()
+    .map(mapRestorationMetricRow);
 }
 
 export function failConversationTurn(input: {

@@ -114,6 +114,8 @@ npm run --silent report:restoration
 git diff --check
 ```
 
+`report:restoration` 是只读运营命令：本地数据库不存在时输出空报告且不创建文件；已存在的 SQLite 通过不可写快照读取，不初始化/迁移数据库，不新增 WAL/SHM。未迁移库或仍有 WAL/SHM 的活跃库只返回 `report_unavailable`，不会被该命令修改。
+
 生产保护的直接验证：
 
 ```bash

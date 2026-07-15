@@ -51,6 +51,11 @@ import type {
   VoiceAuthorization,
   VoiceMeta,
 } from "./types";
+import {
+  mapRestorationMetricRow,
+  RESTORATION_METRIC_SELECT_SQL,
+  type RestorationMetricDbRow,
+} from "./restorationMetricRows";
 
 type PersonaRow = {
   id: string;
@@ -247,20 +252,6 @@ type ConversationFeedbackRow = {
   authorization_violation: boolean;
   comment: string | null;
   created_at: Date | string;
-};
-
-type RestorationMetricDbRow = {
-  session_id: string;
-  evaluator_user_id: string;
-  cohort: RestorationMetricRow["cohort"];
-  voice_similarity: number | string;
-  expression_similarity: number | string;
-  emotion_fit: number | string;
-  fact_trust: number | string;
-  discomfort: number | string;
-  major_fabrication: boolean;
-  identity_impersonation: boolean;
-  authorization_violation: boolean;
 };
 
 type ConversationTurnEvidenceRow = {
@@ -2416,36 +2407,9 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
 
     async listRestorationMetricRows(): Promise<RestorationMetricRow[]> {
       const rows = await sql.query<RestorationMetricDbRow>(
-        `SELECT feedback.session_id,
-                feedback.evaluator_user_id,
-                sessions.cohort,
-                feedback.voice_similarity,
-                feedback.expression_similarity,
-                feedback.emotion_fit,
-                feedback.fact_trust,
-                feedback.discomfort,
-                feedback.major_fabrication,
-                feedback.identity_impersonation,
-                feedback.authorization_violation
-         FROM conversation_feedback feedback
-         JOIN conversation_sessions sessions
-           ON sessions.id = feedback.session_id
-          AND sessions.evaluator_user_id = feedback.evaluator_user_id
-         ORDER BY feedback.session_id`,
+        RESTORATION_METRIC_SELECT_SQL,
       );
-      return rows.map((row) => ({
-        sessionId: row.session_id,
-        evaluatorUserId: row.evaluator_user_id,
-        cohort: row.cohort,
-        voiceSimilarity: Number(row.voice_similarity),
-        expressionSimilarity: Number(row.expression_similarity),
-        emotionFit: Number(row.emotion_fit),
-        factTrust: Number(row.fact_trust),
-        discomfort: Number(row.discomfort),
-        majorFabrication: Boolean(row.major_fabrication),
-        identityImpersonation: Boolean(row.identity_impersonation),
-        authorizationViolation: Boolean(row.authorization_violation),
-      }));
+      return rows.map(mapRestorationMetricRow);
     },
 
     async failConversationTurn(input): Promise<boolean> {

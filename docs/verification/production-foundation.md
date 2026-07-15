@@ -5,11 +5,11 @@ Updated: 2026-07-15 (Asia/Shanghai)
 ## Local evidence
 
 - Grounded focused regression bundle: 155 passed, 0 failed.
-- `npm test`: 408 passed, 0 failed after adding restoration session/feedback qualification, browser playback telemetry and aggregate-report privacy coverage.
+- `npm test`: 411 passed, 0 failed after adding restoration session/feedback qualification, browser playback telemetry, aggregate-report privacy coverage, and file-level proof that local reporting does not create or mutate SQLite/WAL/SHM files.
 - `npm run typecheck`: passed.
 - `npm run build`: passed on Next.js 15.5.20 and includes `/api/chat`, `/api/tts`, `/api/playback-event` and `/api/conversation-feedback`.
 - `npm run db:migrate:dry`: passed and lists migrations `001` through `007`, including restoration feedback and playback-event cardinality.
-- Empty `npm run --silent report:restoration`: returns one machine-readable JSON value with zero evaluators/sessions/effective sessions, `null` rates and `bothCohortsMeetInitialGate:false`.
+- Empty `npm run --silent report:restoration`: returns one machine-readable JSON value with zero evaluators/sessions/effective sessions, `null` rates and `bothCohortsMeetInitialGate:false`, without creating a SQLite file. An existing cleanly closed SQLite database is read through a readonly memory snapshot with unchanged file fingerprints and no new WAL/SHM sidecars; an unmigrated or active-WAL database fails stably without being upgraded or changed. Postgres runs the metric SELECT only.
 - `git diff --check`: passed.
 - Production local-storage guard: `NODE_ENV=production STORAGE_BACKEND=local` fails with `Production requires STORAGE_BACKEND=cloud`.
 - Provider preset local evidence: ready presets avoid Blob reads; stale preset URI errors mark the preset failed and retry dynamic cloning once; general provider outages do not double-call; deleting voices cannot start new synthesis.
