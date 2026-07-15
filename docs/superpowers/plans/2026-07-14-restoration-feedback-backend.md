@@ -541,7 +541,7 @@ Add:
 "report:restoration": "node --import tsx scripts/report-restoration-feedback.ts"
 ```
 
-The script uses a dedicated read-only report data source, reads metric rows, calls `summarizeRestorationFeedback`, and prints JSON only. It must not call the SQLite `getDb()` initializer, create a missing database, initialize or migrate schema, change pragmas, or write Postgres. A missing local database means empty rows; an existing unmigrated or active-WAL database fails stably without changes. On configuration/storage failure, print stable `report_unavailable`, exit non-zero, and never dump connection strings or raw errors.
+The script uses a dedicated read-only report data source, reads metric rows, calls `summarizeRestorationFeedback`, and prints JSON only. It must not call the SQLite `getDb()` initializer, create a missing database, initialize or migrate schema, change source pragmas, or write Postgres. Only `ENOENT` means empty rows. Existing SQLite is streamed from one read-only descriptor into a temporary disk snapshot after a 256 MiB size check, with pre/post source fingerprints and WAL/SHM/journal checks; permission errors, oversize files, unmigrated schema, active sidecars, or concurrent source changes fail stably and the temporary directory is removed. On configuration/storage failure, print stable `report_unavailable`, exit non-zero, and never dump connection strings or raw errors.
 
 - [ ] **Step 4: Update operational truth**
 

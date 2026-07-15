@@ -1,15 +1,9 @@
-import { summarizeRestorationFeedback } from "../src/lib/restorationMetrics";
-import { listRestorationMetricRowsForReport } from "../src/lib/restorationReportDataSource";
+import { runRestorationReportCommand } from "../src/lib/restorationReportCommand";
 
 async function main(): Promise<void> {
-  try {
-    const rows = await listRestorationMetricRowsForReport();
-    const report = summarizeRestorationFeedback(rows);
-    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-  } catch {
-    process.stdout.write(`${JSON.stringify({ error: "report_unavailable" })}\n`);
-    process.exitCode = 1;
-  }
+  const result = await runRestorationReportCommand();
+  process.stdout.write(result.stdout);
+  process.exitCode = result.exitCode;
 }
 
 void main();

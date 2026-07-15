@@ -62,7 +62,11 @@ npm run --silent report:restoration
 
 该命令是全局运营聚合命令，不经用户 API，也没有新增公开路由。它只读取会话 ID、评价人 ID、健在/逝者分组、5 项分数和 3 条红线。查询和输出均不包含邮箱、人物名、评语、句子或转写、声音/供应商 ID、音频路径。SQLite 和 Postgres 共用同一份字段白名单、SELECT 和映射口径，避免两个适配器慢慢算成两套指标。
 
-本地 SQLite 报告不调用业务 `getDb()`，不创建目录/数据库，不初始化 schema，不跑 migration，不修改 pragma。数据库文件不存在时按空数据返回 zero/null/false，且不生成 `yusheng.sqlite`。文件存在时读入不可写的内存快照，源文件的内容、大小和修改时间必须保持不变，也不得新建 `-wal` / `-shm`。未迁移到评分表的旧库返回稳定 `report_unavailable`，用于暴露“数据库尚未升级”，不会借报告命令暗中升级。当本地库仍有 WAL/SHM 边车文件时，命令也稳定失败并保持这些文件不变，避免读到未完成 checkpoint 的过时主文件。
+本地 SQLite 报告不调用业务 `getDb()`，不创建目录/数据库，不初始化 schema，不跑 migration，不修改源库 pragma。只有打开源文件时明确返回 `ENOENT` 才按空数据输出 zero/null/false，且不生成 `yusheng.sqlite`；权限拒绝、路径不是目录或其他文件系统错误都返回稳定 `report_unavailable`，不会被伪装成“没数据”。
+
+已存在的数据库通过同一个只读文件句柄获取复制前/后指纹（设备、inode、大小、纳秒级 mtime/ctime），并串流复制到系统临时目录，不把整库读入 JavaScript 内存。复制前或复制后发现 `-wal` / `-shm` / `-journal`，或两次指纹不同，就丢弃快照并返回 `report_unavailable`，不输出可能过时的报告。SQLite 只会打开临时副本，该目录包括临时边车文件都在 `finally` 删除；源目录不新增文件，源文件指纹不变。未迁移到评分表的旧库同样稳定失败，不会被报告命令暗中升级。
+
+本地报告的 SQLite 文件上限是 **256 MiB**。该上限在复制前由 `fstat` 检查，目的是把临时磁盘占用明确限制在约一份 256 MiB 数据库加少量 SQLite 临时文件，并避免大库进入本地运营命令。超限时只返回 `report_unavailable`；需要统计更大数据时应使用 Postgres 聚合路径或单独的受控导出，不应调高内存占用来硬跑。
 
 Postgres 路径只执行指标 SELECT，不运行 migration，不写任何表。
 

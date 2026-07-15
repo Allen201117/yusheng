@@ -2,16 +2,24 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
+  truncateSync,
+  writeFileSync,
 } from "node:fs";
 import { it } from "node:test";
 import Database from "better-sqlite3";
 import os from "node:os";
 import path from "node:path";
+import { runRestorationReportCommand } from "../src/lib/restorationReportCommand";
+import {
+  listRestorationMetricRowsForReport,
+  MAX_LOCAL_REPORT_DB_BYTES,
+} from "../src/lib/restorationReportDataSource";
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
 
@@ -105,8 +113,9 @@ it("prints an empty aggregate report as JSON only without claiming a pass", () =
   }
 });
 
-it("reads an existing migrated SQLite database without changing it or creating sidecars", () => {
+it("reads an existing migrated SQLite database without changing it or creating sidecars", async () => {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-existing-"));
+  const tempRoot = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-temp-root-"));
   try {
     createReportDatabase(dataDir);
     const before = directoryFingerprint(dataDir);
@@ -136,6 +145,42 @@ it("reads an existing migrated SQLite database without changing it or creating s
       },
       bothCohortsMeetInitialGate: false,
     });
+    assert.deepEqual(directoryFingerprint(dataDir), before);
+    const rows = await listRestorationMetricRowsForReport(
+      {
+        DATA_DIR: dataDir,
+        NODE_ENV: "test",
+        STORAGE_BACKEND: "local",
+      },
+      { tempRoot },
+    );
+    assert.equal(rows.length, 1);
+    assert.deepEqual(readdirSync(tempRoot), [], "temporary report snapshots must be removed");
+    assert.deepEqual(directoryFingerprint(dataDir), before);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+it("refuses to place a temporary snapshot inside the source data directory", async () => {
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-temp-source-"));
+  try {
+    createReportDatabase(dataDir);
+    const before = directoryFingerprint(dataDir);
+    const command = await runRestorationReportCommand(() =>
+      listRestorationMetricRowsForReport(
+        {
+          DATA_DIR: dataDir,
+          NODE_ENV: "test",
+          STORAGE_BACKEND: "local",
+        },
+        { tempRoot: dataDir },
+      ),
+    );
+
+    assert.equal(command.exitCode, 1);
+    assert.equal(command.stdout, `${JSON.stringify({ error: "report_unavailable" })}\n`);
     assert.deepEqual(directoryFingerprint(dataDir), before);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
@@ -188,6 +233,117 @@ it("fails stably without touching an active WAL database or its sidecars", () =>
     assert.deepEqual(directoryFingerprint(dataDir), before);
   } finally {
     active.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+it("does not treat a permission-denied SQLite file as an empty database", () => {
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-permission-"));
+  const databasePath = path.join(dataDir, "yusheng.sqlite");
+  try {
+    createReportDatabase(dataDir);
+    chmodSync(databasePath, 0o000);
+    const before = statSync(databasePath, { bigint: true });
+
+    const result = runReport({
+      DATA_DIR: dataDir,
+      NODE_ENV: "test",
+      STORAGE_BACKEND: "local",
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.equal(result.stderr, "");
+    assert.equal(result.stdout, `${JSON.stringify({ error: "report_unavailable" })}\n`);
+    const after = statSync(databasePath, { bigint: true });
+    assert.equal(after.dev, before.dev);
+    assert.equal(after.ino, before.ino);
+    assert.equal(after.size, before.size);
+    assert.equal(after.mtimeNs, before.mtimeNs);
+    assert.deepEqual(readdirSync(dataDir), ["yusheng.sqlite"]);
+  } finally {
+    chmodSync(databasePath, 0o600);
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+it("does not treat an invalid data-directory path as an empty database", () => {
+  const container = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-enotdir-"));
+  const dataDir = path.join(container, "not-a-directory");
+  try {
+    writeFileSync(dataDir, "not a directory");
+    const result = runReport({
+      DATA_DIR: dataDir,
+      NODE_ENV: "test",
+      STORAGE_BACKEND: "local",
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.equal(result.stderr, "");
+    assert.equal(result.stdout, `${JSON.stringify({ error: "report_unavailable" })}\n`);
+    assert.equal(readFileSync(dataDir, "utf8"), "not a directory");
+  } finally {
+    rmSync(container, { recursive: true, force: true });
+  }
+});
+
+it("rejects an oversized sparse SQLite file before copying or allocating its contents", () => {
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-oversize-"));
+  const databasePath = path.join(dataDir, "yusheng.sqlite");
+  try {
+    writeFileSync(databasePath, "");
+    truncateSync(databasePath, MAX_LOCAL_REPORT_DB_BYTES + 1);
+    const before = statSync(databasePath, { bigint: true });
+
+    const result = runReport({
+      DATA_DIR: dataDir,
+      NODE_ENV: "test",
+      STORAGE_BACKEND: "local",
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.equal(result.stderr, "");
+    assert.equal(result.stdout, `${JSON.stringify({ error: "report_unavailable" })}\n`);
+    const after = statSync(databasePath, { bigint: true });
+    assert.equal(after.size, before.size);
+    assert.equal(after.mtimeNs, before.mtimeNs);
+    assert.deepEqual(readdirSync(dataDir), ["yusheng.sqlite"]);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+it("discards a copied snapshot when the source changes during the copy window", async () => {
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-race-"));
+  const tempRoot = mkdtempSync(path.join(os.tmpdir(), "yusheng-restoration-race-temp-"));
+  const concurrent: { database: Database.Database | null } = { database: null };
+  try {
+    createReportDatabase(dataDir);
+    const command = await runRestorationReportCommand(() =>
+      listRestorationMetricRowsForReport(
+        {
+          DATA_DIR: dataDir,
+          NODE_ENV: "test",
+          STORAGE_BACKEND: "local",
+        },
+        {
+          tempRoot,
+          async afterCopy() {
+            concurrent.database = new Database(path.join(dataDir, "yusheng.sqlite"));
+            concurrent.database.pragma("journal_mode = WAL");
+            concurrent.database.exec("CREATE TABLE concurrent_change (id TEXT PRIMARY KEY)");
+            concurrent.database.prepare("INSERT INTO concurrent_change (id) VALUES (?)").run("changed");
+          },
+        },
+      ),
+    );
+
+    assert.equal(command.exitCode, 1);
+    assert.equal(command.stdout, `${JSON.stringify({ error: "report_unavailable" })}\n`);
+    assert.doesNotMatch(command.stdout, /session-existing|evaluator-existing/);
+    assert.deepEqual(readdirSync(tempRoot), [], "rejected snapshots must be cleaned up");
+  } finally {
+    concurrent.database?.close();
+    rmSync(tempRoot, { recursive: true, force: true });
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
