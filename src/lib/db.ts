@@ -22,6 +22,7 @@ import type {
   ConversationEmbeddingUpdate,
   ConversationSession,
   ConversationSentence,
+  PlaybackEvent,
   TtsAttempt,
   ConversationTurn,
   ConversationTurnEvidence,
@@ -1941,6 +1942,66 @@ export function failTtsAttempt(input: {
     input.evaluatorUserId,
   );
   return changed.changes === 1;
+}
+
+function rowToPlaybackEvent(row: any): PlaybackEvent {
+  return {
+    eventId: row.event_id,
+    ttsAttemptId: row.tts_attempt_id,
+    eventType: row.event_type,
+    clientElapsedMs: Number(row.client_elapsed_ms),
+    receivedAt: sqliteIso(row.received_at),
+  };
+}
+
+export function recordPlaybackEvent(input: {
+  eventId: string;
+  ttsAttemptId: string;
+  evaluatorUserId: string;
+  eventType: PlaybackEvent["eventType"];
+  clientElapsedMs: number;
+}): { event: PlaybackEvent; created: boolean } {
+  const database = getDb();
+  return database.transaction(() => {
+    const attempt = database.prepare(
+      `SELECT attempt.id
+       FROM tts_attempts attempt
+       JOIN conversation_sessions sessions
+         ON sessions.id = attempt.session_id AND sessions.persona_id = attempt.persona_id
+       JOIN personas persona
+         ON persona.id = sessions.persona_id AND persona.user_id = sessions.evaluator_user_id
+       WHERE attempt.id = ? AND attempt.status = 'completed'
+         AND sessions.evaluator_user_id = ?`,
+    ).get(input.ttsAttemptId, input.evaluatorUserId);
+    if (!attempt) throw new Error("playback_attempt_forbidden");
+
+    const inserted = database.prepare(
+      `INSERT INTO playback_events
+         (event_id, tts_attempt_id, event_type, client_elapsed_ms)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(event_id) DO NOTHING
+       RETURNING *`,
+    ).get(
+      input.eventId,
+      input.ttsAttemptId,
+      input.eventType,
+      input.clientElapsedMs,
+    );
+    if (inserted) return { event: rowToPlaybackEvent(inserted), created: true };
+
+    const existing = database.prepare(
+      "SELECT * FROM playback_events WHERE event_id = ?",
+    ).get(input.eventId) as any;
+    if (
+      existing
+      && existing.tts_attempt_id === input.ttsAttemptId
+      && existing.event_type === input.eventType
+      && Number(existing.client_elapsed_ms) === input.clientElapsedMs
+    ) {
+      return { event: rowToPlaybackEvent(existing), created: false };
+    }
+    throw new Error("playback_event_conflict");
+  }).immediate();
 }
 
 export function failConversationTurn(input: {

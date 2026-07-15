@@ -652,6 +652,13 @@ export interface AppRepository {
     stableErrorCode: string;
     totalMs: number;
   }): Promise<boolean>;
+  recordPlaybackEvent(input: {
+    eventId: string;
+    ttsAttemptId: string;
+    evaluatorUserId: string;
+    eventType: PlaybackEventType;
+    clientElapsedMs: number;
+  }): Promise<{ event: PlaybackEvent; created: boolean }>;
   failConversationTurn(input: {
     turnId: string;
     personaId: string;

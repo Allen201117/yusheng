@@ -6,6 +6,11 @@ import { use } from "react";
 import AppShell from "@/components/AppShell";
 import { OrderedPlaybackQueue } from "@/lib/orderedPlaybackQueue";
 import {
+  createTrackedPlaybackTelemetry,
+  playAudioWithTelemetry,
+  type PlaybackTelemetry,
+} from "@/lib/playbackTelemetryClient";
+import {
   buildTrackedTtsRequest,
   trackedSpeechFromSseEvent,
 } from "@/lib/chatSpeechClient";
@@ -13,7 +18,13 @@ import type { SpeechPlan, TrackedSpeechPlan } from "@/lib/speechPlanning";
 
 type Msg = { id: string; role: "user" | "assistant"; content: string; createdAt: string };
 type RetrievedMemory = { content: string; score: number };
-type PreparedSpeech = { blob: Blob; plan: SpeechPlan; requestedAt: number; serverMs: string | null };
+type PreparedSpeech = {
+  blob: Blob;
+  plan: SpeechPlan;
+  requestedAt: number;
+  serverMs: string | null;
+  playbackTelemetry: PlaybackTelemetry | null;
+};
 
 export default function ChatPage({ params }: { params: Promise<{ id: string }> }) {
   const { id: personaId } = use(params);
@@ -61,12 +72,10 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       if (!audio) throw new Error("播放器不可用");
       if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
       blobUrlRef.current = URL.createObjectURL(prepared.blob);
-      audio.src = blobUrlRef.current;
-      await new Promise<void>((resolve, reject) => {
-        playbackDoneRef.current = resolve;
-        audio.onended = () => resolve();
-        audio.onerror = () => reject(new Error("音频播放失败"));
-        audio.play().then(() => {
+      await playAudioWithTelemetry(
+        audio,
+        prepared.playbackTelemetry,
+        () => {
           if (!firstAudioReportedRef.current && turnStartedAtRef.current > 0) {
             firstAudioReportedRef.current = true;
             console.info(JSON.stringify({
@@ -76,8 +85,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               serverMs: prepared.serverMs,
             }));
           }
-        }).catch(reject);
-      });
+        },
+        (cancelPlayback) => {
+          playbackDoneRef.current = cancelPlayback;
+          audio.src = blobUrlRef.current;
+        },
+      );
       if (prepared.plan.pauseAfterMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, prepared.plan.pauseAfterMs));
       }
@@ -135,7 +148,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         signal: controller.signal,
       });
       if (!r.ok) throw new Error(((await r.json().catch(() => ({})))).error || `TTS 失败`);
-      return { blob: await r.blob(), plan, requestedAt, serverMs: r.headers.get("X-TTS-Ms") };
+      const playbackTelemetry = createTrackedPlaybackTelemetry(r, "sentenceId" in plan);
+      return {
+        blob: await r.blob(),
+        plan,
+        requestedAt,
+        serverMs: r.headers.get("X-TTS-Ms"),
+        playbackTelemetry,
+      };
     } finally {
       ttsControllersRef.current.delete(controller);
     }

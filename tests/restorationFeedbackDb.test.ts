@@ -663,6 +663,61 @@ it("deduplicates playback event ids and bounds event values", () => {
   assert.throws(() => insert.run("event-3", "play_completed", 300001, NOW), /CHECK constraint failed/);
 });
 
+it("records completed owner-scoped playback events idempotently", async () => {
+  insertSession();
+  insertTurn();
+  insertSentence();
+  insertAttempt();
+  const input = {
+    eventId: "event-owned",
+    ttsAttemptId: "attempt-1",
+    evaluatorUserId: "user-1",
+    eventType: "play_started" as const,
+    clientElapsedMs: 24,
+  };
+  const first = await repository.recordPlaybackEvent(input);
+  const retry = await repository.recordPlaybackEvent(input);
+  assert.equal(first.created, true);
+  assert.equal(retry.created, false);
+  assert.deepEqual(retry.event, first.event);
+  assert.equal(
+    (database.prepare("SELECT COUNT(*) AS count FROM playback_events").get() as { count: number }).count,
+    1,
+  );
+
+  await assert.rejects(repository.recordPlaybackEvent({
+    ...input,
+    eventType: "play_completed",
+  }), /playback_event_conflict/);
+  await assert.rejects(repository.recordPlaybackEvent({
+    ...input,
+    eventId: "event-other-owner",
+    evaluatorUserId: "user-2",
+  }), /playback_attempt_forbidden/);
+});
+
+it("rejects playback events for non-completed and unknown attempts", async () => {
+  insertSession();
+  insertTurn();
+  insertSentence();
+  insertAttempt();
+  database.prepare("UPDATE tts_attempts SET status = 'failed' WHERE id = 'attempt-1'").run();
+  await assert.rejects(repository.recordPlaybackEvent({
+    eventId: "event-failed",
+    ttsAttemptId: "attempt-1",
+    evaluatorUserId: "user-1",
+    eventType: "play_failed",
+    clientElapsedMs: 12,
+  }), /playback_attempt_forbidden/);
+  await assert.rejects(repository.recordPlaybackEvent({
+    eventId: "event-unknown",
+    ttsAttemptId: "attempt-unknown",
+    evaluatorUserId: "user-1",
+    eventType: "play_started",
+    clientElapsedMs: 12,
+  }), /playback_attempt_forbidden/);
+});
+
 it("accepts one attested bounded feedback row per session and evaluator", () => {
   insertSession();
   const insert = database.prepare(

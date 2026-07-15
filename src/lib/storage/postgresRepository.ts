@@ -13,6 +13,7 @@ import type {
   ConversationEmbeddingUpdate,
   ConversationSession,
   ConversationSentence,
+  PlaybackEvent,
   TtsAttempt,
   ConversationTurn,
   ConversationTurnEvidence,
@@ -200,6 +201,14 @@ type TtsAttemptRow = {
   stable_error_code: string | null;
   created_at: Date | string;
   completed_at: Date | string | null;
+};
+
+type PlaybackEventRow = {
+  event_id: string;
+  tts_attempt_id: string;
+  event_type: PlaybackEvent["eventType"];
+  client_elapsed_ms: number | string;
+  received_at: Date | string;
 };
 
 type ConversationSessionRow = {
@@ -740,6 +749,16 @@ function mapTtsAttempt(row: TtsAttemptRow): TtsAttempt {
     stableErrorCode: row.stable_error_code,
     createdAt: toIsoString(row.created_at),
     completedAt: row.completed_at === null ? null : toIsoString(row.completed_at),
+  };
+}
+
+function mapPlaybackEvent(row: PlaybackEventRow): PlaybackEvent {
+  return {
+    eventId: row.event_id,
+    ttsAttemptId: row.tts_attempt_id,
+    eventType: row.event_type,
+    clientElapsedMs: Number(row.client_elapsed_ms),
+    receivedAt: toIsoString(row.received_at),
   };
 }
 
@@ -2034,6 +2053,51 @@ export function createPostgresRepository(sql: SqlExecutor): AppRepository {
         [input.id, input.evaluatorUserId, input.stableErrorCode, input.totalMs],
       );
       return rows.length === 1;
+    },
+
+    async recordPlaybackEvent(input): Promise<{ event: PlaybackEvent; created: boolean }> {
+      return sql.transaction(async (transaction) => {
+        const attempts = await transaction.query<{ id: string }>(
+          `SELECT attempt.id
+           FROM tts_attempts attempt
+           JOIN conversation_sessions sessions
+             ON sessions.id = attempt.session_id AND sessions.persona_id = attempt.persona_id
+           JOIN personas persona
+             ON persona.id = sessions.persona_id AND persona.user_id = sessions.evaluator_user_id
+           WHERE attempt.id = $1 AND attempt.status = 'completed'
+             AND sessions.evaluator_user_id = $2
+           FOR UPDATE OF attempt`,
+          [input.ttsAttemptId, input.evaluatorUserId],
+        );
+        if (attempts.length !== 1) throw new Error("playback_attempt_forbidden");
+
+        const inserted = await transaction.query<PlaybackEventRow>(
+          `INSERT INTO playback_events
+             (event_id, tts_attempt_id, event_type, client_elapsed_ms)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (event_id) DO NOTHING
+           RETURNING event_id, tts_attempt_id, event_type, client_elapsed_ms, received_at`,
+          [input.eventId, input.ttsAttemptId, input.eventType, input.clientElapsedMs],
+        );
+        if (inserted.length === 1) {
+          return { event: mapPlaybackEvent(inserted[0]), created: true };
+        }
+
+        const existing = await transaction.query<PlaybackEventRow>(
+          `SELECT event_id, tts_attempt_id, event_type, client_elapsed_ms, received_at
+           FROM playback_events WHERE event_id = $1`,
+          [input.eventId],
+        );
+        if (
+          existing.length === 1
+          && existing[0].tts_attempt_id === input.ttsAttemptId
+          && existing[0].event_type === input.eventType
+          && Number(existing[0].client_elapsed_ms) === input.clientElapsedMs
+        ) {
+          return { event: mapPlaybackEvent(existing[0]), created: false };
+        }
+        throw new Error("playback_event_conflict");
+      });
     },
 
     async failConversationTurn(input): Promise<boolean> {

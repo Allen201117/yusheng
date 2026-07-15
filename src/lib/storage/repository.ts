@@ -5,6 +5,7 @@ import {
   startTtsAttempt,
   completeTtsAttempt,
   failTtsAttempt,
+  recordPlaybackEvent,
   completeConversationTurn,
   countPersonasUsingVoice,
   createPersonaKnowledgeCandidates,
@@ -177,6 +178,7 @@ export function createLocalRepository(): AppRepository {
     async startTtsAttempt(input) { return startTtsAttempt(input); },
     async completeTtsAttempt(input) { return completeTtsAttempt(input); },
     async failTtsAttempt(input) { return failTtsAttempt(input); },
+    async recordPlaybackEvent(input) { return recordPlaybackEvent(input); },
     async failConversationTurn(input) { return failConversationTurn(input); },
     async listMessageEvidence(assistantMessageId, personaId) {
       return listMessageEvidence(assistantMessageId, personaId);

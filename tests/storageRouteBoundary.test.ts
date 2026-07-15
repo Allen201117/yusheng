@@ -10,6 +10,7 @@ const durableRoutes = [
   "memory/route.ts",
   "persona-knowledge/route.ts",
   "persona/route.ts",
+  "playback-event/route.ts",
   "tts/route.ts",
   "voice/upload/route.ts",
   "voice/authorization/route.ts",
@@ -41,6 +42,7 @@ it("voice routes use the object store and data routes use the repository", async
     (route) => route !== "voice/upload/route.ts"
       && route !== "persona-knowledge/route.ts"
       && route !== "chat/route.ts"
+      && route !== "playback-event/route.ts"
       && route !== "tts/route.ts",
   );
   for (const route of repositoryRoutes) {
@@ -90,6 +92,20 @@ it("voice routes use the object store and data routes use the repository", async
   assert.match(ttsImplementation, /getVoiceObjectStore/);
   assert.doesNotMatch(ttsImplementation, /@\/lib\/(db|voiceStore)/);
   assert.doesNotMatch(ttsImplementation, /\bgetDb\s*\(/);
+
+  const playbackRoute = await readFile(
+    new URL("../src/app/api/playback-event/route.ts", import.meta.url),
+    "utf8",
+  );
+  const playbackImplementation = await readFile(
+    new URL("../src/lib/playbackEventRoute.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(playbackRoute, /createPlaybackEventHandlers/);
+  assert.doesNotMatch(playbackRoute, /getRepository|requireAuth|NextResponse/);
+  assert.match(playbackImplementation, /getRepository/);
+  assert.doesNotMatch(playbackImplementation, /@\/lib\/(db|voiceStore)/);
+  assert.doesNotMatch(playbackImplementation, /\bgetDb\s*\(/);
 });
 
 it("manual memory ingestion creates server-owned confirmation audit fields", async () => {

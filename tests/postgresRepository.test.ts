@@ -1538,6 +1538,103 @@ it("fails a Postgres TTS attempt only for its evaluator and started status", asy
   ]);
 });
 
+it("records playback events with an owner lock and conflict-safe insert", async () => {
+  const now = "2026-07-15T00:00:00.000Z";
+  const eventRow = {
+    event_id: "event-1",
+    tts_attempt_id: "attempt-1",
+    event_type: "play_started",
+    client_elapsed_ms: 42,
+    received_at: now,
+  };
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM tts_attempts attempt") && text.includes("FOR UPDATE OF attempt")) {
+      return [{ id: "attempt-1" }];
+    }
+    if (text.includes("INSERT INTO playback_events")) return [eventRow];
+    throw new Error(`unexpected query: ${text}`);
+  });
+  const repo = createPostgresRepository(fake.executor);
+  const result = await repo.recordPlaybackEvent({
+    eventId: "event-1",
+    ttsAttemptId: "attempt-1",
+    evaluatorUserId: "user-1",
+    eventType: "play_started",
+    clientElapsedMs: 42,
+  });
+  assert.equal(result.created, true);
+  assert.equal(result.event.eventId, "event-1");
+  assert.equal(fake.transactions, 1);
+  assert.match(fake.calls[0].text, /attempt\.status = 'completed'/);
+  assert.match(fake.calls[0].text, /sessions\.evaluator_user_id = \$2/);
+  assert.match(fake.calls[0].text, /FOR UPDATE OF attempt/);
+  assert.match(fake.calls[1].text, /ON CONFLICT \(event_id\) DO NOTHING/);
+  assert.match(fake.calls[1].text, /RETURNING event_id/);
+  for (const call of fake.calls) assertContiguousPostgresPlaceholders(call);
+});
+
+it("returns false only for an identical Postgres playback retry", async () => {
+  const now = "2026-07-15T00:00:00.000Z";
+  const eventRow = {
+    event_id: "event-1",
+    tts_attempt_id: "attempt-1",
+    event_type: "play_started",
+    client_elapsed_ms: 42,
+    received_at: now,
+  };
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM tts_attempts attempt")) return [{ id: "attempt-1" }];
+    if (text.includes("INSERT INTO playback_events")) return [];
+    if (text.includes("FROM playback_events WHERE event_id")) return [eventRow];
+    throw new Error(`unexpected query: ${text}`);
+  });
+  const repo = createPostgresRepository(fake.executor);
+  const input = {
+    eventId: "event-1",
+    ttsAttemptId: "attempt-1",
+    evaluatorUserId: "user-1",
+    eventType: "play_started" as const,
+    clientElapsedMs: 42,
+  };
+  assert.equal((await repo.recordPlaybackEvent(input)).created, false);
+  assert.equal(fake.transactions, 1);
+});
+
+it("cannot report two created playback rows under concurrent identical requests", async () => {
+  const now = "2026-07-15T00:00:00.000Z";
+  const eventRow = {
+    event_id: "event-concurrent",
+    tts_attempt_id: "attempt-1",
+    event_type: "play_started",
+    client_elapsed_ms: 42,
+    received_at: now,
+  };
+  let inserted = false;
+  const fake = createFakeSql((text) => {
+    if (text.includes("FROM tts_attempts attempt")) return [{ id: "attempt-1" }];
+    if (text.includes("INSERT INTO playback_events")) {
+      if (inserted) return [];
+      inserted = true;
+      return [eventRow];
+    }
+    if (text.includes("FROM playback_events WHERE event_id")) return [eventRow];
+    throw new Error(`unexpected query: ${text}`);
+  });
+  const repo = createPostgresRepository(fake.executor);
+  const input = {
+    eventId: "event-concurrent",
+    ttsAttemptId: "attempt-1",
+    evaluatorUserId: "user-1",
+    eventType: "play_started" as const,
+    clientElapsedMs: 42,
+  };
+  const results = await Promise.all([
+    repo.recordPlaybackEvent(input),
+    repo.recordPlaybackEvent(input),
+  ]);
+  assert.deepEqual(results.map((result) => result.created).sort(), [false, true]);
+});
+
 it("locks the persona before persisting a null-session boundary turn", async () => {
   const now = "2026-07-14T00:00:00.000Z";
   const startedBoundary = {
