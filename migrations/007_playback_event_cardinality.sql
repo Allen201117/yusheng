@@ -1,3 +1,5 @@
+LOCK TABLE playback_events IN SHARE ROW EXCLUSIVE MODE;
+
 DELETE FROM playback_events
 WHERE event_id IN (
   SELECT event_id

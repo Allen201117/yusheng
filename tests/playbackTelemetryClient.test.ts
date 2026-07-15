@@ -311,6 +311,74 @@ it("flushes bounded pending events on pagehide with the original safe body and c
   assert.doesNotMatch(JSON.stringify(body), /audio|transcript|raw error/i);
 });
 
+it("flushes failed pending telemetry before SPA cleanup removes lifecycle listeners", async () => {
+  const order: string[] = [];
+  const handlers = new Map<string, () => void>();
+  const target = {
+    addEventListener(type: string, handler: () => void) { handlers.set(type, handler); },
+    removeEventListener(type: string) { order.push(`remove:${type}`); handlers.delete(type); },
+  };
+  const beacons: Blob[] = [];
+  const telemetry = createTrackedPlaybackTelemetry(
+    new Response(null, { headers: { "X-TTS-Attempt-ID": "attempt-unmount" } }),
+    true,
+    {
+      fetchImpl: async () => new Response(null, { status: 500 }),
+      randomUUID: () => "event-unmount-stable",
+      wait: async () => {},
+    },
+  );
+  assert.ok(telemetry);
+  await telemetry!.emit("play_started");
+  const cleanup = installPlaybackTelemetryFlushListeners(target, (_url, body) => {
+    order.push("beacon");
+    beacons.push(body);
+    return true;
+  });
+  cleanup();
+  assert.equal(beacons.length, 1);
+  assert.equal(
+    (JSON.parse(await beacons[0].text()) as { eventId: string }).eventId,
+    "event-unmount-stable",
+  );
+  assert.deepEqual(order, ["beacon", "remove:pagehide", "remove:beforeunload"]);
+  assert.equal(handlers.size, 0);
+  assert.equal(flushPendingPlaybackEvents(() => true), 0);
+});
+
+it("keeps a beacon-rejected unmount event bounded for the next flush", async () => {
+  const target = {
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  const telemetry = createTrackedPlaybackTelemetry(
+    new Response(null, { headers: { "X-TTS-Attempt-ID": "attempt-remount" } }),
+    true,
+    {
+      fetchImpl: async () => new Response(null, { status: 500 }),
+      randomUUID: () => "event-remount-stable",
+      wait: async () => {},
+    },
+  );
+  assert.ok(telemetry);
+  await telemetry!.emit("play_started");
+  let rejected = 0;
+  installPlaybackTelemetryFlushListeners(target, () => {
+    rejected += 1;
+    return false;
+  })();
+  assert.equal(rejected, 1);
+  const retried: Blob[] = [];
+  assert.equal(flushPendingPlaybackEvents((_url, body) => {
+    retried.push(body);
+    return true;
+  }), 1);
+  assert.equal(
+    (JSON.parse(await retried[0].text()) as { eventId: string }).eventId,
+    "event-remount-stable",
+  );
+});
+
 it("caps page-lifecycle pending telemetry at 32 safe events", async () => {
   const eventTypes = [
     "audio_ready", "play_started", "play_completed", "play_failed",

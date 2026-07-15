@@ -93,6 +93,7 @@ export function installPlaybackTelemetryFlushListeners(
   target.addEventListener("pagehide", flush);
   target.addEventListener("beforeunload", flush);
   return () => {
+    flush();
     target.removeEventListener("pagehide", flush);
     target.removeEventListener("beforeunload", flush);
   };

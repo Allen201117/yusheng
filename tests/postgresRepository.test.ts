@@ -203,6 +203,12 @@ it("adds the one-event-type-per-attempt playback uniqueness migration", async ()
     sql,
     /CREATE UNIQUE INDEX IF NOT EXISTS idx_playback_events_one_type_per_attempt\s+ON playback_events\(tts_attempt_id, event_type\)/,
   );
+  const lockAt = sql.indexOf("LOCK TABLE playback_events IN SHARE ROW EXCLUSIVE MODE");
+  const deleteAt = sql.indexOf("DELETE FROM playback_events");
+  const createAt = sql.indexOf("CREATE UNIQUE INDEX");
+  assert.ok(lockAt >= 0);
+  assert.ok(lockAt < deleteAt);
+  assert.ok(deleteAt < createAt);
 });
 
 it("locks the owner-scoped persona before atomically reusing an active restoration session", async () => {
