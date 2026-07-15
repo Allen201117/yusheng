@@ -55,8 +55,10 @@
 在已正确配置的环境运行：
 
 ```bash
-npm run report:restoration
+npm run --silent report:restoration
 ```
+
+必须保留 `--silent`；否则 npm 会把包名和实际命令横幅写入标准输出，下游就无法把整段输出当作 JSON 解析。
 
 该命令是全局运营聚合命令，不经用户 API，也没有新增公开路由。它只读取会话 ID、评价人 ID、健在/逝者分组、5 项分数和 3 条红线。查询和输出均不包含邮箱、人物名、评语、句子或转写、声音/供应商 ID、音频路径。
 

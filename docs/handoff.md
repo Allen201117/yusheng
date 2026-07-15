@@ -110,6 +110,7 @@ npm test
 npm run test:coverage
 npm run typecheck
 npm run build
+npm run --silent report:restoration
 git diff --check
 ```
 

@@ -9,7 +9,7 @@ Updated: 2026-07-15 (Asia/Shanghai)
 - `npm run typecheck`: passed.
 - `npm run build`: passed on Next.js 15.5.20 and includes `/api/chat`, `/api/tts`, `/api/playback-event` and `/api/conversation-feedback`.
 - `npm run db:migrate:dry`: passed and lists migrations `001` through `007`, including restoration feedback and playback-event cardinality.
-- Empty `npm run report:restoration`: returns zero evaluators/sessions/effective sessions, `null` rates and `bothCohortsMeetInitialGate:false`.
+- Empty `npm run --silent report:restoration`: returns one machine-readable JSON value with zero evaluators/sessions/effective sessions, `null` rates and `bothCohortsMeetInitialGate:false`.
 - `git diff --check`: passed.
 - Production local-storage guard: `NODE_ENV=production STORAGE_BACKEND=local` fails with `Production requires STORAGE_BACKEND=cloud`.
 - Provider preset local evidence: ready presets avoid Blob reads; stale preset URI errors mark the preset failed and retry dynamic cloning once; general provider outages do not double-call; deleting voices cannot start new synthesis.

@@ -551,7 +551,7 @@ Document the five scores, three red lines, three-audible-turn rule, and cohort g
 
 ```bash
 node --import tsx --test tests/restorationMetrics.test.ts tests/restorationFeedbackDb.test.ts tests/postgresRepository.test.ts
-npm run report:restoration
+npm run --silent report:restoration
 git diff --check
 git add scripts/report-restoration-feedback.ts docs/verification/restoration-feedback.md src/lib/storage/types.ts src/lib/db.ts src/lib/storage/repository.ts src/lib/storage/postgresRepository.ts tests/restorationMetrics.test.ts tests/restorationFeedbackDb.test.ts tests/postgresRepository.test.ts package.json CLAUDE.md docs/handoff.md docs/verification/production-foundation.md
 git commit -m "docs: report effective restoration evidence"
@@ -589,7 +589,7 @@ npm test
 npm run db:migrate:dry
 npm run typecheck
 npm run build
-npm run report:restoration
+npm run --silent report:restoration
 git diff --check
 git status --short
 ```
