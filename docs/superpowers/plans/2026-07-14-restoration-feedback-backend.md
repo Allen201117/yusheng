@@ -1,6 +1,6 @@
 # Effective Restoration Feedback Backend Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Implement this plan task-by-task and keep the checkbox (`- [ ]`) evidence current.
 
 **Goal:** Build an auditable backend that groups real voice conversations into sessions, traces server-issued sentences through TTS and playback events, accepts complete five-part feedback, and computes living/deceased effective-restoration rates without changing any page or visual behavior.
 
@@ -25,6 +25,7 @@
 Create:
 
 - `migrations/006_restoration_feedback.sql`
+- `migrations/007_playback_event_cardinality.sql`
 - `src/lib/restorationMetrics.ts`
 - `src/lib/ttsRoute.ts`
 - `src/lib/playbackEventRoute.ts`
@@ -594,7 +595,7 @@ git diff --check
 git status --short
 ```
 
-Expected: all tests pass; migration dry-run lists migration `006` and schema tests pass; build contains `/api/chat`, `/api/tts`, `/api/playback-event`, `/api/conversation-feedback`; report does not claim success; no unrelated/frontend file changed.
+Expected: all tests pass; migration dry-run lists migrations `006` and `007` and schema tests pass; build contains `/api/chat`, `/api/tts`, `/api/playback-event`, `/api/conversation-feedback`; report does not claim success; no unrelated or visual frontend file changed.
 
 - [ ] **Step 3: Independent completion audit**
 

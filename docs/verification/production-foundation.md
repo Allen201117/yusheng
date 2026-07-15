@@ -4,7 +4,7 @@ Updated: 2026-07-15 (Asia/Shanghai)
 
 ## Local evidence
 
-- Grounded focused regression bundle: 155 passed, 0 failed.
+- Grounded focused regression bundle: 166 passed, 0 failed.
 - `npm test`: 420 passed, 0 failed after adding restoration session/feedback qualification, browser playback telemetry, aggregate-report privacy coverage, and file-level proof for missing, permission-denied, invalid-path, non-regular/symlink, legacy, active-WAL, WAL-close-race, concurrent-growth, oversized, unsafe-temp-root and normal SQLite report paths.
 - `npm run typecheck`: passed.
 - `npm run build`: passed on Next.js 15.5.20 and includes `/api/chat`, `/api/tts`, `/api/playback-event` and `/api/conversation-feedback`.
