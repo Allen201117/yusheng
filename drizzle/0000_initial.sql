@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT UNIQUE, phone TEXT UNIQUE, password TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS verification_codes (id TEXT PRIMARY KEY, email TEXT, phone TEXT, code TEXT NOT NULL, expires_at TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS voices (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, prompt_text TEXT NOT NULL, object_key TEXT NOT NULL, mime_type TEXT NOT NULL, duration_sec REAL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS personas (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, relation TEXT NOT NULL, voice_id TEXT NOT NULL, persona_desc TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY, persona_id TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE, content TEXT NOT NULL, embedding BLOB, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, persona_id TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK (role IN ('user','assistant')), content TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tts_usage (user_id TEXT PRIMARY KEY, window_start INTEGER NOT NULL, count INTEGER NOT NULL);

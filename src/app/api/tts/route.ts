@@ -12,7 +12,7 @@ export async function POST(req: NextRequest) {
   if ("error" in auth) return auth.error;
 
   // 速率限制
-  const limit = checkTtsRateLimit(auth.userId);
+  const limit = await checkTtsRateLimit(auth.userId);
   if (!limit.allowed) {
     return NextResponse.json(
       {
@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
 
   let voiceId = (body.voiceId || "").trim();
   if (!voiceId && body.personaId) {
-    const p = getPersonaForUser(body.personaId.trim(), auth.userId);
+    const p = await getPersonaForUser(body.personaId.trim(), auth.userId);
     if (!p) return NextResponse.json({ error: "personaId 不存在或不属于你" }, { status: 403 });
     voiceId = p.voiceId;
   }

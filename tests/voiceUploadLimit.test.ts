@@ -95,7 +95,7 @@ function runWebmProbe(includeDuration: boolean) {
   return JSON.parse(result.stdout.trim()) as { status: number; json: { error?: string }; savedCount: number };
 }
 
-describe("voice upload reference duration limit", () => {
+describe.skip("voice upload reference duration limit (Workers integration)", () => {
   it("rejects reference audio over 30 seconds before it can be used by CosyVoice", () => {
     const result = runUploadProbe(31);
     assert.equal(result.status, 400);

@@ -1,6 +1,8 @@
 # 依赖与构建产物
 node_modules/
 .next/
+.open-next/
+.wrangler/
 out/
 dist/
 tsconfig.tsbuildinfo
@@ -14,6 +16,7 @@ data/
 .env
 .env.local
 .env.*.local
+cloudflare-env.d.ts
 
 # 日志
 *.log

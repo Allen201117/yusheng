@@ -14,10 +14,10 @@ export async function GET(req: NextRequest) {
   if (!personaId) return NextResponse.json({ error: "缺少 personaId" }, { status: 400 });
 
   // 越权检查
-  const p = getPersonaForUser(personaId, auth.userId);
+  const p = await getPersonaForUser(personaId, auth.userId);
   if (!p) return NextResponse.json({ error: "persona 不存在或不属于你" }, { status: 403 });
 
-  return NextResponse.json({ memories: listMemories(personaId) });
+  return NextResponse.json({ memories: await listMemories(personaId) });
 }
 
 export async function POST(req: NextRequest) {
@@ -33,7 +33,7 @@ export async function POST(req: NextRequest) {
   const personaId = (body.personaId || "").trim();
   if (!personaId) return NextResponse.json({ error: "缺少 personaId" }, { status: 400 });
 
-  const p = getPersonaForUser(personaId, auth.userId);
+  const p = await getPersonaForUser(personaId, auth.userId);
   if (!p) return NextResponse.json({ error: "persona 不存在或不属于你" }, { status: 403 });
 
   const contents: string[] = [];
@@ -56,7 +56,7 @@ export async function POST(req: NextRequest) {
     const inserted: { id: string; content: string }[] = [];
     for (let i = 0; i < contents.length; i++) {
       const id = randomUUID();
-      insertMemory({ id, personaId, content: contents[i], embedding: vectors[i] });
+      await insertMemory({ id, personaId, content: contents[i], embedding: vectors[i] });
       inserted.push({ id, content: contents[i] });
     }
     return NextResponse.json({ ok: true, inserted });
@@ -76,11 +76,11 @@ export async function DELETE(req: NextRequest) {
   if (!id) return NextResponse.json({ error: "缺少 id" }, { status: 400 });
 
   // 先查 memory 属于哪个 persona，再校验该 persona 属于当前用户
-  const mem = getMemoryById(id);
+  const mem = await getMemoryById(id);
   if (!mem) return NextResponse.json({ error: "记忆不存在" }, { status: 404 });
-  const p = getPersonaForUser(mem.personaId, auth.userId);
+  const p = await getPersonaForUser(mem.personaId, auth.userId);
   if (!p) return NextResponse.json({ error: "无权删除" }, { status: 403 });
 
-  deleteMemory(id);
+  await deleteMemory(id);
   return NextResponse.json({ ok: true });
 }

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
-import { createPersona, listPersonas, getPersonaForUser, getDb, countPersonasUsingVoice } from "@/lib/db";
+import { createPersona, listPersonas, getPersonaForUser, deletePersona, countPersonasUsingVoice } from "@/lib/db";
 import { loadVoiceForUser, deleteVoiceForUser } from "@/lib/voiceStore";
 import { requireAuth } from "@/lib/guard";
 
@@ -9,7 +9,7 @@ export const runtime = "nodejs";
 export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if ("error" in auth) return auth.error;
-  return NextResponse.json({ personas: listPersonas(auth.userId) });
+  return NextResponse.json({ personas: await listPersonas(auth.userId) });
 }
 
 export async function POST(req: NextRequest) {
@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
   const voice = await loadVoiceForUser(voiceId, auth.userId);
   if (!voice) return NextResponse.json({ error: "voiceId 不存在或不属于你" }, { status: 404 });
 
-  const persona = createPersona({
+  const persona = await createPersona({
     id: randomUUID(),
     userId: auth.userId,
     name,
@@ -52,16 +52,16 @@ export async function DELETE(req: NextRequest) {
   const id = req.nextUrl.searchParams.get("id") || "";
   if (!id) return NextResponse.json({ error: "缺少 id" }, { status: 400 });
 
-  const persona = getPersonaForUser(id, auth.userId);
+  const persona = await getPersonaForUser(id, auth.userId);
   if (!persona) return NextResponse.json({ error: "persona 不存在或不属于你" }, { status: 403 });
 
   const voiceId = persona.voiceId;
 
   // 先删 persona（memories/messages 级联删除）
-  getDb().prepare("DELETE FROM personas WHERE id = ?").run(id);
+  await deletePersona(id);
 
   // 仅当当前用户没有其他 persona 复用该 voice 时才清参考音频
-  if (countPersonasUsingVoice(voiceId, auth.userId) === 0) {
+  if ((await countPersonasUsingVoice(voiceId, auth.userId)) === 0) {
     await deleteVoiceForUser(voiceId, auth.userId);
   }
 

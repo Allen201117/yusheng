@@ -54,7 +54,7 @@ async function sendAndRespond(
   lastSent.set(target, now);
 
   const code = String(Math.floor(100000 + Math.random() * 900000));
-  createVerificationCode(
+  await createVerificationCode(
     type === "email" ? { email: target } : { phone: target },
     code,
     5,

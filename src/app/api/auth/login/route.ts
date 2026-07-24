@@ -33,16 +33,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "密码至少 4 位" }, { status: 400 });
   }
 
-  let user = getUserByEmail(email);
+  let user = await getUserByEmail(email);
 
   if (!user) {
     // 首次登录：自动注册
     const hash = await hashPassword(password);
-    user = createUserByEmail(email, hash);
+    user = await createUserByEmail(email, hash);
   } else if (!user.password) {
     // 老验证码用户首次设密码
     const hash = await hashPassword(password);
-    setUserPassword(email, hash);
+    await setUserPassword(email, hash);
     user.password = hash;
   } else {
     // 验证密码

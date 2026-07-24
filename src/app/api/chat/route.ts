@@ -40,15 +40,15 @@ export async function POST(req: NextRequest) {
   if (text.length > 500) return NextResponse.json({ error: "text 不得超过 500 字" }, { status: 400 });
 
   // 越权检查
-  const persona = getPersonaForUser(personaId, auth.userId);
+  const persona = await getPersonaForUser(personaId, auth.userId);
   if (!persona) return NextResponse.json({ error: "persona 不存在或不属于你" }, { status: 403 });
 
   // 写入用户消息
-  insertMessage({ id: randomUUID(), personaId, role: "user", content: text });
+  await insertMessage({ id: randomUUID(), personaId, role: "user", content: text });
 
   // 自伤词兜底 — 走 SSE 协议保持一致
   if (SELF_HARM_SIGNALS.some((w) => text.includes(w))) {
-    insertMessage({ id: randomUUID(), personaId, role: "assistant", content: SAFETY_REPLY });
+    await insertMessage({ id: randomUUID(), personaId, role: "assistant", content: SAFETY_REPLY });
     const safetyStream = new ReadableStream({
       start(controller) {
         const enc = new TextEncoder();
@@ -76,7 +76,7 @@ export async function POST(req: NextRequest) {
   let retrieved: { content: string; score: number }[] = [];
   try {
     const queryVec = await embedOne(text);
-    const all = loadMemoriesWithEmbeddings(personaId);
+    const all = await loadMemoriesWithEmbeddings(personaId);
     retrieved = all
       .map((m) => ({ content: m.content, score: cosineSim(queryVec, m.embedding) }))
       .filter((m) => m.score >= MIN_SCORE)
@@ -111,7 +111,7 @@ export async function POST(req: NextRequest) {
   // 按 token 估算截断历史消息，保留最近 ~2000 tokens 的上下文
   const MAX_HISTORY_TOKENS = 2000;
   const MIN_KEEP = 4;
-  const historyRaw = listMessages(personaId, 100);
+  const historyRaw = await listMessages(personaId, 100);
   let history = historyRaw;
   {
     let estTokens = 0;
@@ -149,7 +149,7 @@ export async function POST(req: NextRequest) {
         }
 
         const finalReply = fullReply.trim() || "嗯。";
-        insertMessage({ id: randomUUID(), personaId, role: "assistant", content: finalReply });
+        await insertMessage({ id: randomUUID(), personaId, role: "assistant", content: finalReply });
         controller.enqueue(
           encoder.encode(`data: ${JSON.stringify({ done: true, reply: finalReply })}\n\n`),
         );
@@ -183,8 +183,8 @@ export async function GET(req: NextRequest) {
   const personaId = req.nextUrl.searchParams.get("personaId") || "";
   if (!personaId) return NextResponse.json({ error: "缺少 personaId" }, { status: 400 });
 
-  const p = getPersonaForUser(personaId, auth.userId);
+  const p = await getPersonaForUser(personaId, auth.userId);
   if (!p) return NextResponse.json({ error: "persona 不存在或不属于你" }, { status: 403 });
 
-  return NextResponse.json({ messages: listMessages(personaId, 200) });
+  return NextResponse.json({ messages: await listMessages(personaId, 200) });
 }
